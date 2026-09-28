@@ -1,0 +1,60 @@
+package com.rsps1008.sleeptrace.motion
+
+import android.content.ContentValues
+import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
+import androidx.core.content.edit
+import androidx.core.database.sqlite.transaction
+
+class MotionSettings(context: Context) {
+    private val prefs = context.getSharedPreferences("sleeptrace_motion", Context.MODE_PRIVATE)
+    var enabled: Boolean
+        get() = prefs.getBoolean("enabled", false)
+        set(value) = prefs.edit { putBoolean("enabled", value) }
+    var placement: Placement
+        get() = Placement.valueOf(prefs.getString("placement", Placement.BED.name)!!)
+        set(value) = prefs.edit { putString("placement", value.name) }
+    var status: String
+        get() = prefs.getString("status", "尚未啟動")!!
+        set(value) = prefs.edit { putString("status", value) }
+}
+
+/** Stores minute features only; no raw accelerometer stream. Inserts are batched in one transaction. */
+class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 1) {
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE minutes (start INTEGER PRIMARY KEY, covered INTEGER NOT NULL, active INTEGER NOT NULL, squared REAL NOT NULL, samples INTEGER NOT NULL, placement TEXT NOT NULL)")
+    }
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+
+    fun append(minutes: List<MotionMinute>, now: Long = System.currentTimeMillis()) {
+        val db = writableDatabase
+        db.transaction {
+            minutes.forEach { item ->
+                // Restarting or changing mode can yield two partial contributions to the same minute.
+                val existing = read(item.startMillis, item.startMillis + MINUTE_MS).firstOrNull()
+                val compatible = existing?.takeIf { it.placement == item.placement }
+                val row = ContentValues().apply {
+                    put("start", item.startMillis)
+                    put("covered", minOf(MINUTE_MS, item.coveredMillis + (compatible?.coveredMillis ?: 0)))
+                    put("active", minOf(MINUTE_MS, item.activeMillis + (compatible?.activeMillis ?: 0)))
+                    put("squared", item.squaredDeltaTime + (compatible?.squaredDeltaTime ?: 0.0))
+                    put("samples", item.sampleCount + (compatible?.sampleCount ?: 0))
+                    put("placement", item.placement.name)
+                }
+                db.insertWithOnConflict("minutes", null, row, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+            db.delete("minutes", "start < ?", arrayOf((now - 14L * 24 * 60 * MINUTE_MS).toString()))
+        }
+    }
+
+    fun read(start: Long, end: Long): List<MotionMinute> = readableDatabase.query(
+        "minutes", null, "start >= ? AND start < ?", arrayOf(start.toString(), end.toString()), null, null, "start ASC"
+    ).use { cursor ->
+        buildList {
+            while (cursor.moveToNext()) add(MotionMinute(
+                cursor.getLong(0), cursor.getLong(1), cursor.getLong(2), cursor.getDouble(3), cursor.getInt(4), Placement.valueOf(cursor.getString(5))
+            ))
+        }
+    }
+}

@@ -1,0 +1,4 @@
+<resources>
+    <string name="health_data_usage_title">睡眠資料使用說明</string>
+    <string name="health_data_usage">眠迹使用 Google Sleep API、手機使用紀錄及你開啟的加速度計功能推估睡眠。\n\n睡眠與動作摘要保存在本機；動作摘要於寫入時清理超過 14 天的資料，不保存原始感測波形。\n\n授予睡眠寫入權後，App 會自動將推估的入睡、醒來及已知清醒區段寫入 Health Connect，不需要逐筆確認。這些推估不包含深眠、淺眠或 REM。\n\n本版本不讀取其他 App 的健康紀錄。其他 App 是否能取得本 App 寫入的睡眠，取決於你在 Health Connect 給予它們的權限。\n\n你可以在系統設定撤銷睡眠寫入權，並在 Health Connect 管理或刪除已寫入的資料；清除眠迹的應用程式資料可移除本機紀錄，但不會同步刪除 Health Connect 已保存的資料。</string>
+</resources>
