@@ -11,6 +11,11 @@ import android.os.Bundle
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.withResumed
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -46,6 +51,7 @@ import java.time.format.DateTimeFormatter
 
 class MainActivity : AppCompatActivity() {
     private lateinit var content: LinearLayout
+    private lateinit var scroll: ScrollView
     private val preferences by lazy { SleepPreferences(this) }
     private val store by lazy { SleepStore(this) }
     private val healthSync by lazy { HealthConnectSync(this) }
@@ -67,8 +73,7 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
         if (SleepTracker.hasActivityRecognition(this)) {
-            subscribe()
-            if (motionSettings.enabled) startMotion()
+            ensureAutomaticRecording()
         }
         if (continueStartupPermissionFlow) {
             continueStartupPermissionFlow = false
@@ -79,17 +84,27 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         title = getString(R.string.app_name)
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             isFocusableInTouchMode = true
             setPadding(dp(16), dp(16), dp(16), dp(32))
         }
-        setContentView(ScrollView(this).apply {
+        scroll = ScrollView(this).apply {
             isFillViewport = true
+            isFocusableInTouchMode = true
+            descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
             addView(content)
-        })
-        content.requestFocus()
+        }
+        setContentView(scroll)
+        ViewCompat.setOnApplyWindowInsetsListener(scroll) { view, insets ->
+            val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
+        ViewCompat.requestApplyInsets(scroll)
+        scroll.requestFocus()
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("sleeptrace_reconcile_now").observe(this) { refresh() }
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("sleeptrace_reconcile").observe(this) { refresh() }
         refresh()
@@ -99,6 +114,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         WorkScheduler.schedule(this)
         WorkScheduler.reconcileSoon(this)
+        ensureAutomaticRecording()
         if (!startupPermissionCheckDone) {
             startupPermissionCheckDone = true
             requestMissingPermissionsAtStartup()
@@ -109,23 +125,22 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         refreshJob?.cancel()
         refreshJob = lifecycleScope.launch {
+            // Fetch before changing the view tree: async gaps used to collapse the scroll content.
+            val configured = preferences.configured()
+            val schedule = if (configured) preferences.schedule() else null
+            val sessions = withContext(Dispatchers.IO) { store.sessions() }
+            val healthGranted = healthSync.hasWritePermission()
+            val previousScroll = scroll.scrollY
             content.removeAllViews()
             renderHeader()
-
-            val configured = preferences.configured()
             if (!configured) {
                 renderSetupGuide()
-                return@launch
+            } else {
+                renderSleepSection(sessions)
+                renderScheduleCard(schedule!!)
+                renderPermissionsSection(healthGranted)
             }
-
-            val sessions = store.sessions()
-            renderSleepSection(sessions)
-
-            val schedule = preferences.schedule()
-            renderScheduleCard(schedule)
-
-            renderMotionSection()
-            renderPermissionsSection()
+            scroll.post { scroll.scrollTo(0, previousScroll) }
         }
     }
 
@@ -141,7 +156,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(color(R.color.text_primary))
         }
         val subtitleView = TextView(this).apply {
-            text = "省電睡眠自動推估 · 自動同步 Health Connect"
+            text = "安心睡覺，醒來查看紀錄"
             textSize = 13f
             setTextColor(color(R.color.text_secondary))
             setPadding(0, dp(2), 0, 0)
@@ -192,7 +207,7 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(16), dp(16), dp(16), dp(16))
             }
             val emptyText = TextView(this).apply {
-                text = "尚無紀錄。Sleep API 的資料通常在夜間結束或起床後送達並推估。"
+                text = "準備好迎接第一晚。睡眠時間會在起床後自動整理並同步，不需要每天操作。"
                 textSize = 14f
                 setTextColor(color(R.color.text_secondary))
             }
@@ -227,12 +242,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        content.addView(TextView(this).apply {
-            text = "睡眠階段（深眠、淺眠與 REM）未在此版本估計，因手機放置位置與低頻感測資料不足以可靠區分。"
-            textSize = 12f
-            setTextColor(color(R.color.text_tertiary))
-            setPadding(dp(4), 0, dp(4), dp(12))
-        })
     }
 
     private fun createLatestSessionCard(session: SleepSession): MaterialCardView {
@@ -260,7 +269,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(topRow)
 
         val durationLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             gravity = Gravity.BOTTOM
             setPadding(0, dp(10), 0, dp(8))
         }
@@ -279,6 +288,13 @@ class MainActivity : AppCompatActivity() {
         durationLayout.addView(durationValue)
         durationLayout.addView(durationLabel)
         layout.addView(durationLayout)
+        layout.addView(TextView(this).apply {
+            val time = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
+            text = getString(R.string.sleep_times, time.format(Instant.ofEpochMilli(session.startMillis)), time.format(Instant.ofEpochMilli(session.endMillis)))
+            textSize = 16f
+            setTextColor(color(R.color.text_primary))
+            setPadding(0, 0, 0, dp(8))
+        })
 
         val metricsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -286,28 +302,14 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, dp(10))
         }
         val awakeText = TextView(this).apply {
-            text = "排除手機使用：${formatDuration(session.awakeMillis)}"
+            text = getString(R.string.excluded_phone_time, formatDuration(session.awakeMillis))
             textSize = 13f
             setTextColor(color(R.color.text_secondary))
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val scoreText = TextView(this).apply {
-            text = "參考分數：${session.confidence}/100"
-            textSize = 13f
-            setTextColor(color(R.color.text_secondary))
-        }
         metricsRow.addView(awakeText)
-        metricsRow.addView(scoreText)
+        // Technical confidence and source details remain available in the optional details dialog.
         layout.addView(metricsRow)
-
-        val reasonText = TextView(this).apply {
-            text = "${session.reason}（工程規則參考分數，非臨床準確率）"
-            textSize = 12f
-            setTextColor(color(R.color.text_tertiary))
-            setLineSpacing(0f, 1.15f)
-            setPadding(0, 0, 0, dp(14))
-        }
-        layout.addView(reasonText)
 
         val actionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -355,7 +357,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(color(R.color.text_primary))
             }
             val subView = TextView(this@MainActivity).apply {
-                text = "${formatDuration(session.durationMillis)} · 排除手機 ${formatDuration(session.awakeMillis)} · 分數 ${session.confidence}"
+                text = getString(R.string.sleep_duration_summary, formatDuration(session.durationMillis), formatDuration(session.awakeMillis))
                 textSize = 12f
                 setTextColor(color(R.color.text_secondary))
                 setPadding(0, dp(2), 0, 0)
@@ -372,7 +374,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun syncBadgeStyle(state: SyncState): Triple<String, Int, Int> {
         return when (state) {
-            SyncState.SYNCED -> Triple("已寫入 Health Connect", color(R.color.status_success), color(R.color.status_success_bg))
+            SyncState.SYNCED -> Triple("已同步", color(R.color.status_success), color(R.color.status_success_bg))
             SyncState.PENDING -> Triple("等待自動同步", color(R.color.status_info), color(R.color.status_info_bg))
             SyncState.SYNCING -> Triple("同步中…", color(R.color.status_info), color(R.color.status_info_bg))
             SyncState.FAILED -> Triple("同步失敗待重試", color(R.color.status_warning), color(R.color.status_warning_bg))
@@ -409,7 +411,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(topRow)
 
         val modeLabel = TextView(this).apply {
-            text = "模式：省電自動偵測（Google Sleep API）"
+            text = if (motionSettings.enabled) "自動記錄已開啟" else "自動記錄已暫停"
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(color(R.color.purple_500))
@@ -418,206 +420,31 @@ class MainActivity : AppCompatActivity() {
         layout.addView(modeLabel)
 
         val noteText = TextView(this).apply {
-            text = "只在設定的時段內分析，結合已知手機使用與動作資料自動選擇最佳推估並同步至 Health Connect，不需要逐筆確認。"
+            setText(R.string.automatic_recording_description)
             textSize = 13f
             setTextColor(color(R.color.text_secondary))
             setLineSpacing(0f, 1.2f)
         }
         layout.addView(noteText)
+        layout.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = if (motionSettings.enabled) "暫停自動記錄" else "恢復自動記錄"
+            isAllCaps = false
+            setOnClickListener {
+                motionSettings.enabled = !motionSettings.enabled
+                if (motionSettings.enabled) ensureAutomaticRecording()
+                else {
+                    runCatching { SleepTracker.unsubscribe(this@MainActivity) }
+                    if (MotionService.active != null) startService(Intent(this@MainActivity, MotionService::class.java).setAction(MotionService.ACTION_STOP))
+                }
+                refresh()
+            }
+        })
 
         card.addView(layout)
         content.addView(card)
     }
 
-    private suspend fun renderMotionSection() {
-        content.addView(createSectionTitle("動作感測（加速度計＋批次）"))
-        val card = createCard()
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(18), dp(16))
-        }
-
-        val placementLabel = if (motionSettings.placement == Placement.BED) "手機放在床上" else "手機放在床邊"
-        val isRunning = MotionService.active != null
-        val statusText = if (isRunning) "偵測服務執行中" else if (motionSettings.enabled) "已中斷／待啟動" else "尚未開啟"
-        val (statusTextColor, statusBgColor) = when {
-            isRunning -> color(R.color.status_success) to color(R.color.status_success_bg)
-            motionSettings.enabled -> color(R.color.status_warning) to color(R.color.status_warning_bg)
-            else -> color(R.color.status_neutral) to color(R.color.status_neutral_bg)
-        }
-
-        val topRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val placementTitle = TextView(this).apply {
-            text = placementLabel
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(color(R.color.text_primary))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        val statusBadge = createBadge(statusText, statusTextColor, statusBgColor)
-        topRow.addView(placementTitle)
-        topRow.addView(statusBadge)
-        layout.addView(topRow)
-
-        val modeDesc = TextView(this).apply {
-            text = if (motionSettings.placement == Placement.BED)
-                "床上模式：未供電 5 Hz、供電 10 Hz，硬體批次最長 60 秒（無 FIFO 降為 1 Hz）。未供電且電量 ≤ 15% 暫停。"
-            else
-                "床邊模式：只記錄手機動作，不從靜止推論使用者睡眠。"
-            textSize = 13f
-            setTextColor(color(R.color.text_secondary))
-            setPadding(0, dp(4), 0, dp(8))
-            setLineSpacing(0f, 1.15f)
-        }
-        layout.addView(modeDesc)
-
-        val changePlacementBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = "變更放置位置（$placementLabel）"
-            isAllCaps = false
-            setOnClickListener {
-                MaterialAlertDialogBuilder(this@MainActivity).setTitle("今晚手機放在哪裡？")
-                    .setSingleChoiceItems(arrayOf("床上：可輔助推估睡眠", "床邊：只記錄手機動作"), motionSettings.placement.ordinal) { dialog, which ->
-                        motionSettings.placement = Placement.entries[which]
-                        MotionService.active?.refreshConfiguration()
-                        dialog.dismiss()
-                        refresh()
-                    }.setNegativeButton("取消", null).show()
-            }
-        }
-        layout.addView(changePlacementBtn)
-
-        val now = System.currentTimeMillis()
-        val (minutes, usage) = withContext(Dispatchers.IO) {
-            val rows = MotionStore(this@MainActivity).use { it.read(now - 24 * 60 * MINUTE_MS, now) }
-            rows to if (rows.isEmpty()) emptyList() else UsageMonitor.interactionIntervals(this@MainActivity, rows.first().startMillis, now)
-        }
-
-        val timelineSectionTitle = TextView(this).apply {
-            text = "最近 24 小時動作時間軸"
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(color(R.color.text_primary))
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        layout.addView(timelineSectionTitle)
-
-        if (minutes.isEmpty()) {
-            val emptyTimeline = TextView(this).apply {
-                text = "最近 24 小時尚無動作摘要。啟用後，摘要約每 5～6 分鐘更新一次。"
-                textSize = 13f
-                setTextColor(color(R.color.text_secondary))
-                setPadding(0, dp(2), 0, dp(10))
-            }
-            layout.addView(emptyTimeline)
-        } else {
-            val formatter = DateTimeFormatter.ofPattern("MM/dd HH:mm").withZone(ZoneId.systemDefault())
-            val start = minutes.first().startMillis
-            val end = minutes.last().startMillis + MINUTE_MS
-            val quiet = minutes.count { it.placement == Placement.BED && it.level == MotionLevel.QUIET }
-            val active = minutes.count { it.placement == Placement.BED && it.level == MotionLevel.ACTIVE }
-            val unknown = ((end - start) / MINUTE_MS - quiet - active).coerceAtLeast(0)
-
-            val timeRangeText = TextView(this).apply {
-                text = "${formatter.format(Instant.ofEpochMilli(start))} ～ ${formatter.format(Instant.ofEpochMilli(end))}"
-                textSize = 12f
-                setTextColor(color(R.color.text_secondary))
-                setPadding(0, 0, 0, dp(6))
-            }
-            layout.addView(timeRangeText)
-
-            val timelineWrapper = MaterialCardView(this).apply {
-                radius = dp(8).toFloat()
-                cardElevation = 0f
-                strokeWidth = dp(1)
-                setStrokeColor(color(R.color.card_stroke))
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)).apply {
-                    setMargins(0, 0, 0, dp(8))
-                }
-                addView(MotionTimelineView(this@MainActivity, minutes, usage).apply {
-                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT)
-                    contentDescription = "動作時間軸：安靜 $quiet 分鐘，活動 $active 分鐘，未知或床邊 $unknown 分鐘；紅色為手機使用"
-                })
-            }
-            layout.addView(timelineWrapper)
-
-            val legendRow = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 0, 0, dp(6))
-            }
-            legendRow.addView(createLegendDot(Color.rgb(71, 113, 193), "安靜 ${quiet}m"))
-            legendRow.addView(createLegendDot(Color.rgb(225, 139, 38), "活動 ${active}m"))
-            legendRow.addView(createLegendDot(Color.GRAY, "未知/床邊 ${unknown}m"))
-            legendRow.addView(createLegendDot(Color.rgb(210, 67, 67), "手機使用"))
-            layout.addView(legendRow)
-
-            val timelineExplain = TextView(this).apply {
-                text = "（摘要分鐘數不是睡眠總時數）每日時段結束後，連續安靜至少 20 分鐘且總區段至少 30 分鐘，App 會自動採用最佳推估並同步。已知手機使用、中斷或持續活動會切斷區段。"
-                textSize = 12f
-                setTextColor(color(R.color.text_tertiary))
-                setLineSpacing(0f, 1.15f)
-                setPadding(0, 0, 0, dp(8))
-            }
-            layout.addView(timelineExplain)
-        }
-
-        val buttonRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, 0)
-        }
-        val toggleBtn = MaterialButton(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(8)
-            }
-            isAllCaps = false
-            if (MotionService.active == null) {
-                text = if (motionSettings.enabled) "重新啟動動作偵測" else "開啟動作偵測"
-                setOnClickListener {
-                    motionSettings.enabled = true
-                    if (!SleepTracker.hasActivityRecognition(this@MainActivity)) requestCorePermissions() else startMotion()
-                }
-            } else {
-                text = "關閉動作偵測"
-                setOnClickListener {
-                    motionSettings.enabled = false
-                    startService(Intent(this@MainActivity, MotionService::class.java).setAction(MotionService.ACTION_STOP))
-                    refresh()
-                }
-            }
-        }
-        val updateBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            text = "手動更新試算"
-            isAllCaps = false
-            setOnClickListener {
-                lifecycleScope.launch {
-                    withContext(Dispatchers.IO) { SleepReconciler(this@MainActivity).reconcile() }
-                    WorkScheduler.reconcileSoon(this@MainActivity)
-                    refresh()
-                }
-            }
-        }
-        buttonRow.addView(toggleBtn)
-        buttonRow.addView(updateBtn)
-        layout.addView(buttonRow)
-
-        val motionNote = TextView(this).apply {
-            text = "啟用後會有常駐通知，僅在設定時段取樣。重開機或遭系統終止後，請開啟 App 重新啟動。安靜不代表深眠；這版不推估深眠、淺眠或 REM。"
-            textSize = 12f
-            setTextColor(color(R.color.text_tertiary))
-            setPadding(0, dp(8), 0, 0)
-        }
-        layout.addView(motionNote)
-
-        card.addView(layout)
-        content.addView(card)
-    }
-
-    private suspend fun renderPermissionsSection() {
+    private fun renderPermissionsSection(healthGranted: Boolean) {
         content.addView(createSectionTitle("系統連線與權限"))
         val card = createCard()
         val layout = LinearLayout(this).apply {
@@ -627,10 +454,16 @@ class MainActivity : AppCompatActivity() {
 
         val activityGranted = SleepTracker.hasActivityRecognition(this)
         val usageGranted = UsageMonitor.hasAccess(this)
-        val healthGranted = healthSync.hasWritePermission()
         val allGranted = activityGranted && usageGranted && healthGranted
 
-        layout.addView(createPermissionItem("活動辨識", "Sleep API 與動作感測必要", activityGranted))
+        if (allGranted) {
+            layout.addView(createBadge("✓ 已準備好，自動記錄與同步", color(R.color.status_success), color(R.color.status_success_bg)))
+            card.addView(layout)
+            content.addView(card)
+            return
+        }
+
+        layout.addView(createPermissionItem("睡眠偵測", "允許 App 自動記錄", activityGranted))
         layout.addView(createDivider())
         layout.addView(createPermissionItem("使用情況存取", "排除夜間使用手機時間", usageGranted, if (!usageGranted) "未授權時無法排除手機使用" else null))
         layout.addView(createDivider())
@@ -708,31 +541,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun createLegendDot(dotColor: Int, label: String): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, dp(10), 0)
-
-            val dot = View(this@MainActivity).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
-                    marginEnd = dp(4)
-                }
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(dotColor)
-                }
-            }
-            val text = TextView(this@MainActivity).apply {
-                this.text = label
-                textSize = 11f
-                setTextColor(color(R.color.text_secondary))
-            }
-            addView(dot)
-            addView(text)
-        }
-    }
-
     private fun createSectionTitle(title: String): TextView = TextView(this).apply {
         text = title
         textSize = 14f
@@ -775,12 +583,16 @@ class MainActivity : AppCompatActivity() {
         setPadding(dp(8), dp(3), dp(8), dp(3))
     }
 
-    private fun startMotion() {
-        runCatching { MotionService.start(this) }.onFailure {
-            motionSettings.enabled = false
-            showMessage("無法啟動動作偵測：${it.message}")
+    private fun ensureAutomaticRecording() = lifecycleScope.launch {
+        if (!preferences.configured() || !motionSettings.enabled || !SleepTracker.hasActivityRecognition(this@MainActivity)) return@launch
+        lifecycle.withResumed {
+            if (motionSettings.enabled) {
+                SleepTracker.subscribe(this@MainActivity)
+                if (MotionService.active == null) runCatching { MotionService.start(this@MainActivity) }.onFailure {
+                    motionSettings.status = "系統暫時無法啟動記錄，重新開啟 App 後會自動再試"
+                }
+            }
         }
-        content.postDelayed({ if (!isFinishing && !isDestroyed) refresh() }, 500)
     }
 
     private fun chooseSchedule(existing: SleepSchedule? = null) {
@@ -806,7 +618,7 @@ class MainActivity : AppCompatActivity() {
         preferences.saveSchedule(schedule)
         MotionService.active?.refreshConfiguration()
         WorkScheduler.schedule(this@MainActivity)
-        subscribe()
+        ensureAutomaticRecording()
         refresh()
     }
 

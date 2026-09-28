@@ -19,7 +19,7 @@ class MotionTimelineView @JvmOverloads constructor(context: Context, private val
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
         minutes.forEach { minute ->
             paint.color = when {
-                minute.placement == Placement.BEDSIDE -> Color.GRAY
+                minute.placement != Placement.BED -> Color.GRAY
                 minute.level == MotionLevel.UNKNOWN -> Color.GRAY
                 minute.level == MotionLevel.ACTIVE -> Color.rgb(225, 139, 38)
                 else -> Color.rgb(71, 113, 193)

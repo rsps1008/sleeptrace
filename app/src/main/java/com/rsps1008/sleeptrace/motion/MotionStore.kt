@@ -10,11 +10,9 @@ import androidx.core.database.sqlite.transaction
 class MotionSettings(context: Context) {
     private val prefs = context.getSharedPreferences("sleeptrace_motion", Context.MODE_PRIVATE)
     var enabled: Boolean
-        get() = prefs.getBoolean("enabled", false)
-        set(value) = prefs.edit { putBoolean("enabled", value) }
-    var placement: Placement
-        get() = Placement.valueOf(prefs.getString("placement", Placement.BED.name)!!)
-        set(value) = prefs.edit { putString("placement", value.name) }
+        // Old motion opt-in and placement settings no longer control automatic recording.
+        get() = prefs.getBoolean("recording_enabled", true)
+        set(value) = prefs.edit { putBoolean("recording_enabled", value) }
     var status: String
         get() = prefs.getString("status", "尚未啟動")!!
         set(value) = prefs.edit { putString("status", value) }

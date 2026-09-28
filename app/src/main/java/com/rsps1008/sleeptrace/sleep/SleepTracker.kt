@@ -9,6 +9,7 @@ import android.os.Build
 import com.google.android.gms.location.ActivityRecognition
 import com.google.android.gms.location.SleepSegmentRequest
 import com.rsps1008.sleeptrace.data.SleepPreferences
+import com.rsps1008.sleeptrace.motion.MotionSettings
 
 object SleepTracker {
     private const val REQUEST_CODE = 1001
@@ -37,6 +38,6 @@ object SleepTracker {
         return PendingIntent.getBroadcast(context, REQUEST_CODE, intent, flags)
     }
     suspend fun resubscribeIfConfigured(context: Context) {
-        if (SleepPreferences(context).configured() && hasActivityRecognition(context)) subscribe(context)
+        if (SleepPreferences(context).configured() && MotionSettings(context).enabled && hasActivityRecognition(context)) subscribe(context)
     }
 }

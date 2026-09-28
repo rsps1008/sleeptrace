@@ -6,6 +6,7 @@
 
 - Android 手機睡眠推估 App，名稱 **眠迹 SleepTrace**，applicationId／namespace 為 `com.rsps1008.sleeptrace`，Gradle 專案名稱為 `SleepTrace`。工作目錄目前為 `E:\Git\sleep`，保留現有名稱與包名，除非使用者要求更名。
 - 優先省電；接受不非常精準的推估，但要以實際可取得的資料判斷。手機通常放在床上，也必須處理床邊放置情況。
+- **放置位置與動作偵測由 App 自動處理，不要要求使用者選床上／床邊或另外開啟感測器。首頁以睡眠時間與記錄狀態為主，避免顯示感測器參數／診斷圖表。**
 - 已知的手機使用時間不可算成睡眠。沒有使用情況存取權時，程式仍使用其餘資料自動推估，並顯示無法排除手機使用的限制；不可宣稱此時已完整排除。
 - **所有有效睡眠候選由 App 自行選擇最佳推估並自動同步，不要恢復「待確認」、逐筆確認上傳或低分需使用者裁決的流程。**
 - 低參考分數不阻擋上傳；不足以形成有效睡眠紀錄的資料由 App 自動略過。系統權限仍由使用者授予，不能由 App 代為同意。
@@ -46,7 +47,8 @@
 
 ### 加速度計與省電
 
-- 需要使用者開啟「加速度計＋批次處理」；目前預設關閉。使用者選擇 `BED`（床上）或 `BEDSIDE`（床邊），程式沒有可靠的自動放置位置辨識。
+- 完成時段設定及活動辨識授權後自動啟動感測。新資料保存為 `AUTO`，由 `AutomaticPlacement` 在分析時推估床上／床邊／未知，不使用舊版手動位置設定。原始分鐘資料仍保留，以便重算。
+- 新的 `recording_enabled` 預設 true，取代舊版感測器 `enabled`；原來沒開啟動作感測的使用者升級後也會自動記錄。首頁與通知只保留整體「暫停／恢復自動記錄」，明確暫停後不自動重啟。
 - 有硬體 FIFO 時，未接電源要求 5 Hz，接電要求 10 Hz；批次最長 60 秒，並限制在 FIFO 容量 × 取樣間隔 × 80%。硬體最小取樣間隔也會限制請求頻率。
 - 無 FIFO 時降為 1 Hz，不能宣稱有硬體批次。優先選有 FIFO 的 wake-up accelerometer；非 wake-up 感測器休眠時可能缺資料。
 - 未接電且電量 ≤ 15% 暫停；接電或電量恢復後重新評估。時段外不取樣，但保留前景服務通知與邊界排程。
@@ -55,12 +57,14 @@
 - 每分鐘保存覆蓋時間、活動時間、三軸變化 RMS 所需統計、樣本數及放置模式，不保存原始波形。約每 5 分鐘用 SQLite 交易寫入。
 - 暫停、切換模式或正常停止先要求 sensor flush，最多等待 2 秒，再保存已收到資料。直接殺死程序可能遺失最後約 5 分鐘未存摘要及未送達批次，不能將缺口補成安靜。
 - 每分鐘有效覆蓋至少 45 秒才分類。相鄰三軸差值 ≥ 0.15 m/s² 算活動；活動時間比例 ≥ 5% 或差值 RMS ≥ 0.20 m/s²，該分鐘標示活動。門檻尚未校準。
-- 前景服務使用 `START_NOT_STICKY`。重開機、強制停止或系統終止後，需要使用者回 App 重新啟動動作偵測；不要把「自動同步」誤解為服務一定能自動復活。
+- 正常前景服務使用 `START_STICKY`；開機／套件更新接收器會在已設定、未暫停且有權限時嘗試恢復服務。App 恢復前景也會自動補啟動，無需感測器按鈕。強制停止及 OEM 背景限制仍可能阻止恢復；不能承諾永不漏記。啟動失敗不會把整體記錄開關自動關閉。
 - 使用 `setAndAllowWhileIdle` 的非精準時段邊界鬧鐘，可能延後啟動。沒有精準鬧鐘授權；資料事件也會檢查時段。
 
 ### 動作候選與來源選擇
 
-- 床邊模式只記錄手機動作，不從靜止推論使用者睡眠。
+- `AutomaticPlacement` 在連續有效的分鐘摘要內，以前後各最多 30 分鐘的鄰近資料估計訊號是否隨床面動作變化。至少 20 分鐘資料，出現至少 3 個短動作分鐘且首末相隔至少 8 分鐘，才提供床上證據；短動作定義為 RMS 0.015～1.5 m/s²、活動 200～12,000 ms。
+- 至少 25 分鐘幾乎完全靜止（RMS < 0.008、活動為零）視為床邊傾向；其他情況為未知。手機使用前後 2 分鐘、資料不足／缺口及 RMS > 1.5 的劇烈動作會切斷判斷區段。這是未經實機校準的啟發式，不是可靠的物理位置辨識。
+- 床邊或未知資料不單獨產生動作睡眠候選，仍可採用 Sleep API 與手機使用紀錄。不能因整晚靜止就直接算整晚睡眠；舊資料的 BED／BEDSIDE 標記保留相容性。
 - 床上模式連續安靜 20 分鐘後回推起點，完整區段至少 30 分鐘才成為候選；等每日偵測時段結束才產生。
 - 已知手機使用、缺失／覆蓋不足資料會切斷候選；持續活動 5 分鐘也會切斷。短暫翻動不直接視為清醒。
 - 每時段只取最長的動作候選，參考分數目前為 50。這可能少算分段睡眠。
@@ -69,13 +73,9 @@
 
 ### 畫面
 
-- 首頁採用 Material 3 卡片式視覺層次（`MaterialCardView`），區塊由上至下依核心流程呈現：
-  1. **最近睡眠紀錄**：大字體時長、同步狀態 Badge（已寫入／等待同步／同步中／失敗／略過）、夜間手機使用與參考分數指標，提供「自選修正時間」與「查看完整詳情」按鈕；下方依序呈現歷史紀錄。
-  2. **自動偵測排程**：大字顯示時段，提供「修改時段」按鈕與模式說明。
-  3. **動作感測與時間軸**：放置模式與狀態 Badge、切換放置位置按鈕、帶圓角容器的 24 小時時間軸圖表與彩色圖例標籤（安靜/活動/未知/手機使用）、開關與手動試算按鈕。
-  4. **系統連線與權限**：條列活動辨識、使用情況存取、Health Connect 狀態，全數就緒時顯示綠色打勾收斂，缺權限時提供醒目引導授權按鈕。
-- 最近 24 小時動作時間軸：藍色安靜、橙色活動、灰色未知／床邊、紅色手機使用。摘要分鐘數不是睡眠總時數。
-- 「更新動作紀錄與睡眠試算」是手動刷新捷徑，不是自動同步的必要條件。
+- 首頁保留既有 MaterialCardView 視覺：最近睡眠與歷史、每日時段及整體暫停／恢復、必要權限。權限就緒後只顯示簡短狀態；參考分數及判斷理由留在自選詳情中。
+- 不再顯示放置選擇、動作開關、頻率／FIFO 參數、動作時間軸或手動試算按鈕。前景通知顯示自動睡眠記錄，仍遵守 Android 必要通知要求。
+- 主畫面使用 `Theme.SleepTrace.Home` 無 ActionBar，加上單一自訂標題。`enableEdgeToEdge` 搭配 systemBars／displayCutout insets，避免狀態列、瀏海及導覽列遮擋。更新前先取得資料，再同步重建畫面並保留捲動位置；不得重加第二個標題列或固定狀態列高度。
 
 ## 4. 自動同步、資料完整性與重試
 
@@ -99,18 +99,19 @@
 
 | 路徑 | 責任 |
 | --- | --- |
-| `MainActivity.kt` | 首頁、權限、動作控制、時間修正、觀察背景工作更新畫面 |
+| `MainActivity.kt` | 簡化首頁、系統安全間距、自動啟動記錄、權限、時間修正 |
 | `sleep/SleepTracker.kt` | Sleep API 訂閱／取消；明確指向接收器的 mutable PendingIntent 用於事件載入 |
 | `sleep/SleepUpdateReceiver.kt` | 保存 Sleep API 區段／分類，區段事件排入工作 |
-| `sleep/ResubscribeReceiver.kt` | 開機／套件更新後重新訂閱 Sleep API；不代表動作服務自動啟動 |
+| `sleep/ResubscribeReceiver.kt` | 開機／套件更新後重新訂閱 Sleep API、排程並嘗試恢復自動記錄 |
 | `sleep/UsageMonitor.kt` | 查 UsageStats 螢幕互動與前景活動；向前查 24 小時以承接區段起點之前的狀態 |
 | `sleep/SleepSchedule.kt`、`sleep/SleepAnalyzer.kt` | 時段重疊與 Sleep API 候選／分數 |
 | `sleep/SleepModels.kt`、`sleep/SleepIntervals.kt` | 模型、舊狀態相容、清醒區間與上傳階段切分 |
 | `sleep/SleepReconciler.kt` | 匯整來源、選擇候選、合併本機歷史與版本 |
 | `motion/MotionEngine.kt` | 純 Kotlin 取樣策略、分鐘聚合、動作分類／候選與分數調整 |
+| `motion/AutomaticPlacement.kt` | 純 Kotlin 自動放置／床面動作證據判斷；無手動選擇 |
 | `motion/MotionService.kt` | 前景感測服務、電量／供電切換、flush、時段邊界 Receiver |
 | `motion/MotionStore.kt` | SQLite 分鐘摘要及 SharedPreferences 動作設定 |
-| `motion/MotionTimelineView.kt` | 動作時間軸繪製 |
+| `motion/MotionTimelineView.kt` | 保留的時間軸繪製工具，首頁已不使用 |
 | `data/SleepPreferences.kt`、`data/SleepStore.kt` | 時段設定及 Sleep API 原始事件／睡眠紀錄 |
 | `health/AutomaticSyncQueue.kt`、`health/HealthConnectSync.kt` | 自動同步佇列、版本競態保護及 Health Connect 寫入 |
 | `health/HealthPrivacyActivity.kt` | 系統健康授權畫面的資料使用說明入口 |
@@ -124,7 +125,7 @@
 | --- | --- |
 | DataStore `sleeptrace_settings` | 每日開始／結束分鐘、`tracking_enabled`；目前 configured 與 enabled 共用此旗標 |
 | SharedPreferences `sleeptrace_records` | JSON `sessions`、`segments`、`samples`；睡眠紀錄含 ID、版本、狀態、清醒明細及手動修改標記 |
-| SharedPreferences `sleeptrace_motion` | 動作開關、放置位置、上次狀態 |
+| SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、內部狀態；舊 enabled／placement 不再控制新資料 |
 | SQLite `motion.db`／`minutes` | 每分鐘感測統計，以開始時間為主鍵；沒有原始感測波形 |
 
 Sleep API 原始事件及動作摘要在新增／寫入時清理 14 天前資料，不是到期即定時刪除；歷史睡眠紀錄會保留。相關資料已在 `app/src/main/res/xml/backup_rules.xml` 與 `app/src/main/res/xml/data_extraction_rules.xml` 排除備份。
@@ -151,8 +152,9 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 
 - `app/src/test/java/com/rsps1008/sleeptrace/SleepAnalyzerTest.kt`：手機使用扣除、分類不足仍自動同步、一般候選。
 - `app/src/test/java/com/rsps1008/sleeptrace/MotionEngineTest.kt`：FIFO／取樣、批次時間、資料缺口、床邊／手機使用、跨午夜、動作衝突等。
+- `app/src/test/java/com/rsps1008/sleeptrace/AutomaticPlacementTest.kt`：自動放置證據、單次震動、完全靜止、手機使用、缺口、位置變化與舊資料相容。
 - `app/src/test/java/com/rsps1008/sleeptrace/AutomaticSyncTest.kt`：舊狀態、自動寫入、重試／取消、中斷恢復、版本競態、來源選擇與清醒切分。
-- `app/src/androidTest/java/com/rsps1008/sleeptrace/MotionRuntimeTest.kt`：前景服務與電池事件。會改 App 時段、授權及模擬電量，**只在可丟棄模擬器執行**。
+- `app/src/androidTest/java/com/rsps1008/sleeptrace/MotionRuntimeTest.kt`：舊感測設定升級後的自動啟動、首頁單一標題及系統安全間距、不顯示感測器選項、AUTO 摘要、低電量暫停／接電恢復／整體停止。會改 App 時段、授權及模擬電量，**只在可丟棄模擬器執行**。
 - `app/src/androidTest/java/com/rsps1008/sleeptrace/AutoSyncStorageTest.kt`：實際 SharedPreferences 遷移、重讀、重試及版本保存；會取消 App 的工作並暫時替換紀錄，**只在可丟棄模擬器執行**。寫入端是替身，不是實際健康服務。
 - 純文件修改不需重跑 Android 建置；應核對路徑、敘述與既有測試證據。
 
@@ -160,14 +162,14 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 
 ## 8. 驗證基線與尚未完成事項
 
-截至 2026-09-28：28 個 JVM 測試通過（SleepAnalyzer 3、MotionEngine 13、AutomaticSync 11、既有範例 1），Lint 零問題，Debug APK 建置成功。先前唯讀 Pixel_10_Pro 模擬器的 MotionRuntimeTest 通過；自動同步版本的 AutoSyncStorageTest 通過，主畫面及健康資料使用說明頁成功啟動。這些是歷史基線，後續程式變更後不能直接宣稱仍然通過。
+截至 2026-09-28，本次自動放置／簡化首頁版本：35 個 JVM 測試通過（SleepAnalyzer 3、MotionEngine 13、AutomaticPlacement 7、AutomaticSync 11、既有範例 1），Lint 零問題，Debug APK 與測試 APK 建置成功。唯讀 Pixel_10_Pro 模擬器的 MotionRuntimeTest 通過，已驗證首頁自動啟動感測、標題完整且避開系統列、AUTO 摘要與電池切換；截圖目視確認標題未遮擋。測試時模擬器曾出現 System UI 無回應視窗，排除後重新截圖正常。先前自動同步版本的 AutoSyncStorageTest 通過、健康資料使用說明頁成功啟動，屬歷史驗證，本次未重跑。後續程式變更後不能直接宣稱仍然通過。
 
 尚未完成或不能保證的項目：
 
 - 實機整夜耗電、真實 FIFO 行為、長時間 Doze／OEM 背景限制與實際入睡準確度尚未量測。先前討論的耗電百分比是估算，不是實測結果。
 - 實際授權後的 Health Connect 寫入、Google Fit 端讀取／顯示尚未完成端到端驗證。單元測試或替身成功不能替代此證據。
 - 沒有 PSG 或穿戴裝置對照驗證，也沒有深眠／淺眠／REM 分期。
-- 床墊、床伴、手機震動、手機離人太遠或人離床都可能影響動作推估；目前放置模式靠使用者選擇。
+- 床墊、床伴、手機震動、手機離人太遠或人離床都可能影響動作推估；自動放置判斷只是訊號啟發式，準確度尚未量測，不能宣稱精確知道床上／床邊。
 - 還沒有 Google Play 上架／正式簽署發行的完成證據；Debug APK 不是正式發行版本。
 
 ## 9. 後續修改原則

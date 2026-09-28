@@ -5,13 +5,15 @@ import com.rsps1008.sleeptrace.data.SleepPreferences
 import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.motion.MotionStore
 import com.rsps1008.sleeptrace.motion.MotionSleepEstimator
+import com.rsps1008.sleeptrace.motion.AutomaticPlacement
+import com.rsps1008.sleeptrace.motion.MotionSettings
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 class SleepReconciler(private val context: Context) {
     suspend fun reconcile() = mutex.withLock {
         val preferences = SleepPreferences(context)
-        if (!preferences.configured()) return@withLock
+        if (!preferences.configured() || !MotionSettings(context).enabled) return@withLock
         val store = SleepStore(context)
         val usageAvailable = UsageMonitor.hasAccess(context)
         val schedule = preferences.schedule()
@@ -23,9 +25,10 @@ class SleepReconciler(private val context: Context) {
         }
         val now = System.currentTimeMillis()
         val motion = MotionStore(context).use { it.read(now - 14L * 24 * 60 * 60 * 1000, now) }
-        val calculated = base.map { MotionSleepEstimator.annotate(it, motion) }
         val motionUsage = if (motion.isEmpty()) emptyList() else UsageMonitor.interactionIntervals(context, motion.first().startMillis, now)
-        val fallback = MotionSleepEstimator.estimate(motion, motionUsage, schedule, now).map {
+        val resolved = AutomaticPlacement.resolve(motion, motionUsage)
+        val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
+        val fallback = MotionSleepEstimator.estimate(resolved, motionUsage, schedule, now).map {
             if (usageAvailable) it else it.copy(reason = it.reason + "；未授予使用情況存取權，無法排除手機使用")
         }
         store.mergeCalculated(selectBestSessions(calculated, fallback))

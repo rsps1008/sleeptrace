@@ -37,7 +37,7 @@ import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 
-/** User-started foreground service. No continuous CPU wake lock and no raw sensor persistence. */
+/** Automatic foreground recording after setup; no continuous wake lock or raw sensor persistence. */
 class MotionService : Service(), SensorEventListener2 {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var thread: HandlerThread
@@ -47,7 +47,6 @@ class MotionService : Service(), SensorEventListener2 {
     private lateinit var store: MotionStore
     private var sensor: Sensor? = null
     private var plan: SamplingPlan? = null
-    private var placement = Placement.BED
     private var accumulator: MotionAccumulator? = null
     private var schedule: SleepSchedule? = null
     private var clockOffset = 0L
@@ -56,7 +55,7 @@ class MotionService : Service(), SensorEventListener2 {
     private var pendingChange: (() -> Unit)? = null
     private var stopped = false
     private var destroyed = false
-    private var notice = "準備動作偵測"
+    private var notice = "準備自動記錄睡眠"
     private val finishChange = Runnable { finishTransition() }
     private val powerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) { refreshConfiguration() }
@@ -75,13 +74,14 @@ class MotionService : Service(), SensorEventListener2 {
         thread = HandlerThread("sleeptrace-motion").apply { start() }
         handler = Handler(thread.looper)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "床上動作偵測", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL, "自動睡眠記錄", NotificationManager.IMPORTANCE_LOW)
         )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             settings.enabled = false
+            runCatching { SleepTracker.unsubscribe(this) }
             handler.post {
                 stopped = true
                 transition { stopSelf() }
@@ -110,7 +110,7 @@ class MotionService : Service(), SensorEventListener2 {
             }, ContextCompat.RECEIVER_NOT_EXPORTED)
         }
         refreshConfiguration()
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     fun refreshConfiguration() {
@@ -148,11 +148,10 @@ class MotionService : Service(), SensorEventListener2 {
         val selected = sensor!!
         val next = SamplingPlan.choose(charging, selected.fifoMaxEventCount, selected.minDelay)
         val offset = now - SystemClock.elapsedRealtime()
-        if (plan == next && placement == settings.placement && kotlin.math.abs(clockOffset - offset) < 2_000 && pendingChange == null) return
+        if (plan == next && kotlin.math.abs(clockOffset - offset) < 2_000 && pendingChange == null) return
         transition {
             clockOffset = System.currentTimeMillis() - SystemClock.elapsedRealtime()
-            placement = settings.placement
-            accumulator = MotionAccumulator(next, placement)
+            accumulator = MotionAccumulator(next, Placement.AUTO)
             val registered = runCatching { sensors.registerListener(this, selected, next.periodUs, next.latencyUs, handler) }.getOrDefault(false)
             if (!registered) {
                 accumulator = null
@@ -237,11 +236,11 @@ class MotionService : Service(), SensorEventListener2 {
 
     private fun notification(): Notification = NotificationCompat.Builder(this, CHANNEL)
         .setSmallIcon(com.rsps1008.sleeptrace.R.drawable.ic_motion_notification)
-        .setContentTitle("眠迹 · 床上動作偵測")
-        .setContentText(notice).setStyle(NotificationCompat.BigTextStyle().bigText(notice))
+        .setContentTitle("眠迹 · 自動睡眠記錄")
+        .setContentText(if (accumulator == null) "依設定時段與電量自動安排記錄" else "正在為你記錄睡眠，醒來後自動整理")
         .setOngoing(true).setOnlyAlertOnce(true)
         .setContentIntent(PendingIntent.getActivity(this, 2001, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
-        .addAction(0, "停止", PendingIntent.getService(this, 2002,
+        .addAction(0, "暫停記錄", PendingIntent.getService(this, 2002,
             Intent(this, MotionService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE))
         .build()
 

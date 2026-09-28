@@ -9,7 +9,8 @@ import java.time.ZoneId
 import kotlin.math.sqrt
 
 const val MINUTE_MS = 60_000L
-enum class Placement { BED, BEDSIDE }
+// BED/BEDSIDE remain readable for old minute records. New recordings use AUTO.
+enum class Placement { BED, BEDSIDE, AUTO, UNKNOWN }
 enum class MotionLevel { QUIET, ACTIVE, UNKNOWN }
 
 data class SamplingPlan(val periodUs: Int, val latencyUs: Int) {

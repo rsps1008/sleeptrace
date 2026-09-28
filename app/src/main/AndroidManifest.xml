@@ -27,6 +27,7 @@
         android:theme="@style/Theme.SleepTrace">
         <activity
             android:name=".MainActivity"
+            android:theme="@style/Theme.SleepTrace.Home"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
