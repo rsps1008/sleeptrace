@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="basic_permissions_ready">✓ 睡眠記錄與同步權限已就緒</string>
+    <string name="background_recording_title">整晚背景記錄</string>
+    <string name="allow_overnight_recording">允許整晚背景記錄</string>
+    <string name="battery_restricted_description">Android 目前限制此 App 的背景執行，可能漏記睡眠。請在 App 的電池設定選擇「不受限制／無限制」。尚未調整仍會繼續記錄。</string>
+    <string name="battery_optimized_description">建議允許眠迹在背景執行，減少夜間漏記。App 仍使用低頻感測與批次處理省電；尚未允許也會繼續記錄。</string>
+    <string name="open_xiaomi_autostart">開啟小米自啟動設定</string>
+    <string name="xiaomi_autostart_description">小米／Redmi／POCO 建議開啟眠迹的「自啟動／背景自啟動」，並將 App 電池策略設為「無限制」。App 無法讀取自啟動開關，已設定過便不用再操作。</string>
+    <string name="xiaomi_autostart_hint">請開啟眠迹自啟動；找不到時，在系統設定搜尋「自啟動」。</string>
+    <string name="background_settings_unavailable">無法開啟系統設定。請到 Android 設定 → 應用程式 → 眠迹 → 電池，選擇「不受限制／無限制」。小米手機另請在系統設定搜尋「自啟動」，允許眠迹。</string>
+</resources>

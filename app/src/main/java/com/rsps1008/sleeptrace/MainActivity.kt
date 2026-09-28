@@ -2,6 +2,7 @@ package com.rsps1008.sleeptrace
 
 import android.Manifest
 import android.content.Intent
+import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -34,6 +35,7 @@ import com.rsps1008.sleeptrace.data.SleepPreferences
 import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.health.HealthConnectSync
 import com.rsps1008.sleeptrace.motion.*
+import com.rsps1008.sleeptrace.power.BackgroundAccess
 import com.rsps1008.sleeptrace.sleep.SleepReconciler
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
@@ -56,6 +58,25 @@ class MainActivity : AppCompatActivity() {
     private val store by lazy { SleepStore(this) }
     private val healthSync by lazy { HealthConnectSync(this) }
     private val motionSettings by lazy { MotionSettings(this) }
+    private val backgroundAccess by lazy { BackgroundAccess(this) }
+    private var permissionFlowComplete = false
+    private var backgroundSettingsOpen = false
+    private val batterySettingsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        backgroundSettingsOpen = false
+        ensureAutomaticRecording()
+        refresh()
+        guideBackgroundAccessIfNeeded()
+    }
+    private val xiaomiSettingsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        backgroundSettingsOpen = false
+        ensureAutomaticRecording()
+        refresh()
+    }
+    private val usageSettingsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        permissionFlowComplete = true
+        refresh()
+        guideBackgroundAccessIfNeeded()
+    }
     private var refreshJob: Job? = null
     private var startupPermissionCheckDone = false
     private var continueStartupPermissionFlow = false
@@ -84,6 +105,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        startupPermissionCheckDone = savedInstanceState?.getBoolean("startup_checked") ?: false
+        continueStartupPermissionFlow = savedInstanceState?.getBoolean("continue_permissions") ?: false
+        permissionFlowComplete = savedInstanceState?.getBoolean("permissions_complete") ?: false
+        backgroundSettingsOpen = savedInstanceState?.getBoolean("background_settings_open") ?: false
         enableEdgeToEdge()
         title = getString(R.string.app_name)
         content = LinearLayout(this).apply {
@@ -122,6 +147,14 @@ class MainActivity : AppCompatActivity() {
         refresh()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("startup_checked", startupPermissionCheckDone)
+        outState.putBoolean("continue_permissions", continueStartupPermissionFlow)
+        outState.putBoolean("permissions_complete", permissionFlowComplete)
+        outState.putBoolean("background_settings_open", backgroundSettingsOpen)
+        super.onSaveInstanceState(outState)
+    }
+
     private fun refresh() {
         refreshJob?.cancel()
         refreshJob = lifecycleScope.launch {
@@ -139,6 +172,7 @@ class MainActivity : AppCompatActivity() {
                 renderSleepSection(sessions)
                 renderScheduleCard(schedule!!)
                 renderPermissionsSection(healthGranted)
+                renderBackgroundAccess()
             }
             scroll.post { scroll.scrollTo(0, previousScroll) }
         }
@@ -431,7 +465,10 @@ class MainActivity : AppCompatActivity() {
             isAllCaps = false
             setOnClickListener {
                 motionSettings.enabled = !motionSettings.enabled
-                if (motionSettings.enabled) ensureAutomaticRecording()
+                if (motionSettings.enabled) {
+                    ensureAutomaticRecording()
+                    guideBackgroundAccessIfNeeded()
+                }
                 else {
                     runCatching { SleepTracker.unsubscribe(this@MainActivity) }
                     if (MotionService.active != null) startService(Intent(this@MainActivity, MotionService::class.java).setAction(MotionService.ACTION_STOP))
@@ -457,7 +494,7 @@ class MainActivity : AppCompatActivity() {
         val allGranted = activityGranted && usageGranted && healthGranted
 
         if (allGranted) {
-            layout.addView(createBadge("✓ 已準備好，自動記錄與同步", color(R.color.status_success), color(R.color.status_success_bg)))
+            layout.addView(createBadge(getString(R.string.basic_permissions_ready), color(R.color.status_success), color(R.color.status_success_bg)))
             card.addView(layout)
             content.addView(card)
             return
@@ -541,6 +578,84 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun renderBackgroundAccess() {
+        val access = backgroundAccess
+        if (access.batteryReady && !access.isXiaomi) return
+        content.addView(createSectionTitle(getString(R.string.background_recording_title)))
+        val card = createCard()
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+        }
+        if (!access.batteryReady) {
+            layout.addView(TextView(this).apply {
+                setText(if (access.restricted) R.string.battery_restricted_description else R.string.battery_optimized_description)
+                textSize = 13f
+                setTextColor(color(R.color.text_secondary))
+            })
+            layout.addView(MaterialButton(this).apply {
+                setText(R.string.allow_overnight_recording)
+                isAllCaps = false
+                setOnClickListener { openBatterySettings() }
+            })
+        }
+        if (access.isXiaomi) {
+            layout.addView(TextView(this).apply {
+                setText(R.string.xiaomi_autostart_description)
+                textSize = 13f
+                setTextColor(color(R.color.text_secondary))
+                setPadding(0, dp(8), 0, 0)
+            })
+            layout.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                setText(R.string.open_xiaomi_autostart)
+                isAllCaps = false
+                setOnClickListener { openXiaomiSettings() }
+            })
+        }
+        card.addView(layout)
+        content.addView(card)
+    }
+
+    private fun guideBackgroundAccessIfNeeded() = lifecycleScope.launch {
+        if (!permissionFlowComplete || !preferences.configured() || !motionSettings.enabled) return@launch
+        lifecycle.withResumed {
+            if (!backgroundSettingsOpen && motionSettings.enabled) {
+                when {
+                    !backgroundAccess.batteryReady && !backgroundAccess.batteryGuideShown -> openBatterySettings()
+                    backgroundAccess.isXiaomi && !backgroundAccess.xiaomiGuideShown -> openXiaomiSettings()
+                }
+            }
+        }
+    }
+
+    private fun openBatterySettings() {
+        if (backgroundSettingsOpen) return
+        backgroundAccess.batteryGuideShown = true
+        launchBackgroundSettings(backgroundAccess.batteryIntents(), batterySettingsLauncher)
+    }
+
+    private fun openXiaomiSettings() {
+        if (backgroundSettingsOpen) return
+        backgroundAccess.xiaomiGuideShown = true
+        android.widget.Toast.makeText(this, R.string.xiaomi_autostart_hint, android.widget.Toast.LENGTH_LONG).show()
+        launchBackgroundSettings(backgroundAccess.xiaomiIntents(), xiaomiSettingsLauncher)
+    }
+
+    private fun launchBackgroundSettings(intents: List<Intent>, launcher: androidx.activity.result.ActivityResultLauncher<Intent>) {
+        for (intent in intents) {
+            try {
+                backgroundSettingsOpen = true
+                launcher.launch(intent)
+                return
+            } catch (_: ActivityNotFoundException) {
+                backgroundSettingsOpen = false
+            } catch (_: SecurityException) {
+                backgroundSettingsOpen = false
+            }
+        }
+        showMessage(getString(R.string.background_settings_unavailable))
+    }
+
     private fun createSectionTitle(title: String): TextView = TextView(this).apply {
         text = title
         textSize = 14f
@@ -619,6 +734,7 @@ class MainActivity : AppCompatActivity() {
         MotionService.active?.refreshConfiguration()
         WorkScheduler.schedule(this@MainActivity)
         ensureAutomaticRecording()
+        guideBackgroundAccessIfNeeded()
         refresh()
     }
 
@@ -631,6 +747,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestMissingPermissionsAtStartup() {
+        permissionFlowComplete = false
         val required = buildList {
             if (!SleepTracker.hasActivityRecognition(this@MainActivity)) add(Manifest.permission.ACTIVITY_RECOGNITION)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) addNotificationPermissionIfNeeded(this@MainActivity)
@@ -655,7 +772,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openUsageAccessIfNeeded() {
-        if (!UsageMonitor.hasAccess(this)) startActivity(UsageMonitor.accessIntent())
+        if (!UsageMonitor.hasAccess(this)) usageSettingsLauncher.launch(UsageMonitor.accessIntent())
+        else {
+            permissionFlowComplete = true
+            guideBackgroundAccessIfNeeded()
+        }
     }
 
     private fun subscribe() = SleepTracker.subscribe(this) { result ->

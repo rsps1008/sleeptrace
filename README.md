@@ -13,6 +13,12 @@ Android 手機睡眠推估，包名 `com.rsps1008.sleeptrace`。Google Sleep API
 
 ### 電力與硬體策略
 
+首次完成時段與授權引導後，App 會檢查 Android 電池限制。未排除最佳化時會開啟系統允許背景執行的請求；若已被明確限制，則開啟 App 設定，請在電池選項選擇「不受限制／無限制」。返回 App 後重新讀取實際狀態。取消或未調整仍會繼續記錄，不會下次開啟又自動跳轉，首頁保留「允許整晚背景記錄」入口。
+
+小米／Redmi／POCO 另會一次性引導「自啟動／背景自啟動」設定。請允許眠迹，並將 App 電池策略設為「無限制」。部分 MIUI／HyperOS 不支援直達頁面時，App 會退回應用程式／一般設定，可搜尋「自啟動」。App 無法可靠讀取這個開關，因此不會把開過設定頁當成已允許；入口仍保留，設定過就不用再操作。
+
+以上設定需由使用者在系統介面操作，App 不會自行修改。解除限制不會提高取樣頻率或新增持續喚醒，仍採用下列省電策略；也不保證能避開全部廠商背景限制或強制停止。
+
 | 情況 | 要求取樣頻率 | 要求硬體批次回報 |
 | --- | --- | --- |
 | 有 FIFO，未接電源 | 5 Hz | 最長 60 秒 |
@@ -65,6 +71,10 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 實際耗電目前未量測；模擬器無法驗證手機的感測器 FIFO、Doze 完整性或一夜耗電。請在同一支手機、相同環境下交替測試各至少 3 晚：整體記錄暫停、未充電記錄、接電記錄。記錄起訖電量、時長、有效資料覆蓋、缺口、實際使用手機時段與主觀入睡／醒來時間。未充電模式用每小時掉電百分點相減估計新增耗電；接電模式須以系統功耗估計或外部電表比較，不能用電池百分比推算。之前討論的耗電數值不是此 App 實測。
 
 Health Connect 寫入及 Google Fit 端顯示仍需以使用者實際帳號、授權與裝置測試；Health Connect 成功寫入不等於已證明 Google Fit 收到資料。
+
+2026-09-28 背景電池與小米自啟動引導更新：35 個 JVM 測試通過，Lint 無未處理問題，APK 建置成功。模擬器 `BackgroundAccessRuntimeTest` 與 `MotionRuntimeTest` 共 2 個測試通過，驗證拒絕授權仍記錄、引導不重複、返回後重新讀取設定及既有低電量策略。Mi Note 10 自啟動入口已唯讀確認存在，但未更動實機設定，完整 MIUI／HyperOS 操作與整夜恢復仍未驗證。
+
+電池豁免採用 Android 的系統請求，因整夜本機感測為核心功能，在該 Intent 建立函式局部抑制 `BatteryLife` lint 並註明理由；不代表已通過 Google Play 審核。參考 [Android Doze 豁免說明](https://developer.android.com/training/monitoring-device-state/doze-standby#support_for_other_use_cases)；小米私有入口參考 [AutoStarter 原始碼](https://github.com/judemanutd/AutoStarter/blob/master/autostarter/src/main/java/com/judemanutd/autostarter/AutoStartPermissionHelper.kt)，未引入額外第三方套件。
 
 Android 依據：[感測器註冊／批次參數](https://developer.android.com/reference/android/hardware/SensorManager)、[FIFO 與 wake-up 感測器](https://developer.android.com/reference/android/hardware/Sensor)、[health 前景服務權限](https://developer.android.com/develop/background-work/services/fgs/service-types#health)。
 

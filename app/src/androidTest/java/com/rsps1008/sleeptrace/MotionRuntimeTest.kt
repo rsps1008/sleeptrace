@@ -46,7 +46,8 @@ class MotionRuntimeTest {
         runBlocking { SleepPreferences(context).saveSchedule(SleepSchedule(0, 0)) }
         // Upgrade from old manual opt-out/bedside settings must still enable the new automatic mode.
         context.getSharedPreferences("sleeptrace_motion", 0).edit().remove("recording_enabled")
-            .putBoolean("enabled", false).putString("placement", "BEDSIDE").commit()
+            .putBoolean("enabled", false).putString("placement", "BEDSIDE")
+            .putBoolean("battery_guide_shown", true).putBoolean("xiaomi_guide_shown", true).commit()
         val settings = MotionSettings(context)
         assertTrue(settings.enabled)
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

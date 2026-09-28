@@ -38,6 +38,7 @@
 
 - 首次開啟要求設定每日偵測時段，設定前 `configured()` 為 false，不啟用睡眠分析。時段支援跨午夜；起訖相同時目前視為 24 小時。畫面以 24 小時制拉選欄位選取時間，不使用時鐘式選擇器。
 - `MainActivity` 每次啟動會自動檢查活動辨識、通知、Health Connect 與使用情況存取；可由 App 發起的權限會直接啟動系統授權流程，使用情況存取則帶到 Android 系統設定頁。畫面保留狀態與重新檢查入口，不要求使用者逐項尋找設定按鈕。
+- 完成上述流程及時段設定後，若未暫停，會一次性引導背景電池設定，再引導小米自啟動。拒絕／返回也繼續記錄與自動同步；不在下次啟動反覆自動開啟，首頁保留手動重試入口。
 - `SleepTracker` 向 Google Play services 訂閱 Sleep API，取得睡眠區段與分類樣本；需要活動辨識權限。
 - 接收 Sleep API 區段後排入背景分析工作。分類樣本只先保存，不因每個分類事件立即重跑全部分析。
 - `SleepAnalyzer` 保留至少 30 分鐘且與時段重疊的區段，合併並扣除已知手機使用；扣除後不足 30 分鐘不產生候選。
@@ -59,6 +60,15 @@
 - 每分鐘有效覆蓋至少 45 秒才分類。相鄰三軸差值 ≥ 0.15 m/s² 算活動；活動時間比例 ≥ 5% 或差值 RMS ≥ 0.20 m/s²，該分鐘標示活動。門檻尚未校準。
 - 正常前景服務使用 `START_STICKY`；開機／套件更新接收器會在已設定、未暫停且有權限時嘗試恢復服務。App 恢復前景也會自動補啟動，無需感測器按鈕。強制停止及 OEM 背景限制仍可能阻止恢復；不能承諾永不漏記。啟動失敗不會把整體記錄開關自動關閉。
 - 使用 `setAndAllowWhileIdle` 的非精準時段邊界鬧鐘，可能延後啟動。沒有精準鬧鐘授權；資料事件也會檢查時段。
+
+### Android 電池限制與小米自啟動
+
+- `power/BackgroundAccess.kt` 每次讀取 `ActivityManager.isBackgroundRestricted` 及 `PowerManager.isIgnoringBatteryOptimizations`，兩者分開判斷。不能把有前景服務、曾開啟設定頁或 Activity 的 resultCode 當成已解除限制。
+- 明確受背景限制時先開啟本 App 的應用程式設定，提示電池選「不受限制／無限制」；只是未排除最佳化時，使用系統 `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 要求一次豁免。系統頁不可用／SecurityException 時依序退回 App 設定、電池最佳化清單、一般設定，皆失敗則顯示操作路徑。
+- Manifest 宣告 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。`BatteryLife` lint 僅在 `batteryIntents()` 局部抑制並說明原因：整夜本機感測是核心功能，不能以 FCM 或延後工作取代；這不代表已通過 Google Play 審核。既有低頻／批次／低電量暫停策略不因豁免而改變。
+- 依 manufacturer／brand 辨識 Xiaomi、Redmi、POCO，提供 `com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity` 入口；不可用時退回本 App 設定及一般設定，並提示搜尋「自啟動」。這是廠商私有入口，不能保證所有 MIUI／HyperOS 都支援。
+- **沒有可靠公開 API 確認小米自啟動已開啟**；只記錄引導是否顯示過，不能顯示假的「已授權」勾選。小米裝置保留自啟動入口及此說明；電池最佳化豁免也不代表廠商全部省電限制已解除。
+- 每次回到首頁重新查詢 Android 電池狀態；已就緒的 Android 電池設定入口收起，被撤回時再次顯示。自啟動入口不影響候選、同步與記錄開關。
 
 ### 動作候選與來源選擇
 
@@ -100,6 +110,7 @@
 | 路徑 | 責任 |
 | --- | --- |
 | `MainActivity.kt` | 簡化首頁、系統安全間距、自動啟動記錄、權限、時間修正 |
+| `power/BackgroundAccess.kt` | Android 電池限制查詢、一次性引導旗標、電池與小米自啟動設定及備援 Intent |
 | `sleep/SleepTracker.kt` | Sleep API 訂閱／取消；明確指向接收器的 mutable PendingIntent 用於事件載入 |
 | `sleep/SleepUpdateReceiver.kt` | 保存 Sleep API 區段／分類，區段事件排入工作 |
 | `sleep/ResubscribeReceiver.kt` | 開機／套件更新後重新訂閱 Sleep API、排程並嘗試恢復自動記錄 |
@@ -125,7 +136,7 @@
 | --- | --- |
 | DataStore `sleeptrace_settings` | 每日開始／結束分鐘、`tracking_enabled`；目前 configured 與 enabled 共用此旗標 |
 | SharedPreferences `sleeptrace_records` | JSON `sessions`、`segments`、`samples`；睡眠紀錄含 ID、版本、狀態、清醒明細及手動修改標記 |
-| SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、內部狀態；舊 enabled／placement 不再控制新資料 |
+| SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、內部狀態、battery_guide_shown／xiaomi_guide_shown 引導旗標（不是授權狀態）；舊 enabled／placement 不再控制新資料 |
 | SQLite `motion.db`／`minutes` | 每分鐘感測統計，以開始時間為主鍵；沒有原始感測波形 |
 
 Sleep API 原始事件及動作摘要在新增／寫入時清理 14 天前資料，不是到期即定時刪除；歷史睡眠紀錄會保留。相關資料已在 `app/src/main/res/xml/backup_rules.xml` 與 `app/src/main/res/xml/data_extraction_rules.xml` 排除備份。
@@ -156,6 +167,7 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 - `app/src/test/java/com/rsps1008/sleeptrace/AutomaticSyncTest.kt`：舊狀態、自動寫入、重試／取消、中斷恢復、版本競態、來源選擇與清醒切分。
 - `app/src/androidTest/java/com/rsps1008/sleeptrace/MotionRuntimeTest.kt`：舊感測設定升級後的自動啟動、首頁單一標題及系統安全間距、不顯示感測器選項、AUTO 摘要、低電量暫停／接電恢復／整體停止。會改 App 時段、授權及模擬電量，**只在可丟棄模擬器執行**。
 - `app/src/androidTest/java/com/rsps1008/sleeptrace/AutoSyncStorageTest.kt`：實際 SharedPreferences 遷移、重讀、重試及版本保存；會取消 App 的工作並暫時替換紀錄，**只在可丟棄模擬器執行**。寫入端是替身，不是實際健康服務。
+- `app/src/androidTest/java/com/rsps1008/sleeptrace/BackgroundAccessRuntimeTest.kt`：系統設定返回／拒絕後仍自動記錄、不重複跳轉、電池豁免與明確限制狀態更新；會修改測試 App 的 allowlist／AppOps，**只在可丟棄模擬器執行**。系統授權視窗以 ActivityMonitor 模擬取消。
 - 純文件修改不需重跑 Android 建置；應核對路徑、敘述與既有測試證據。
 
 Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`app/build/test-results/testDebugUnitTest/`。Lint 報告：`app/build/reports/lint-results-debug.xml` 與 `.html`。
@@ -163,6 +175,8 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 ## 8. 驗證基線與尚未完成事項
 
 截至 2026-09-28，本次自動放置／簡化首頁版本：35 個 JVM 測試通過（SleepAnalyzer 3、MotionEngine 13、AutomaticPlacement 7、AutomaticSync 11、既有範例 1），Lint 零問題，Debug APK 與測試 APK 建置成功。唯讀 Pixel_10_Pro 模擬器的 MotionRuntimeTest 通過，已驗證首頁自動啟動感測、標題完整且避開系統列、AUTO 摘要與電池切換；截圖目視確認標題未遮擋。測試時模擬器曾出現 System UI 無回應視窗，排除後重新截圖正常。先前自動同步版本的 AutoSyncStorageTest 通過、健康資料使用說明頁成功啟動，屬歷史驗證，本次未重跑。後續程式變更後不能直接宣稱仍然通過。
+
+2026-09-28 電池限制／小米自啟動引導更新：35 個 JVM 測試通過、Lint 無未處理問題（BatteryLife 的局部理由見上）、Debug APK 與測試 APK 建置成功。唯讀模擬器的 BackgroundAccessRuntimeTest 與 MotionRuntimeTest 共 2 個測試通過，含拒絕後仍記錄、不重複跳轉、允許／撤回／明確限制後返回更新及既有省電服務行為。Mi Note 10 僅以唯讀 `resolve-activity` 確認自啟動入口存在，未安裝或更動實機設定，尚未驗證 MIUI／HyperOS 的完整操作及整夜背景恢復。
 
 尚未完成或不能保證的項目：
 

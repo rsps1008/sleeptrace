@@ -12,6 +12,8 @@
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.health.WRITE_SLEEP" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Overnight local sensor recording is a core function affected by power restrictions. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <queries>
         <package android:name="com.google.android.apps.healthdata" />
     </queries>
