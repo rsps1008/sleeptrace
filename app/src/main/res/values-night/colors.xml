@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Night theme colors -->
+    <color name="card_stroke">#334155</color>
+    <color name="text_primary">#F1F5F9</color>
+    <color name="text_secondary">#94A3B8</color>
+    <color name="text_tertiary">#64748B</color>
+    <color name="motion_timeline_bg">#334155</color>
+
+    <!-- Night status badge colors -->
+    <color name="status_success">#86EFAC</color>
+    <color name="status_success_bg">#14532D</color>
+    <color name="status_warning">#FDBA74</color>
+    <color name="status_warning_bg">#7C2D12</color>
+    <color name="status_info">#93C5FD</color>
+    <color name="status_info_bg">#1E3A8A</color>
+    <color name="status_neutral">#CBD5E1</color>
+    <color name="status_neutral_bg">#334155</color>
+</resources>

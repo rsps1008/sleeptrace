@@ -7,4 +7,21 @@
     <color name="teal_700">#FF006C54</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Card and text colors -->
+    <color name="card_stroke">#E2E8F0</color>
+    <color name="text_primary">#1E293B</color>
+    <color name="text_secondary">#64748B</color>
+    <color name="text_tertiary">#94A3B8</color>
+    <color name="motion_timeline_bg">#E2E8F0</color>
+
+    <!-- Status badge colors -->
+    <color name="status_success">#166534</color>
+    <color name="status_success_bg">#DCFCE7</color>
+    <color name="status_warning">#9A3412</color>
+    <color name="status_warning_bg">#FFEDD5</color>
+    <color name="status_info">#1E40AF</color>
+    <color name="status_info_bg">#DBEAFE</color>
+    <color name="status_neutral">#475569</color>
+    <color name="status_neutral_bg">#F1F5F9</color>
 </resources>
