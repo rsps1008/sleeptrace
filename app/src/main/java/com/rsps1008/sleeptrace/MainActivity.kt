@@ -40,6 +40,7 @@ import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepReconciler
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
+import com.rsps1008.sleeptrace.sleep.SleepSessionTimelineView
 import com.rsps1008.sleeptrace.sleep.SleepTracker
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageMonitor
@@ -829,8 +830,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSession(session: SleepSession) {
-        MaterialAlertDialogBuilder(this).setTitle(session.title())
-            .setMessage("推估睡眠：${formatDuration(session.durationMillis)}\n夜間手機使用：${formatDuration(session.awakeMillis)}\n參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}")
+        val detail = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+            addView(TextView(this@MainActivity).apply {
+                text = "推估睡眠：${formatDuration(session.durationMillis)}\n夜間手機使用：${formatDuration(session.awakeMillis)}\n參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}"
+                setTextColor(color(R.color.text_secondary))
+                textSize = 14f
+            })
+            addView(SleepSessionTimelineView(this@MainActivity, session), LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(58)
+            ).apply { topMargin = dp(16) })
+        }
+        MaterialAlertDialogBuilder(this).setTitle(session.title()).setView(detail)
             .setPositiveButton("關閉", null)
             .setNeutralButton("修正時間") { _, _ -> editSession(session) }
             .show()
