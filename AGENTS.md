@@ -26,7 +26,7 @@
 | Android | minSdk 29、compileSdk 37、targetSdk 37；版本目前為 1.0／versionCode 1 |
 | 語言／UI | Kotlin、AppCompat／Material；`MainActivity` 使用程式建立 View，沒有 Compose |
 | 背景工作 | Coroutines、WorkManager、health 類型前景服務 |
-| 資料保存 | Preferences DataStore、SharedPreferences JSON、SQLiteOpenHelper；沒有 Room |
+| 資料保存 | Preferences DataStore、SharedPreferences 動作設定、SQLiteOpenHelper；睡眠事件與紀錄統一在 SQLite，尚未使用 Room |
 | 健康／活動 SDK | Health Connect 1.1.0、play-services-location 21.4.0 |
 
 版本依據為 `app/build.gradle.kts`、`gradle/libs.versions.toml`、`gradle/wrapper/gradle-wrapper.properties`。目前只套用 `com.android.application` 外掛並使用 AGP 內建 Kotlin 支援，不要因一般舊版範本而補上重複 Kotlin Android 外掛或 Java 25 toolchain。
@@ -138,10 +138,10 @@
 | 儲存 | 內容 |
 | --- | --- |
 | DataStore `sleeptrace_settings` | 每日開始／結束分鐘、`tracking_enabled`；目前 configured 與 enabled 共用此旗標 |
-| SharedPreferences `sleeptrace_records` | JSON `sessions`；首次讀取會交易式遷移舊版 raw `segments`／`samples` |
+| SharedPreferences `sleeptrace_records` | 僅作為舊版 JSON `sessions`／raw `segments`／`samples` 的一次性遷移來源；遷移完成後移除內容 |
 | SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、內部狀態、battery_guide_shown／xiaomi_guide_shown 引導旗標（不是授權狀態）；舊 enabled／placement 不再控制新資料 |
 | SQLite `motion.db`／`minutes` | 每分鐘感測統計，以開始時間為主鍵；沒有原始感測波形 |
-| SQLite `sleep_events.db`／`segments`、`samples` | Sleep API 原始區段與分類，以時間鍵去重、交易批次寫入及 14 天清理 |
+| SQLite `sleep_events.db`／`segments`、`samples`、`sessions` | Sleep API 原始區段與分類以時間鍵去重、交易批次寫入及 14 天清理；睡眠紀錄、穩定 ID、版本、同步狀態與清醒明細也在同一交易式資料庫保存 |
 
 Sleep API 原始事件及動作摘要在新增／寫入時清理 14 天前資料，不是到期即定時刪除；歷史睡眠紀錄會保留。相關資料已在 `app/src/main/res/xml/backup_rules.xml` 與 `app/src/main/res/xml/data_extraction_rules.xml` 排除備份。
 
@@ -170,7 +170,7 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 - `app/src/test/java/com/rsps1008/sleeptrace/AutomaticPlacementTest.kt`：自動放置證據、單次震動、完全靜止、手機使用、缺口、位置變化與舊資料相容。
 - `app/src/test/java/com/rsps1008/sleeptrace/AutomaticSyncTest.kt`：舊狀態、自動寫入、重試／取消、中斷恢復、版本競態、來源選擇與清醒切分。
 - `app/src/androidTest/java/com/rsps1008/sleeptrace/MotionRuntimeTest.kt`：舊感測設定升級後等待 Google 分類、分類觸發 1 Hz 取樣、首頁單一標題及系統安全間距、不顯示感測器選項、AUTO 摘要、低電量暫停／接電恢復／整體停止。會改 App 時段、授權並模擬分類及電量，**只在可丟棄模擬器執行**。
-- `app/src/androidTest/java/com/rsps1008/sleeptrace/AutoSyncStorageTest.kt`：實際 SharedPreferences 遷移、重讀、重試及版本保存；會取消 App 的工作並暫時替換紀錄，**只在可丟棄模擬器執行**。寫入端是替身，不是實際健康服務。
+- `app/src/androidTest/java/com/rsps1008/sleeptrace/AutoSyncStorageTest.kt`：實際舊版 SharedPreferences 至 SQLite 遷移、重讀、重試及版本保存；會取消 App 的工作並暫時替換紀錄，**只在可丟棄模擬器執行**。寫入端是替身，不是實際健康服務。
 - `app/src/androidTest/java/com/rsps1008/sleeptrace/BackgroundAccessRuntimeTest.kt`：系統設定返回／拒絕後仍自動記錄、不重複跳轉、電池豁免與明確限制狀態更新；會修改測試 App 的 allowlist／AppOps，**只在可丟棄模擬器執行**。系統授權視窗以 ActivityMonitor 模擬取消。
 - 純文件修改不需重跑 Android 建置；應核對路徑、敘述與既有測試證據。
 

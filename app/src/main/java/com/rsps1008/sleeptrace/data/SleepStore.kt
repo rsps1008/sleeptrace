@@ -1,7 +1,6 @@
 package com.rsps1008.sleeptrace.data
 
 import android.content.Context
-import android.annotation.SuppressLint
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSegment
 import com.rsps1008.sleeptrace.sleep.SleepSession
@@ -11,7 +10,7 @@ import com.rsps1008.sleeptrace.sleep.UsageInterval
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Small local repository. Raw events expire after fourteen days. */
+/** Local repository. Raw events expire after fourteen days; sessions use the same SQLite database. */
 class SleepStore(context: Context) {
     private val preferences = context.getSharedPreferences("sleeptrace_records", Context.MODE_PRIVATE)
     private val sessionsKey = "sessions"
@@ -19,7 +18,7 @@ class SleepStore(context: Context) {
     private val samplesKey = "samples"
     private val eventStore = SleepEventStore(context)
 
-    fun sessions(): List<SleepSession> = readArray(sessionsKey).map { item ->
+    private fun legacySessions(): List<SleepSession> = readArray(sessionsKey).map { item ->
         SleepSession(
             id = item.getString("id"), startMillis = item.getLong("start"), endMillis = item.getLong("end"),
             confidence = item.getInt("confidence"), awakeMillis = item.getLong("awake"),
@@ -35,7 +34,9 @@ class SleepStore(context: Context) {
         )
     }.sortedByDescending { it.startMillis }
 
-    fun saveSessions(sessions: List<SleepSession>) = writeArray(sessionsKey, sessions.map { it.toJson() })
+    fun sessions(): List<SleepSession> { migrateSessions(); return eventStore.sessions() }
+
+    fun saveSessions(sessions: List<SleepSession>) { migrateSessions(); eventStore.replaceSessions(sessions) }
     fun upsert(session: SleepSession) = synchronized(sessionLock) {
         val current = sessions().filterNot { it.id == session.id }.plus(session)
         saveSessions(current)
@@ -77,23 +78,21 @@ class SleepStore(context: Context) {
         check(preferences.edit().remove(segmentsKey).remove(samplesKey).putBoolean(rawMigrationKey, true).commit()) { "睡眠事件遷移失敗" }
     }
 
-    private fun SleepSession.toJson() = JSONObject().put("id", id).put("start", startMillis).put("end", endMillis)
-        .put("confidence", confidence).put("awake", awakeMillis).put("state", state.name).put("reason", reason)
-        .put("manual", manuallyEdited).put("error", syncError ?: "")
-        .put("revision", revision).put("awakeIntervals", JSONArray(awakeIntervals.map { JSONObject().put("start", it.startMillis).put("end", it.endMillis) }))
-        .put("usageSnapshotApplied", usageSnapshotApplied)
+    private fun migrateSessions() = synchronized(sessionMigrationLock) {
+        if (preferences.getBoolean(sessionMigrationKey, false)) return@synchronized
+        eventStore.importSessions(legacySessions())
+        check(preferences.edit().remove(sessionsKey).putBoolean(sessionMigrationKey, true).commit()) { "睡眠紀錄遷移失敗" }
+    }
+
     private fun readArray(key: String): List<JSONObject> {
         val array = JSONArray(preferences.getString(key, "[]"))
         return List(array.length()) { array.getJSONObject(it) }
     }
-    @SuppressLint("UseKtx") // KTX edit discards commit's success flag; do not upload after a failed local write.
-    private fun writeArray(key: String, objects: List<JSONObject>) {
-        // Persist identity/version before any external insert, including process-death recovery.
-        check(preferences.edit().putString(key, JSONArray(objects).toString()).commit()) { "睡眠紀錄儲存失敗" }
-    }
     companion object {
         private val sessionLock = Any()
         private val rawLock = Any()
+        private val sessionMigrationLock = Any()
         private const val rawMigrationKey = "raw_events_migrated_v1"
+        private const val sessionMigrationKey = "sessions_migrated_v2"
     }
 }
