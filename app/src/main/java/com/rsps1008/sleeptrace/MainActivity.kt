@@ -36,6 +36,7 @@ import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.health.HealthConnectSync
 import com.rsps1008.sleeptrace.motion.*
 import com.rsps1008.sleeptrace.power.BackgroundAccess
+import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepReconciler
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
@@ -161,7 +162,9 @@ class MainActivity : AppCompatActivity() {
             // Fetch before changing the view tree: async gaps used to collapse the scroll content.
             val configured = preferences.configured()
             val schedule = if (configured) preferences.schedule() else null
-            val sessions = withContext(Dispatchers.IO) { store.sessions() }
+            val (sessions, latestClassification) = withContext(Dispatchers.IO) {
+                store.sessions() to store.samples().maxByOrNull { it.timeMillis }
+            }
             val healthGranted = healthSync.hasWritePermission()
             val previousScroll = scroll.scrollY
             content.removeAllViews()
@@ -169,7 +172,7 @@ class MainActivity : AppCompatActivity() {
             if (!configured) {
                 renderSetupGuide()
             } else {
-                renderSleepSection(sessions)
+                renderSleepSection(sessions, latestClassification)
                 renderScheduleCard(schedule!!)
                 renderPermissionsSection(healthGranted)
                 renderBackgroundAccess()
@@ -231,8 +234,9 @@ class MainActivity : AppCompatActivity() {
         content.addView(card)
     }
 
-    private fun renderSleepSection(sessions: List<SleepSession>) {
+    private fun renderSleepSection(sessions: List<SleepSession>, latestClassification: ClassificationSample?) {
         content.addView(createSectionTitle("最近睡眠紀錄"))
+        content.addView(createSleepApiClassificationCard(latestClassification))
 
         if (sessions.isEmpty()) {
             val emptyCard = createCard()
@@ -276,6 +280,34 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    }
+
+    /** Shows only the most recently stored Play services classification; it never requests a live update. */
+    private fun createSleepApiClassificationCard(sample: ClassificationSample?): MaterialCardView {
+        val card = createCard()
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+        }
+        val score = TextView(this).apply {
+            text = sample?.let { "最近一次 Sleep API 睡眠信心：${it.confidence}/100" } ?: "尚未收到 Sleep API 睡眠分類"
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(color(R.color.text_primary))
+        }
+        val detail = TextView(this).apply {
+            text = sample?.let {
+                val time = DateTimeFormatter.ofPattern("M月d日 HH:mm").withZone(ZoneId.systemDefault())
+                "回報時間：${time.format(Instant.ofEpochMilli(it.timeMillis))} · 使用已保存資料，非即時查詢、非準確率"
+            } ?: "會在 Google Play services 回報分類後自動更新。"
+            textSize = 12f
+            setTextColor(color(R.color.text_secondary))
+            setPadding(0, dp(4), 0, 0)
+        }
+        layout.addView(score)
+        layout.addView(detail)
+        card.addView(layout)
+        return card
     }
 
     private fun createLatestSessionCard(session: SleepSession): MaterialCardView {
@@ -580,7 +612,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderBackgroundAccess() {
         val access = backgroundAccess
-        if (access.batteryReady && !access.isXiaomi) return
+        if (access.batteryReady) return
         content.addView(createSectionTitle(getString(R.string.background_recording_title)))
         val card = createCard()
         val layout = LinearLayout(this).apply {
@@ -597,19 +629,6 @@ class MainActivity : AppCompatActivity() {
                 setText(R.string.allow_overnight_recording)
                 isAllCaps = false
                 setOnClickListener { openBatterySettings() }
-            })
-        }
-        if (access.isXiaomi) {
-            layout.addView(TextView(this).apply {
-                setText(R.string.xiaomi_autostart_description)
-                textSize = 13f
-                setTextColor(color(R.color.text_secondary))
-                setPadding(0, dp(8), 0, 0)
-            })
-            layout.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                setText(R.string.open_xiaomi_autostart)
-                isAllCaps = false
-                setOnClickListener { openXiaomiSettings() }
             })
         }
         card.addView(layout)

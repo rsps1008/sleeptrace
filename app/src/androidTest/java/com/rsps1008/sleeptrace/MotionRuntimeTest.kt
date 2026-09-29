@@ -13,6 +13,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rsps1008.sleeptrace.data.SleepPreferences
+import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.motion.MotionService
 import com.rsps1008.sleeptrace.motion.MotionSettings
 import com.rsps1008.sleeptrace.motion.MotionStore
@@ -49,6 +50,8 @@ class MotionRuntimeTest {
         context.getSharedPreferences("sleeptrace_motion", 0).edit().remove("recording_enabled")
             .putBoolean("enabled", false).putString("placement", "BEDSIDE")
             .putBoolean("battery_guide_shown", true).putBoolean("xiaomi_guide_shown", true).commit()
+        context.getSharedPreferences("sleeptrace_records", 0).edit().remove("samples").commit()
+        SleepStore(context).appendSamples(listOf(ClassificationSample(System.currentTimeMillis(), 87, 0, 0)))
         val settings = MotionSettings(context)
         assertTrue(settings.enabled)
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -87,6 +90,8 @@ class MotionRuntimeTest {
                 assertFalse(text.contains("變更放置位置"))
                 assertFalse(text.contains("動作感測"))
                 assertFalse(text.contains("Hz"))
+                assertTrue(text.contains("最近一次 Sleep API 睡眠信心：87/100"))
+                assertTrue(text.contains("使用已保存資料，非即時查詢、非準確率"))
             }
             automation.takeScreenshot()?.let { bitmap ->
                 java.io.File(context.getExternalFilesDir(null), "automatic-home.png").outputStream().use {
