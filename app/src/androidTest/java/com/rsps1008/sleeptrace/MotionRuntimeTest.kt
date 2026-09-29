@@ -18,6 +18,7 @@ import com.rsps1008.sleeptrace.motion.MotionSettings
 import com.rsps1008.sleeptrace.motion.MotionStore
 import com.rsps1008.sleeptrace.motion.MINUTE_MS
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
+import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -55,8 +56,14 @@ class MotionRuntimeTest {
             shell("dumpsys battery unplug")
             shell("dumpsys battery set level 70")
             instrumentation.waitForIdleSync()
-            // Merely opening the configured app must start recording; no motion button/API call.
-            await("Foreground service did not register sensor: ${settings.status}") { MotionService.active != null && settings.status.contains("Hz") }
+            // Opening the configured app keeps the service ready without sampling before Google indicates sleep.
+            await("Foreground service did not wait for Google classification: ${settings.status}") {
+                MotionService.active != null && settings.status.contains("等待 Google")
+            }
+            MotionService.active!!.onSleepClassifications(listOf(ClassificationSample(System.currentTimeMillis(), 90, 0, 0)))
+            await("Foreground service did not register sensor after sleep classification: ${settings.status}") {
+                settings.status.contains("Google 已判斷入睡") && settings.status.contains("1 Hz")
+            }
             fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
             await("Home did not render") {
                 var ready = false

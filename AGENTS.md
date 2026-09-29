@@ -5,6 +5,7 @@
 ## 1. 專案目標與已確定的使用者需求
 
 - Android 手機睡眠推估 App，名稱 **眠迹 SleepTrace**，applicationId／namespace 為 `com.rsps1008.sleeptrace`，Gradle 專案名稱為 `SleepTrace`。工作目錄目前為 `E:\Git\sleep`，保留現有名稱與包名，除非使用者要求更名。
+- App 圖示為深靛藍夜色底、淡紫月牙與藍綠睡眠軌跡；adaptive icon 使用 `ic_launcher_background`、`ic_launcher_art` 與 `ic_launcher_monochrome`，各密度另有一般及圓形 legacy WebP。原始生成圖與預覽保存在 `artwork/`。
 - 優先省電；接受不非常精準的推估，但要以實際可取得的資料判斷。手機通常放在床上，也必須處理床邊放置情況。
 - **放置位置與動作偵測由 App 自動處理，不要要求使用者選床上／床邊或另外開啟感測器。首頁以睡眠時間與記錄狀態為主，避免顯示感測器參數／診斷圖表。**
 - 已知的手機使用時間不可算成睡眠。沒有使用情況存取權時，程式仍使用其餘資料自動推估，並顯示無法排除手機使用的限制；不可宣稱此時已完整排除。
@@ -41,6 +42,7 @@
 - 完成上述流程及時段設定後，若未暫停，會一次性引導背景電池設定，再引導小米自啟動。拒絕／返回也繼續記錄與自動同步；不在下次啟動反覆自動開啟，首頁保留手動重試入口。
 - `SleepTracker` 向 Google Play services 訂閱 Sleep API，取得睡眠區段與分類樣本；需要活動辨識權限。
 - 接收 Sleep API 區段後排入背景分析工作。分類樣本只先保存，不因每個分類事件立即重跑全部分析。
+- 偵測時段內先等待 Sleep API 分類；目前時段內最近 20 分鐘的分類信心值 ≥ 80 時，才啟動該時段的加速度計取樣。80 是未校準的工程門檻，不代表準確率；分類可能約每 10 分鐘才回報、延遲或漏失。觸發後取樣到時段結束，不因後續單次低分反覆停止。
 - `SleepAnalyzer` 保留至少 30 分鐘且與時段重疊的區段，合併並扣除已知手機使用；扣除後不足 30 分鐘不產生候選。
 - 目前 Sleep API 區段只做「時段重疊」篩選，未裁切到設定時段邊界；不要把它描述成已精確裁切。加速度計候選則限制在完整時段內。
 - Sleep API 參考分數由區段分數 × 45%、高信心分類比例 × 35%、分類覆蓋率 × 20% 組成。每個分類樣本以前後各 5 分鐘估計覆蓋；重疊覆蓋會合併。這是工程規則，不是經驗證的準確率。
@@ -48,10 +50,10 @@
 
 ### 加速度計與省電
 
-- 完成時段設定及活動辨識授權後自動啟動感測。新資料保存為 `AUTO`，由 `AutomaticPlacement` 在分析時推估床上／床邊／未知，不使用舊版手動位置設定。原始分鐘資料仍保留，以便重算。
+- 完成時段設定及活動辨識授權後自動啟動前景記錄服務；加速度計會等當前時段內的 Google 高信心睡眠分類才啟動。新資料保存為 `AUTO`，由 `AutomaticPlacement` 在分析時推估床上／床邊／未知，不使用舊版手動位置設定。原始分鐘資料仍保留，以便重算。
 - 新的 `recording_enabled` 預設 true，取代舊版感測器 `enabled`；原來沒開啟動作感測的使用者升級後也會自動記錄。首頁與通知只保留整體「暫停／恢復自動記錄」，明確暫停後不自動重啟。
-- 有硬體 FIFO 時，未接電源要求 5 Hz，接電要求 10 Hz；批次最長 60 秒，並限制在 FIFO 容量 × 取樣間隔 × 80%。硬體最小取樣間隔也會限制請求頻率。
-- 無 FIFO 時降為 1 Hz，不能宣稱有硬體批次。優先選有 FIFO 的 wake-up accelerometer；非 wake-up 感測器休眠時可能缺資料。
+- Google 高信心分類觸發後固定要求 1 Hz，接電時也不提高頻率；有硬體 FIFO 時批次延遲依 FIFO 容量 × 取樣間隔 × 80% 換算，不另設 App 時間上限，僅受 Android API `Int` 可表示範圍限制。硬體最小取樣間隔也會限制請求頻率。
+- 無 FIFO 時仍為 1 Hz，但不能宣稱有硬體批次。優先選有 FIFO 的 wake-up accelerometer；非 wake-up 感測器休眠時可能缺資料。
 - 未接電且電量 ≤ 15% 暫停；接電或電量恢復後重新評估。時段外不取樣，但保留前景服務通知與邊界排程。
 - 不使用持續 CPU wake lock，不啟用陀螺儀、麥克風、定位或相機。`play-services-location` 是為了活動／Sleep API，不能據此聲稱有 GPS 定位功能。
 - `MotionService` 以 HandlerThread 收感測事件、以事件的單調時間轉成資料時間，不能用批次送達時間取代樣本時間。
@@ -162,10 +164,10 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 儀器測試 APK：`./gradlew.bat assembleDebugAndroidTest --no-configuration-cache`。執行裝置測試前先用 `adb.exe devices -l` 辨識裝置，所有命令指定 `-s <目標序號>`，不要任意安裝到所有連線實機。
 
 - `app/src/test/java/com/rsps1008/sleeptrace/SleepAnalyzerTest.kt`：手機使用扣除、分類不足仍自動同步、一般候選。
-- `app/src/test/java/com/rsps1008/sleeptrace/MotionEngineTest.kt`：FIFO／取樣、批次時間、資料缺口、床邊／手機使用、跨午夜、動作衝突等。
+- `app/src/test/java/com/rsps1008/sleeptrace/MotionEngineTest.kt`：Google 分類觸發門檻、1 Hz／FIFO、批次時間、資料缺口、床邊／手機使用、跨午夜、動作衝突等。
 - `app/src/test/java/com/rsps1008/sleeptrace/AutomaticPlacementTest.kt`：自動放置證據、單次震動、完全靜止、手機使用、缺口、位置變化與舊資料相容。
 - `app/src/test/java/com/rsps1008/sleeptrace/AutomaticSyncTest.kt`：舊狀態、自動寫入、重試／取消、中斷恢復、版本競態、來源選擇與清醒切分。
-- `app/src/androidTest/java/com/rsps1008/sleeptrace/MotionRuntimeTest.kt`：舊感測設定升級後的自動啟動、首頁單一標題及系統安全間距、不顯示感測器選項、AUTO 摘要、低電量暫停／接電恢復／整體停止。會改 App 時段、授權及模擬電量，**只在可丟棄模擬器執行**。
+- `app/src/androidTest/java/com/rsps1008/sleeptrace/MotionRuntimeTest.kt`：舊感測設定升級後等待 Google 分類、分類觸發 1 Hz 取樣、首頁單一標題及系統安全間距、不顯示感測器選項、AUTO 摘要、低電量暫停／接電恢復／整體停止。會改 App 時段、授權並模擬分類及電量，**只在可丟棄模擬器執行**。
 - `app/src/androidTest/java/com/rsps1008/sleeptrace/AutoSyncStorageTest.kt`：實際 SharedPreferences 遷移、重讀、重試及版本保存；會取消 App 的工作並暫時替換紀錄，**只在可丟棄模擬器執行**。寫入端是替身，不是實際健康服務。
 - `app/src/androidTest/java/com/rsps1008/sleeptrace/BackgroundAccessRuntimeTest.kt`：系統設定返回／拒絕後仍自動記錄、不重複跳轉、電池豁免與明確限制狀態更新；會修改測試 App 的 allowlist／AppOps，**只在可丟棄模擬器執行**。系統授權視窗以 ActivityMonitor 模擬取消。
 - 純文件修改不需重跑 Android 建置；應核對路徑、敘述與既有測試證據。
@@ -177,6 +179,8 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 截至 2026-09-28，本次自動放置／簡化首頁版本：35 個 JVM 測試通過（SleepAnalyzer 3、MotionEngine 13、AutomaticPlacement 7、AutomaticSync 11、既有範例 1），Lint 零問題，Debug APK 與測試 APK 建置成功。唯讀 Pixel_10_Pro 模擬器的 MotionRuntimeTest 通過，已驗證首頁自動啟動感測、標題完整且避開系統列、AUTO 摘要與電池切換；截圖目視確認標題未遮擋。測試時模擬器曾出現 System UI 無回應視窗，排除後重新截圖正常。先前自動同步版本的 AutoSyncStorageTest 通過、健康資料使用說明頁成功啟動，屬歷史驗證，本次未重跑。後續程式變更後不能直接宣稱仍然通過。
 
 2026-09-28 電池限制／小米自啟動引導更新：35 個 JVM 測試通過、Lint 無未處理問題（BatteryLife 的局部理由見上）、Debug APK 與測試 APK 建置成功。唯讀模擬器的 BackgroundAccessRuntimeTest 與 MotionRuntimeTest 共 2 個測試通過，含拒絕後仍記錄、不重複跳轉、允許／撤回／明確限制後返回更新及既有省電服務行為。Mi Note 10 僅以唯讀 `resolve-activity` 確認自啟動入口存在，未安裝或更動實機設定，尚未驗證 MIUI／HyperOS 的完整操作及整夜背景恢復。
+
+2026-09-29 Google 分類觸發／1 Hz 更新：36 個 JVM 測試通過，Lint 無未處理問題，Debug APK 與測試 APK 建置成功。新增目前時段、信心門檻與事件新鮮度測試，並將既有 MotionEngine 取樣測試改為 1 Hz。當時只連接 Mi Note 10 與 Pixel 實機，依規則未安裝或執行會變更授權、時段及模擬電量的 MotionRuntimeTest；Google 實際分類觸發、Doze／FIFO、整夜耗電及準確度仍未經實機驗證。
 
 尚未完成或不能保證的項目：
 

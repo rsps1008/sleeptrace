@@ -5,8 +5,8 @@ import android.content.Context
 import android.content.Intent
 import com.google.android.gms.location.SleepClassifyEvent
 import com.google.android.gms.location.SleepSegmentEvent
-import com.rsps1008.sleeptrace.data.SleepPreferences
 import com.rsps1008.sleeptrace.data.SleepStore
+import com.rsps1008.sleeptrace.motion.MotionService
 import com.rsps1008.sleeptrace.work.WorkScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,9 +30,11 @@ class SleepUpdateReceiver : BroadcastReceiver() {
                         })
                 }
                 if (SleepClassifyEvent.hasEvents(intent)) {
-                    store.appendSamples(SleepClassifyEvent.extractEvents(intent).map {
+                    val samples = SleepClassifyEvent.extractEvents(intent).map {
                         ClassificationSample(it.timestampMillis, it.confidence, it.motion, it.light)
-                    })
+                    }
+                    store.appendSamples(samples)
+                    MotionService.active?.onSleepClassifications(samples)
                 }
                 // Classification arrives frequently. Reconcile on completed segments or the periodic worker.
                 if (SleepSegmentEvent.hasEvents(intent)) WorkScheduler.reconcileSoon(context)

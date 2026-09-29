@@ -4,6 +4,7 @@ import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageInterval
+import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import java.time.Instant
 import java.time.ZoneId
 import kotlin.math.sqrt
@@ -15,13 +16,33 @@ enum class MotionLevel { QUIET, ACTIVE, UNKNOWN }
 
 data class SamplingPlan(val periodUs: Int, val latencyUs: Int) {
     companion object {
-        fun choose(charging: Boolean, fifoCount: Int, minDelayUs: Int = 0): SamplingPlan {
-            val period = maxOf(if (fifoCount <= 0) 1_000_000 else if (charging) 100_000 else 200_000, minDelayUs)
-            // Leave FIFO headroom. A requested latency is an upper bound, not a guarantee.
-            val latency = if (fifoCount <= 0) 0 else minOf(60_000_000L, fifoCount.toLong() * period * 8 / 10).toInt()
+        fun choose(fifoCount: Int, minDelayUs: Int = 0): SamplingPlan {
+            // Approximate sleep timing does not need high-rate raw motion. Keep one low-power
+            // plan on battery and external power so charging never silently increases sensing.
+            val period = maxOf(1_000_000, minDelayUs)
+            // Use 80% of the advertised FIFO instead of imposing an app-defined time cap.
+            // SensorManager accepts microseconds as Int, so clamp only to the API representation.
+            val latency = if (fifoCount <= 0) 0 else minOf(
+                Int.MAX_VALUE.toLong(), fifoCount.toLong() * period * 8 / 10
+            ).toInt()
             return SamplingPlan(period, latency)
         }
     }
+}
+
+object SleepClassificationTrigger {
+    const val MIN_CONFIDENCE = 80
+    const val MAX_EVENT_AGE_MILLIS = 20 * MINUTE_MS
+    private const val FUTURE_TOLERANCE_MILLIS = 2 * MINUTE_MS
+
+    /** A recent high-confidence Google classification may start motion capture for this window. */
+    fun shouldStart(samples: List<ClassificationSample>, window: MotionWindow, now: Long): Boolean =
+        samples.any {
+            it.confidence >= MIN_CONFIDENCE &&
+                it.timeMillis >= window.start && it.timeMillis < window.end &&
+                it.timeMillis >= now - MAX_EVENT_AGE_MILLIS &&
+                it.timeMillis <= now + FUTURE_TOLERANCE_MILLIS
+        }
 }
 
 data class MotionMinute(

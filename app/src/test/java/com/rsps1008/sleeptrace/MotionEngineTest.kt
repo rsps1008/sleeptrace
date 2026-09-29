@@ -16,17 +16,25 @@ class MotionEngineTest {
         if (level == MotionLevel.ACTIVE) MINUTE_MS else 0, if (level == MotionLevel.ACTIVE) 60_000.0 else 0.0, 300, placement
     )
 
-    @Test fun `sampling responds to power and FIFO capacity`() {
-        assertEquals(SamplingPlan(200_000, 60_000_000), SamplingPlan.choose(false, 1000))
-        assertEquals(SamplingPlan(100_000, 60_000_000), SamplingPlan.choose(true, 1000))
-        assertEquals(SamplingPlan(200_000, 3_200_000), SamplingPlan.choose(false, 20))
-        assertEquals(SamplingPlan(1_000_000, 0), SamplingPlan.choose(true, 0))
-        assertEquals(400_000, SamplingPlan.choose(true, 100, 400_000).periodUs)
+    @Test fun `sampling stays at one hertz and batches to FIFO capacity`() {
+        assertEquals(SamplingPlan(1_000_000, 800_000_000), SamplingPlan.choose(1000))
+        assertEquals(SamplingPlan(1_000_000, 16_000_000), SamplingPlan.choose(20))
+        assertEquals(SamplingPlan(1_000_000, 0), SamplingPlan.choose(0))
+        assertEquals(1_500_000, SamplingPlan.choose(100, 1_500_000).periodUs)
+        assertEquals(Int.MAX_VALUE, SamplingPlan.choose(10_000).latencyUs)
+    }
+
+    @Test fun `recent high confidence classification starts current window only`() {
+        val window = schedule.windowAt(start)
+        assertTrue(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start + MINUTE_MS, 80, 0, 0)), window, start + 2 * MINUTE_MS))
+        assertFalse(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start + MINUTE_MS, 79, 0, 0)), window, start + 2 * MINUTE_MS))
+        assertFalse(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start + MINUTE_MS, 100, 0, 0)), window, start + 22 * MINUTE_MS))
+        assertFalse(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start - MINUTE_MS, 100, 0, 0)), window, start + MINUTE_MS))
     }
 
     @Test fun `a delayed batch keeps sample time and complete coverage`() {
-        val engine = MotionAccumulator(SamplingPlan.choose(false, 1000), Placement.BED)
-        for (offset in 0L..120_000L step 200) engine.add(start + offset, 0.0, 0.0, 9.81)
+        val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
+        for (offset in 0L..120_000L step 1_000) engine.add(start + offset, 0.0, 0.0, 9.81)
         val rows = engine.drain(start + 120_000)
         assertEquals(2, rows.size)
         assertEquals(start, rows.first().startMillis)
@@ -35,14 +43,14 @@ class MotionEngineTest {
     }
 
     @Test fun `rotation is detected even when vector magnitude is constant`() {
-        val engine = MotionAccumulator(SamplingPlan.choose(false, 1000), Placement.BED)
-        for (index in 0..300) engine.add(start + index * 200L, if (index % 2 == 0) 9.81 else 0.0, 0.0, if (index % 2 == 0) 0.0 else 9.81)
+        val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
+        for (index in 0..60) engine.add(start + index * 1_000L, if (index % 2 == 0) 9.81 else 0.0, 0.0, if (index % 2 == 0) 0.0 else 9.81)
         assertEquals(MotionLevel.ACTIVE, engine.drain(start + MINUTE_MS).single().level)
     }
 
     @Test fun `suspend gaps duplicate and out of order events are not quiet coverage`() {
-        val engine = MotionAccumulator(SamplingPlan.choose(false, 1000), Placement.BED)
-        for (offset in 0L..10_000L step 200) engine.add(start + offset, 0.0, 0.0, 9.81)
+        val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
+        for (offset in 0L..10_000L step 1_000) engine.add(start + offset, 0.0, 0.0, 9.81)
         engine.add(start, 500.0, 0.0, 0.0)
         engine.add(start + 10_000, 500.0, 0.0, 0.0)
         engine.add(start + 60_000, 0.0, 0.0, 9.81)
@@ -52,7 +60,7 @@ class MotionEngineTest {
     }
 
     @Test fun `non finite events do not contaminate motion`() {
-        val engine = MotionAccumulator(SamplingPlan.choose(false, 1000), Placement.BED)
+        val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
         engine.add(start, Double.NaN, 0.0, 0.0)
         assertTrue(engine.drain(Long.MAX_VALUE, true).isEmpty())
     }

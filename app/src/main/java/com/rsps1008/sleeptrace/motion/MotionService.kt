@@ -26,6 +26,8 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.rsps1008.sleeptrace.MainActivity
 import com.rsps1008.sleeptrace.data.SleepPreferences
+import com.rsps1008.sleeptrace.data.SleepStore
+import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepTracker
 import com.rsps1008.sleeptrace.work.WorkScheduler
@@ -49,6 +51,7 @@ class MotionService : Service(), SensorEventListener2 {
     private var plan: SamplingPlan? = null
     private var accumulator: MotionAccumulator? = null
     private var schedule: SleepSchedule? = null
+    private var triggeredWindowStart: Long? = null
     private var clockOffset = 0L
     private var lastPersist = 0L
     private val pendingMinutes = mutableListOf<MotionMinute>()
@@ -114,14 +117,22 @@ class MotionService : Service(), SensorEventListener2 {
     }
 
     fun refreshConfiguration() {
-        scope.launch {
+        scope.launch(Dispatchers.IO) {
             val prefs = SleepPreferences(this@MotionService)
             val newSchedule = if (prefs.configured()) prefs.schedule() else null
-            handler.post { if (!stopped && !destroyed) configure(newSchedule) }
+            val classifications = SleepStore(this@MotionService).samples()
+            handler.post { if (!stopped && !destroyed) configure(newSchedule, classifications) }
         }
     }
 
-    private fun configure(newSchedule: SleepSchedule?) {
+    /** Called after Google Play services delivers sleep classifications. */
+    fun onSleepClassifications(samples: List<ClassificationSample>) {
+        handler.post {
+            if (!stopped && !destroyed) configure(schedule, samples)
+        }
+    }
+
+    private fun configure(newSchedule: SleepSchedule?, classifications: List<ClassificationSample> = emptyList()) {
         schedule = newSchedule
         if (!settings.enabled || !SleepTracker.hasActivityRecognition(this)) {
             stopped = true
@@ -135,9 +146,15 @@ class MotionService : Service(), SensorEventListener2 {
         val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
         val lowBattery = !charging && level >= 0 && scale > 0 && level.toDouble() / scale <= 0.15
+        if (window == null || now < window.start || now >= window.end) triggeredWindowStart = null
+        if (window != null && triggeredWindowStart != window.start &&
+            SleepClassificationTrigger.shouldStart(classifications, window, now)) {
+            triggeredWindowStart = window.start
+        }
         val pauseReason = when {
             sensor == null -> "這支手機沒有可用的加速度計"
             window == null || now < window.start || now >= window.end -> "等待設定的偵測時段"
+            triggeredWindowStart != window.start -> "等待 Google 判斷進入睡眠"
             lowBattery -> "電量 ≤ 15%，暫停動作偵測"
             else -> null
         }
@@ -146,7 +163,7 @@ class MotionService : Service(), SensorEventListener2 {
             transition { publish(pauseReason); if (wasRecording) WorkScheduler.reconcileSoon(this) }; return
         }
         val selected = sensor!!
-        val next = SamplingPlan.choose(charging, selected.fifoMaxEventCount, selected.minDelay)
+        val next = SamplingPlan.choose(selected.fifoMaxEventCount, selected.minDelay)
         val offset = now - SystemClock.elapsedRealtime()
         if (plan == next && kotlin.math.abs(clockOffset - offset) < 2_000 && pendingChange == null) return
         transition {
@@ -158,9 +175,9 @@ class MotionService : Service(), SensorEventListener2 {
                 publish("加速度計註冊失敗，請重新啟動動作偵測")
             } else {
                 plan = next
-                val batching = if (next.latencyUs > 0) "批次上限 ${next.latencyUs / 1_000_000} 秒" else "無硬體 FIFO，降為 1 Hz"
+                val batching = if (next.latencyUs > 0) "批次上限 ${next.latencyUs / 1_000_000} 秒" else "無硬體 FIFO"
                 val sleepHint = if (!selected.isWakeUpSensor) "；休眠時可能缺資料" else ""
-                publish("${if (charging) "供電中" else "省電"} · ${1_000_000 / next.periodUs} Hz · $batching$sleepHint")
+                publish("Google 已判斷入睡 · ${1_000_000 / next.periodUs} Hz · $batching$sleepHint")
             }
         }
     }
