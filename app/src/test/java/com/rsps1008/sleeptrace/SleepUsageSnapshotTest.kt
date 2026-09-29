@@ -4,6 +4,8 @@ import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepWindow
 import com.rsps1008.sleeptrace.sleep.SleepUsageSnapshot
+import com.rsps1008.sleeptrace.sleep.UsageSnapshot
+import com.rsps1008.sleeptrace.sleep.UsageSnapshotResult
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageInterval
 import org.junit.Assert.assertEquals
@@ -53,5 +55,36 @@ class SleepUsageSnapshotTest {
         assertEquals(listOf(SleepWindow(0, 10)), SleepUsageSnapshot.completedWindows(
             listOf(SleepWindow(0, 10), SleepWindow(10, 20)), 15
         ))
+    }
+
+    @Test fun `same start with a changed end is a different usage window`() {
+        val previous = UsageSnapshot(
+            windowStartMillis = 10,
+            windowEndMillis = 20,
+            accessAvailable = true,
+            intervals = emptyList(),
+            capturedAtMillis = 30
+        )
+
+        assertTrue(SleepUsageSnapshot.canReuse(previous, SleepWindow(10, 20), accessAvailableNow = true))
+        assertFalse(SleepUsageSnapshot.canReuse(previous, SleepWindow(10, 25), accessAvailableNow = true))
+        assertEquals(
+            listOf(SleepWindow(10, 20), SleepWindow(10, 25)),
+            SleepUsageSnapshot.completedWindows(listOf(SleepWindow(10, 20), SleepWindow(10, 25)), 30)
+        )
+    }
+
+    @Test fun `usage access is resolved for the exact night window`() {
+        val result = UsageSnapshotResult(
+            snapshots = listOf(
+                UsageSnapshot(10, 20, accessAvailable = true, intervals = emptyList(), capturedAtMillis = 20),
+                UsageSnapshot(20, 30, accessAvailable = false, intervals = emptyList(), capturedAtMillis = 30)
+            ),
+            intervals = emptyList()
+        )
+
+        assertTrue(result.availableFor(SleepWindow(10, 20)))
+        assertFalse(result.availableFor(SleepWindow(20, 30)))
+        assertFalse(result.availableFor(listOf(SleepWindow(10, 20), SleepWindow(20, 30))))
     }
 }

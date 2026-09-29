@@ -16,7 +16,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Indexed, transactional storage for raw Sleep API events and local sleep records. */
-class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 7) {
+class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 8) {
     private val maintenancePrefs = context.applicationContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
         setWriteAheadLoggingEnabled(true)
@@ -44,6 +44,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         if (oldVersion < 5) createSessionStateIndex(db)
         if (oldVersion < 6) createSessionOverlapIndex(db)
         if (oldVersion < 7) createUsageSnapshots(db)
+        if (oldVersion < 8) upgradeUsageSnapshotsToCompositeKey(db)
     }
 
     private fun createSessions(db: SQLiteDatabase) = db.execSQL("""
@@ -72,8 +73,15 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
     )
 
     private fun createUsageSnapshots(db: SQLiteDatabase) = db.execSQL(
-        "CREATE TABLE IF NOT EXISTS usage_snapshots (windowStart INTEGER PRIMARY KEY, windowEnd INTEGER NOT NULL, accessAvailable INTEGER NOT NULL, intervals TEXT NOT NULL, capturedAt INTEGER NOT NULL)"
+        "CREATE TABLE IF NOT EXISTS usage_snapshots (windowStart INTEGER NOT NULL, windowEnd INTEGER NOT NULL, accessAvailable INTEGER NOT NULL, intervals TEXT NOT NULL, capturedAt INTEGER NOT NULL, PRIMARY KEY(windowStart, windowEnd))"
     )
+
+    private fun upgradeUsageSnapshotsToCompositeKey(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE usage_snapshots RENAME TO usage_snapshots_v7")
+        createUsageSnapshots(db)
+        db.execSQL("INSERT OR REPLACE INTO usage_snapshots (windowStart, windowEnd, accessAvailable, intervals, capturedAt) SELECT windowStart, windowEnd, accessAvailable, intervals, capturedAt FROM usage_snapshots_v7")
+        db.execSQL("DROP TABLE usage_snapshots_v7")
+    }
 
     fun import(segments: List<SleepSegment>, samples: List<ClassificationSample>) { append(segments, samples) }
     @Synchronized
@@ -95,8 +103,9 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         if (shouldCleanup) maintenancePrefs.edit { putLong(EVENT_CLEANUP_KEY, now) }
     }
 
-    fun usageSnapshot(windowStartMillis: Long): UsageSnapshot? = readableDatabase.query(
-        "usage_snapshots", null, "windowStart = ?", arrayOf(windowStartMillis.toString()), null, null, null, "1"
+    fun usageSnapshot(windowStartMillis: Long, windowEndMillis: Long): UsageSnapshot? = readableDatabase.query(
+        "usage_snapshots", null, "windowStart = ? AND windowEnd = ?",
+        arrayOf(windowStartMillis.toString(), windowEndMillis.toString()), null, null, null, "1"
     ).use { cursor ->
         if (!cursor.moveToFirst()) null else {
             val intervals = JSONArray(cursor.getString(cursor.getColumnIndexOrThrow("intervals")))

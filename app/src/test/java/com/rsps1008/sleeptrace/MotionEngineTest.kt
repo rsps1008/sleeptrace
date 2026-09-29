@@ -92,6 +92,22 @@ class MotionEngineTest {
         assertEquals(session.id, MotionSleepEstimator.estimate(rows, emptyList(), schedule, end).single().id)
     }
 
+    @Test fun `motion candidates use UsageStats availability from their own night`() {
+        val secondWindow = schedule.windowForStartDate(LocalDate.of(2026, 9, 28), ZoneId.systemDefault())
+        val rows = (0..119).map { minute(it) } + (0..119).map {
+            minute(it).copy(startMillis = secondWindow.startMillis + it * MINUTE_MS)
+        }
+
+        val sessions = MotionSleepEstimator.estimate(
+            rows, emptyList(), schedule, secondWindow.endMillis,
+            usageAvailable = { it.startMillis == window.startMillis }
+        )
+
+        assertEquals(2, sessions.size)
+        assertFalse(sessions.first { it.startMillis == window.startMillis }.reason.contains("無法排除手機使用"))
+        assertTrue(sessions.first { it.startMillis == secondWindow.startMillis }.reason.contains("無法排除手機使用"))
+    }
+
     @Test fun `active phone time breaks sleep candidate even with quiet accelerometer`() {
         val session = MotionSleepEstimator.estimate((0..119).map { minute(it) }, listOf(UsageInterval(start, start + 45 * MINUTE_MS)), schedule, end).single()
         assertEquals(start + 45 * MINUTE_MS, session.startMillis)

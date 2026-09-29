@@ -2,8 +2,8 @@ package com.rsps1008.sleeptrace.data
 
 import android.content.Context
 
-/** Persisted generation lets KEEP work coalesce requests without losing writes during a run. */
-object ReconciliationSignals {
+/** Persisted work generation lets KEEP requests detect raw-data, session, and permission changes during a run. */
+object AutomaticWorkSignals {
     private const val PREFS = "sleeptrace_maintenance"
     private const val GENERATION = "reconcile_generation"
     private const val RECONCILED = "reconciled_generation"

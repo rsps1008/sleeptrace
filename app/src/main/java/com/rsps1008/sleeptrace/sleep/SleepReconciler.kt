@@ -3,7 +3,7 @@ package com.rsps1008.sleeptrace.sleep
 import android.content.Context
 import com.rsps1008.sleeptrace.motion.MotionSleepEstimator
 import com.rsps1008.sleeptrace.motion.AutomaticPlacement
-import com.rsps1008.sleeptrace.data.ReconciliationSignals
+import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
 import com.rsps1008.sleeptrace.sleepDependencies
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -14,7 +14,7 @@ class SleepReconciler(private val context: Context) {
         val preferences = dependencies.preferences
         if (!preferences.configured() || !dependencies.motionSettings.enabled) return@withLock
         val store = dependencies.store
-        val capturedGeneration = ReconciliationSignals.generation(context)
+        val capturedGeneration = AutomaticWorkSignals.generation(context)
         val schedule = preferences.schedule()
         val now = System.currentTimeMillis()
         val analysisStart = now - RECENT_ANALYSIS_MILLIS
@@ -33,25 +33,15 @@ class SleepReconciler(private val context: Context) {
         val segments = allSegments.filter { segment ->
             segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
         }
-        val completedSegments = segments.flatMap { segment ->
-            completedWindows.mapNotNull { window ->
-                val start = maxOf(segment.startMillis, window.startMillis)
-                val end = minOf(segment.endMillis, window.endMillis)
-                if (end <= start) null else segment.copy(startMillis = start, endMillis = end)
-            }
-        }
-        val base = SleepAnalyzer.analyze(
-            completedSegments,
-            samples,
-            usageResult.intervals,
-            schedule,
-            usageAvailable = usageResult.availableFor(completedWindows)
+        val base = SleepAnalyzer.analyzeByWindow(
+            segments, samples, usageResult.intervals, schedule, completedWindows, usageResult::availableFor
         )
         val motion = dependencies.motionStore.read(analysisStart, now)
         val resolved = AutomaticPlacement.resolve(motion, usageResult.intervals)
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
         val fallback = MotionSleepEstimator.estimate(
-            resolved, usageResult.intervals, schedule, now, usageAvailable = usageResult.availableFor(completedWindows)
+            resolved, usageResult.intervals, schedule, now,
+            usageAvailable = usageResult::availableFor
         )
         store.mergeCalculated(selectBestSessions(calculated, fallback), analysisStart, now)
         store.markReconciled(capturedGeneration)
@@ -60,7 +50,7 @@ class SleepReconciler(private val context: Context) {
         private val mutex = Mutex()
         private const val RECENT_ANALYSIS_MILLIS = 48L * 60 * 60 * 1000
         private val RECONCILIATION_STATES = setOf(
-            SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED_RETRYABLE, SyncState.FAILED_PERMANENT
+            SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED_RETRYABLE
         )
     }
 }

@@ -46,14 +46,14 @@ class SleepStore(context: Context) {
         return eventStore.sessions(limit, offset, includeAwakeIntervals, states)
     }
 
-    fun hasPendingAutomaticWork(): Boolean = ReconciliationSignals.isDirty(appContext) || sessions(
+    fun hasPendingAutomaticWork(): Boolean = AutomaticWorkSignals.isDirty(appContext) || sessions(
         includeAwakeIntervals = false,
         states = setOf(SyncState.PENDING, SyncState.FAILED_RETRYABLE, SyncState.SYNCING, SyncState.RETIRED)
     ).isNotEmpty()
 
-    fun hasReconciliationDirty(): Boolean = ReconciliationSignals.isDirty(appContext)
+    fun hasReconciliationDirty(): Boolean = AutomaticWorkSignals.isDirty(appContext)
 
-    fun markReconciled(generation: Long) = ReconciliationSignals.markReconciled(appContext, generation)
+    fun markReconciled(generation: Long) = AutomaticWorkSignals.markReconciled(appContext, generation)
 
     fun session(id: String, includeAwakeIntervals: Boolean = true): SleepSession? {
         migrateSessions()
@@ -97,6 +97,7 @@ class SleepStore(context: Context) {
             revision = current.revision + 1, state = SyncState.PENDING,
             manuallyEdited = true, reason = "使用者已修正時間，App 自動同步", syncError = null,
             usageSnapshotApplied = false))
+        AutomaticWorkSignals.markDirty(appContext)
     }
 
     fun retryPermanentFailure(id: String): Boolean = synchronized(sessionLock) {
@@ -108,6 +109,7 @@ class SleepStore(context: Context) {
             else -> return@synchronized false
         }
         eventStore.upsertSession(current.copy(state = retryState, syncError = null))
+        AutomaticWorkSignals.markDirty(appContext)
         true
     }
 
@@ -127,7 +129,7 @@ class SleepStore(context: Context) {
     fun appendSegments(events: List<SleepSegment>) {
         migrateRawEvents()
         eventStore.append(segments = events)
-        if (events.isNotEmpty()) ReconciliationSignals.markDirty(appContext)
+        if (events.isNotEmpty()) AutomaticWorkSignals.markDirty(appContext)
     }
 
     private fun legacySamples(): List<ClassificationSample> = readArray(samplesKey).map {
@@ -139,12 +141,12 @@ class SleepStore(context: Context) {
     fun appendSamples(events: List<ClassificationSample>) {
         migrateRawEvents()
         eventStore.append(samples = events)
-        if (events.isNotEmpty()) ReconciliationSignals.markDirty(appContext)
+        if (events.isNotEmpty()) AutomaticWorkSignals.markDirty(appContext)
     }
 
-    fun usageSnapshot(windowStartMillis: Long): UsageSnapshot? {
+    fun usageSnapshot(windowStartMillis: Long, windowEndMillis: Long): UsageSnapshot? {
         migrateRawEvents()
-        return eventStore.usageSnapshot(windowStartMillis)
+        return eventStore.usageSnapshot(windowStartMillis, windowEndMillis)
     }
 
     fun saveUsageSnapshot(snapshot: UsageSnapshot) {
@@ -157,7 +159,7 @@ class SleepStore(context: Context) {
         val segments = legacySegments()
         val samples = legacySamples()
         eventStore.import(segments, samples)
-        if (segments.isNotEmpty() || samples.isNotEmpty()) ReconciliationSignals.markDirty(appContext)
+        if (segments.isNotEmpty() || samples.isNotEmpty()) AutomaticWorkSignals.markDirty(appContext)
         check(preferences.edit().remove(segmentsKey).remove(samplesKey).putBoolean(rawMigrationKey, true).commit()) { "睡眠事件遷移失敗" }
     }
 
@@ -178,7 +180,7 @@ class SleepStore(context: Context) {
         private const val rawMigrationKey = "raw_events_migrated_v1"
         private const val sessionMigrationKey = "sessions_migrated_v2"
         private val RECONCILIATION_STATES = setOf(
-            SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED_RETRYABLE, SyncState.FAILED_PERMANENT
+            SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED_RETRYABLE
         )
     }
 }

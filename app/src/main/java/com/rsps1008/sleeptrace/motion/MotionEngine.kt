@@ -134,7 +134,7 @@ object MotionSleepEstimator {
         usage: List<UsageInterval>,
         schedule: SleepSchedule,
         now: Long,
-        usageAvailable: Boolean = true
+        usageAvailable: (SleepWindow) -> Boolean = { true }
     ): List<SleepSession> {
         return minutes.mapNotNull { minute -> schedule.windowAt(minute.startMillis)?.let { it to minute } }
             .groupBy({ it.first }, { it.second }).flatMap { (window, all) ->
@@ -174,7 +174,7 @@ object MotionSleepEstimator {
                     id = "motion-${window.start}-${run.first}", startMillis = run.first, endMillis = run.second,
                     confidence = 50, awakeMillis = 0, state = SyncState.PENDING,
                     reason = "加速度計推估：持續安靜至少 20 分鐘；分段睡眠會分別保存；非睡眠分期" +
-                        if (usageAvailable) "" else "；未授予使用情況存取權，無法排除手機使用",
+                        if (usageAvailable(window)) "" else "；未授予使用情況存取權，無法排除手機使用",
                     usageSnapshotApplied = true
                 )
             }

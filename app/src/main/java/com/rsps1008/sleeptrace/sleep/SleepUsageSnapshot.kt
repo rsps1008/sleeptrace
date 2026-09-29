@@ -7,9 +7,11 @@ data class UsageSnapshotResult(
     val snapshots: List<UsageSnapshot>,
     val intervals: List<UsageInterval>
 ) {
-    fun availableFor(windows: List<SleepWindow>): Boolean = windows.isNotEmpty() && windows.all { window ->
-            snapshots.firstOrNull { it.windowStartMillis == window.startMillis }?.accessAvailable == true
-    }
+    fun availableFor(window: SleepWindow): Boolean = snapshots.firstOrNull {
+        it.windowStartMillis == window.startMillis && it.windowEndMillis == window.endMillis
+    }?.accessAvailable == true
+
+    fun availableFor(windows: List<SleepWindow>): Boolean = windows.isNotEmpty() && windows.all(::availableFor)
 }
 
 /** One complete, persisted UsageStats read per sleep window, shared by analysis, placement and upload. */
@@ -18,10 +20,9 @@ class SleepUsageSnapshot(private val context: Context) {
         val accessNow = UsageMonitor.hasAccess(context)
         val snapshots = completedWindows(windows, nowMillis)
             .map { window ->
-                val previous = store.usageSnapshot(window.startMillis)
+                val previous = store.usageSnapshot(window.startMillis, window.endMillis)
                 when {
-                    previous?.accessAvailable == true && previous.capturedAtMillis >= window.endMillis -> previous
-                    previous?.accessAvailable == false && !accessNow && previous.capturedAtMillis >= window.endMillis -> previous
+                    canReuse(previous, window, accessNow) -> previous!!
                     else -> {
                         val captured = UsageSnapshot(
                             windowStartMillis = window.startMillis,
@@ -61,7 +62,17 @@ class SleepUsageSnapshot(private val context: Context) {
 
     companion object {
         internal fun completedWindows(windows: List<SleepWindow>, nowMillis: Long): List<SleepWindow> =
-            windows.distinctBy { it.startMillis }.filter { it.endMillis <= nowMillis }
+            windows.distinctBy { it.startMillis to it.endMillis }.filter { it.endMillis <= nowMillis }
+
+        internal fun canReuse(
+            previous: UsageSnapshot?,
+            window: SleepWindow,
+            accessAvailableNow: Boolean
+        ): Boolean = previous != null &&
+            previous.windowStartMillis == window.startMillis &&
+            previous.windowEndMillis == window.endMillis &&
+            previous.capturedAtMillis >= window.endMillis &&
+            (previous.accessAvailable || !accessAvailableNow)
 
         internal fun isWindowComplete(
             session: SleepSession,

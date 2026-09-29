@@ -99,7 +99,8 @@ class HealthConnectSync(private val context: Context) {
             onFailure = failures::add,
             writeBatch = { sessions -> client.insertRecords(sessions.map(::toHealthRecord)) }
         )
-        if (failures.any { !isTransientSyncError(it) }) return SyncOutcome.FAILURE
+        if (failures.any(::isTransientSyncError)) return SyncOutcome.RETRY
+        if (failures.isNotEmpty()) return SyncOutcome.FAILURE
         if (complete) return SyncOutcome.SUCCESS
         return SyncOutcome.RETRY
     }

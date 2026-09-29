@@ -4,6 +4,26 @@ package com.rsps1008.sleeptrace.sleep
 object SleepAnalyzer {
     const val MINIMUM_SLEEP_MILLIS = 30 * 60 * 1000L
 
+    /** Analyzes each completed window with only that window's phone-use data and access state. */
+    fun analyzeByWindow(
+        segments: List<SleepSegment>,
+        classifications: List<ClassificationSample>,
+        phoneUse: List<UsageInterval>,
+        schedule: SleepSchedule,
+        windows: List<SleepWindow>,
+        usageAvailable: (SleepWindow) -> Boolean
+    ): List<SleepSession> = windows.flatMap { window ->
+        val clippedSegments = segments.mapNotNull { segment ->
+            val start = maxOf(segment.startMillis, window.startMillis)
+            val end = minOf(segment.endMillis, window.endMillis)
+            if (end <= start) null else segment.copy(startMillis = start, endMillis = end)
+        }
+        val windowPhoneUse = phoneUse.filter {
+            it.endMillis > window.startMillis && it.startMillis < window.endMillis
+        }
+        analyze(clippedSegments, classifications, windowPhoneUse, schedule, usageAvailable(window))
+    }
+
     fun analyze(
         segments: List<SleepSegment>,
         classifications: List<ClassificationSample>,

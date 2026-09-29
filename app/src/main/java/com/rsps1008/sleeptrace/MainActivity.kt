@@ -35,6 +35,7 @@ import androidx.work.WorkManager
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
 import com.rsps1008.sleeptrace.motion.*
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
@@ -96,7 +97,10 @@ class MainActivity : AppCompatActivity() {
         PermissionController.createRequestPermissionResultContract()
     ) {
         lifecycleScope.launch {
-            if (healthSync.hasWritePermission()) withContext(Dispatchers.IO) { store.retryPermanentFailures() }
+            if (healthSync.hasWritePermission()) withContext(Dispatchers.IO) {
+                AutomaticWorkSignals.markDirty(this@MainActivity)
+                store.retryPermanentFailures()
+            }
             WorkScheduler.reconcileSoon(this@MainActivity)
             if (continueStartupPermissionFlow) {
                 continueStartupPermissionFlow = false
@@ -189,7 +193,10 @@ class MainActivity : AppCompatActivity() {
         val key = "usage_access_last_seen"
         val known = prefs.contains(key)
         val previous = prefs.getBoolean(key, false)
-        if (current && (!known || !previous)) WorkScheduler.reconcileSoon(this)
+        if (current && (!known || !previous)) {
+            AutomaticWorkSignals.markDirty(this)
+            WorkScheduler.reconcileSoon(this)
+        }
         prefs.edit { putBoolean(key, current) }
     }
 

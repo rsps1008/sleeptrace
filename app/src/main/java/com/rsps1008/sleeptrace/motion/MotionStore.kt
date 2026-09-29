@@ -6,7 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import androidx.core.content.edit
 import androidx.core.database.sqlite.transaction
-import com.rsps1008.sleeptrace.data.ReconciliationSignals
+import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
 
 class MotionSettings(context: Context) {
     private val prefs = context.getSharedPreferences("sleeptrace_motion", Context.MODE_PRIVATE)
@@ -82,7 +82,7 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
             }
         }
         if (shouldCleanup) maintenancePrefs.edit { putLong(CLEANUP_KEY, now) }
-        ReconciliationSignals.markDirty(appContext)
+        AutomaticWorkSignals.markDirty(appContext)
     }
 
     private fun android.database.Cursor.readMinute() = MotionMinute(

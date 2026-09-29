@@ -43,7 +43,7 @@
 - `SleepTracker` 全天訂閱 Sleep API 睡眠區段；睡眠窗開始前 15 分鐘至窗結束才額外訂閱週期性分類事件，使用 `SEGMENT_AND_CLASSIFY_EVENTS`，其餘時間使用 `SEGMENT_EVENTS_ONLY`。預熱分類可在睡眠窗開始時觸發取樣，但 FGS 與加速度計仍只在實際睡眠窗內啟動；需要活動辨識權限。
 - 接收 Sleep API 區段後排入背景分析工作。分類樣本只先保存，不因每個分類事件立即重跑全部分析。
 - 睡眠窗前 15 分鐘開始預熱 Sleep API 分類；目前睡眠窗或其前 15 分鐘內、最近 20 分鐘的分類信心值 ≥ 80 時，才在實際睡眠窗內啟動該時段的加速度計取樣。若時段開始已過 2 小時仍未觸發、螢幕亦已持續關閉至少 2 小時，啟動同樣 1 Hz 的低頻動作備援，避免 Google 回報延遲造成整夜空窗；這不是靜止或睡眠證明。80 與 2 小時都是未校準工程門檻，不代表準確率；分類可能約每 10 分鐘才回報、延遲或漏失。觸發後取樣到時段結束，不因後續單次低分反覆停止。
-- `SleepAnalyzer` 保留至少 30 分鐘且與時段重疊的區段。只在完整睡眠窗結束後以完整起訖查詢一次 UsageStats，再依睡眠窗開始時間保存於 `sleep_events.db`，供 `AutomaticPlacement`、`SleepAnalyzer` 與 Health Connect 共用；未結束窗口不可保存半窗 snapshot、產生或上傳候選。缺少使用情況權限時保存不可用標記，App 偵測權限由無到有時排入整理重取。理由必須與實際扣除的手機使用時間一致。
+- `SleepAnalyzer` 保留至少 30 分鐘且與時段重疊的區段。只在完整睡眠窗結束後以完整起訖查詢一次 UsageStats，再以 `(windowStart, windowEnd)` 複合鍵保存於 `sleep_events.db`，供 `AutomaticPlacement`、`SleepAnalyzer` 與 Health Connect 共用；排程結束時間改變時必須查詢新窗口，不能沿用舊 snapshot。未結束窗口不可保存半窗 snapshot、產生或上傳候選。缺少使用情況權限時按窗口保存不可用標記；理由只使用該睡眠窗的權限狀態及手機使用區間。
 - Sleep API 區段會與平日／週末排程取交集後才形成候選；跨越多日的長區段會分成各睡眠窗範圍，區段外的時間不採計。加速度計候選也限制在完整睡眠窗內。
 - Sleep API 參考分數由區段分數 × 45%、高信心分類比例 × 35%、分類覆蓋率 × 20% 組成。每個分類樣本以前後各 5 分鐘估計覆蓋；重疊覆蓋會合併。這是工程規則，不是經驗證的準確率。
 - `SleepUpdateReceiver` 將成功區段狀態映射為 100、其他非 NOT_DETECTED 狀態映射為 60；這不是 Google 直接提供的睡眠區段準確率。
@@ -93,14 +93,14 @@
 ## 4. 自動同步、資料完整性與重試
 
 - 現有狀態為 `PENDING`、`SYNCING`、`SYNCED`、`FAILED_RETRYABLE`、`FAILED_PERMANENT`、`SKIPPED`、`RETIRED`、`RETIRED_FAILED_PERMANENT`。舊 `FAILED` 轉成 `FAILED_RETRYABLE`；`NEEDS_REVIEW` 轉成 `PENDING`，兩者都不是執行期狀態。
-- `SleepReconcileWorker` 先重新分析，再呼叫 `HealthConnectSync.syncPendingOutcome()`；暫態錯誤回傳 retry，永久性錯誤保留 `FAILED_PERMANENT` 並回傳 failure，取消例外仍向外傳遞。立即工作使用唯一名稱 `sleeptrace_reconcile_now`／`KEEP`；每日 recovery 為 24 小時週期、6 小時 flex、`BatteryNotLow` constraint／`UPDATE`。睡眠窗結束仍會排入一次立即整理。
-- Reconcile 只重新分析最近 48 小時的原始 Sleep API／動作資料，以及與未完成同步紀錄重疊的舊 Sleep API 區段；只對已結束的排程睡眠窗查詢完整 UsageStats，保存的 snapshot 共用於放置判斷、Sleep API 分析與 Health Connect 上傳，未結束窗口延後處理。
+- `SleepReconcileWorker` 先重新分析，再呼叫 `HealthConnectSync.syncPendingOutcome()`；暫態錯誤回傳 retry，永久性錯誤保留 `FAILED_PERMANENT` 並回傳 failure，取消例外仍向外傳遞。永久 batch failure 會逐筆 fallback，只有單筆仍失敗的 session 才標成永久失敗。立即工作使用唯一名稱 `sleeptrace_reconcile_now`／`KEEP`；每日 recovery 為 24 小時週期、6 小時 flex、`BatteryNotLow` constraint／`UPDATE`。睡眠窗結束仍會排入一次立即整理。
+- Reconcile 只重新分析最近 48 小時的原始 Sleep API／動作資料，以及仍為 `PENDING`、`SYNCING` 或 `FAILED_RETRYABLE` 的舊 session；`FAILED_PERMANENT` 不再拉長歷史掃描範圍。只對已結束的排程睡眠窗查詢完整 UsageStats，並以該窗自己的權限狀態與 snapshot 分析；未結束窗口延後處理。
 - 暫時失敗以 10 分鐘起的指數退避重試；時間受系統排程影響，不能承諾即時或精準分鐘數。App 恢復前景、健康授權回傳、時間修正及感測／Sleep API 完成事件也會排入工作。
 - 沒有健康寫入授權時保留本機紀錄，待授權後或後續工作自動繼續，不要求逐筆同意。
 - `AutomaticSyncQueue` 以 Mutex 避免同程序同步併行，只自動選取 PENDING／FAILED_RETRYABLE／中斷殘留的 SYNCING；`FAILED_PERMANENT` 不會被週期工作重新送出。權限恢復時可將永久寫入失敗恢復為 PENDING，詳情頁亦提供手動重試。取消例外必須向外傳遞，不可吞成一般失敗。
-- 合格 session 以 Health Connect 批次寫入，每批最多 1,000 筆；先保存該批 SYNCING，批次成功後逐筆以 `updateIfCurrent` 標記 SYNCED。批次錯誤按錯誤類型記為 FAILED_RETRYABLE 或 FAILED_PERMANENT，不影響其他批次。`SleepStage` enum 保留未來擴充型別，目前只產生並寫入 AWAKE／SLEEPING，不代表深淺眠分期。
+- 合格 session 以 Health Connect 批次寫入，每批最多 1,000 筆；先保存該批 SYNCING，批次成功後逐筆以 `updateIfCurrent` 標記 SYNCED。暫態 batch failure 將該批設為 `FAILED_RETRYABLE` 並停止；永久 batch failure 改逐筆寫入，成功列照常 `SYNCED`，單筆仍失敗才按錯誤類型保存重試狀態。`SleepStage` enum 保留未來擴充型別，目前只產生並寫入 AWAKE／SLEEPING，不代表深淺眠分期。
 - 無效起訖、有效睡眠不足 30 分鐘、清醒總時長與明細不一致者自動 `SKIPPED`。沒有任何候選時不憑空建立睡眠。
-- `SleepStore` 在外部寫入前以可檢查成功與否的同步 `commit()` 保存 ID／版本；不要改成忽略結果的非同步保存，否則中斷後可能失去去重依據。時間修正只保存新的範圍；UsageStats 依排程睡眠窗保存為一次 snapshot，再由分析與上傳共用，不在各階段重新查詢。
+- `SleepStore` 在外部寫入前以可檢查成功與否的同步 `commit()` 保存 ID／版本；不要改成忽略結果的非同步保存，否則中斷後可能失去去重依據。時間修正、永久失敗手動重試、Health Connect 權限恢復與 UsageStats 權限由無到有都更新 work generation／dirty flag，避免 `KEEP` 合併時遺失變更。時間修正只保存新的範圍；UsageStats 依 `(windowStart, windowEnd)` 保存為一次 snapshot，再由分析與上傳共用，不在各階段重新查詢。
 - 使用 `updateIfCurrent`，同步舊請求完成時不能覆蓋已修正的新資料。
 - `mergeSleepSessions` 保留歷史及穩定 ID；起訖／清醒內容改變時遞增 `revision`，回到 PENDING。內容相同不重傳；手動修正不被自動分析覆蓋。
 - 新候選若同時匹配多筆既有紀錄，保留一筆既有穩定 ID 並遞增版本作為新版；其餘未同步碎片直接取代，已同步碎片標記為 `RETIRED`，Health Connect 成功依 clientRecordId 移除後才繼續送出新版。刪除失敗會保留 `RETIRED` 並重試，避免留下重複遠端資料。
@@ -122,7 +122,7 @@
 | `sleep/ResubscribeReceiver.kt` | 開機／套件更新後重新訂閱 Sleep API、排程並嘗試恢復自動記錄 |
 | `sleep/UsageMonitor.kt` | 查 UsageStats 螢幕互動與前景活動；向前查 24 小時以承接區段起點之前的狀態，並在裝置關機／啟動事件結算與清除跨 boot 狀態 |
 | `sleep/SleepSchedule.kt`、`sleep/SleepAnalyzer.kt` | 時段重疊與 Sleep API 候選／分數 |
-| `sleep/SleepUsageSnapshot.kt` | 每個排程睡眠窗一次的 UsageStats 快照；與放置、分析及上傳共用並維持理由一致 |
+| `sleep/SleepUsageSnapshot.kt` | 每個排程睡眠窗一次的 UsageStats 快照；以窗口起訖複合鍵重用，分析與理由依各窗權限狀態分開處理 |
 | `sleep/SleepModels.kt`、`sleep/SleepIntervals.kt` | 模型、舊狀態相容、清醒區間與上傳階段切分 |
 | `sleep/SleepReconciler.kt` | 匯整來源、選擇候選、合併本機歷史與版本 |
 | `motion/MotionEngine.kt` | 純 Kotlin 取樣策略、分鐘聚合、動作分類／候選與分數調整 |
@@ -131,8 +131,8 @@
 | `motion/SleepWindowScheduler.kt` | 睡眠窗開始／結束及分類備援邊界；未變更的下一個邊界不重設鬧鐘 |
 | `motion/MotionStore.kt` | SQLite 分鐘摘要及 SharedPreferences 動作設定；由 Application 容器共用並啟用 WAL |
 | `motion/MotionTimelineView.kt` | 保留的時間軸繪製工具，首頁已不使用 |
-| `data/SleepPreferences.kt`、`data/SleepStore.kt`、`data/SleepEventStore.kt` | 平日／週末時段設定、Sleep API 原始事件、每晚 UsageStats snapshot 與睡眠紀錄；session 查詢支援 limit／offset、摘要 projection、狀態篩選與時間／狀態索引 |
-| `data/ReconciliationSignals.kt` | SQLite 新資料 generation 與最近完成整理 generation，讓 KEEP 工作合併時可偵測期間到達的新事件 |
+| `data/SleepPreferences.kt`、`data/SleepStore.kt`、`data/SleepEventStore.kt` | 平日／週末時段設定、Sleep API 原始事件、每晚 UsageStats snapshot 與睡眠紀錄；snapshot 使用 `(windowStart, windowEnd)` 複合鍵並由資料庫版本遷移舊表；session 查詢支援 limit／offset、摘要 projection、狀態篩選與時間／狀態索引 |
+| `data/AutomaticWorkSignals.kt` | automatic-work generation 與最近完成整理 generation；涵蓋原始事件、session 修正／重試及權限恢復，讓 KEEP 工作合併時可偵測期間到達的新變更 |
 | `health/AutomaticSyncQueue.kt`、`health/HealthConnectSync.kt` | 自動同步佇列、版本競態保護及 Health Connect 寫入 |
 | `health/HealthPrivacyActivity.kt` | 系統健康授權畫面的資料使用說明入口 |
 | `work/WorkScheduler.kt`、`work/SleepReconcileWorker.kt` | 排程、分析→同步、重試 |
@@ -147,7 +147,7 @@
 | SharedPreferences `sleeptrace_records` | 僅作為舊版 JSON `sessions`／raw `segments`／`samples` 的一次性遷移來源；遷移完成後移除內容 |
 | SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、鬧鐘邊界快取與每日清理日期、battery_guide_shown／xiaomi_guide_shown／window_alarm_guide_shown 引導旗標（不是授權狀態）；舊 enabled／placement 不再控制新資料 |
 | SQLite `motion.db`／`minutes` | 每分鐘感測統計，以開始時間為主鍵；沒有原始感測波形 |
-| SQLite `sleep_events.db`／`segments`、`samples`、`sessions`、`usage_snapshots` | Sleep API 原始區段與分類以時間鍵去重，資料含一次性每日清理檢查及 14 天保留；每晚 UsageStats snapshot 依睡眠窗起點保存，session 的穩定 ID、版本、同步狀態與清醒明細也在同一交易式資料庫保存。兩個 SQLite helper 啟用 WAL；reconcile 只查最近 48 小時及未完成同步 session，差異列以單一 transaction 刪除／upsert，未變更歷史不重寫；`replaceSessions` 僅用於明確完整重算或遷移 |
+| SQLite `sleep_events.db`／`segments`、`samples`、`sessions`、`usage_snapshots` | Sleep API 原始區段與分類以時間鍵去重，資料含一次性每日清理檢查及 14 天保留；每晚 UsageStats snapshot 以 `(windowStart, windowEnd)` 複合鍵保存，session 的穩定 ID、版本、同步狀態與清醒明細也在同一交易式資料庫保存。兩個 SQLite helper 啟用 WAL；reconcile 只查最近 48 小時及 PENDING／SYNCING／FAILED_RETRYABLE session，差異列以單一 transaction 刪除／upsert，未變更歷史不重寫；`replaceSessions` 僅用於明確完整重算或遷移 |
 
 Sleep API 原始事件及動作摘要在寫入時最多每日檢查並清理一次 14 天前資料，不是到期即定時刪除；歷史睡眠紀錄會保留。相關資料已在 `app/src/main/res/xml/backup_rules.xml` 與 `app/src/main/res/xml/data_extraction_rules.xml` 排除備份。
 
@@ -213,6 +213,8 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 - 沒有 PSG 或穿戴裝置對照驗證，也沒有深眠／淺眠／REM 分期。
 - 床墊、床伴、手機震動、手機離人太遠或人離床都可能影響動作推估；自動放置判斷只是訊號啟發式，準確度尚未量測，不能宣稱精確知道床上／床邊。
 - 還沒有 Google Play 上架／正式簽署發行的完成證據；Debug APK 不是正式發行版本。
+
+2026-09-29 本輪同步可靠性更新：Health Connect 永久 batch failure 改逐筆 fallback，只隔離單筆失敗紀錄；`FAILED_PERMANENT` 不再擴大 reconcile 舊資料範圍；UsageStats snapshot 改用 `(windowStart, windowEnd)` 複合鍵並按每晚權限狀態分析；時間修正、手動重試與權限恢復納入 work generation。完整 `testDebugUnitTest` 59 項通過，`lintDebug`、Debug APK、Android 測試 APK、Release APK 建置成功；未執行會修改裝置資料／權限的 instrumentation test，Health Connect 真實寫入與 SQLite 舊版升級尚未做裝置端驗證。
 
 ## 9. 後續修改原則
 

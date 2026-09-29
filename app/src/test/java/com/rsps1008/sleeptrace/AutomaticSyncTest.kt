@@ -4,6 +4,7 @@ import com.rsps1008.sleeptrace.health.AutomaticSyncQueue
 import com.rsps1008.sleeptrace.sleep.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import java.io.IOException
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -57,6 +58,49 @@ class AutomaticSyncTest {
         assertEquals(SyncState.FAILED_PERMANENT, repo.rows.single().state)
         assertTrue(AutomaticSyncQueue.drain(repo::read, repo::update) { writes++ })
         assertEquals(1, writes)
+    }
+
+    @Test fun `permanent batch failure falls back to single records and isolates the invalid row`() = runBlocking {
+        val repo = Repository(listOf(
+            session().copy(id = "valid-1"),
+            session().copy(id = "invalid"),
+            session().copy(id = "valid-2")
+        ))
+        val attempts = mutableListOf<List<String>>()
+        val failures = mutableListOf<Throwable>()
+
+        val complete = AutomaticSyncQueue.drainBatch(repo::read, repo::update, failures::add) { batch ->
+            attempts += batch.map { it.id }
+            if (batch.size > 1 || batch.single().id == "invalid") {
+                throw IllegalArgumentException("Health Connect rejected record")
+            }
+        }
+
+        assertTrue(complete)
+        assertEquals(
+            listOf(listOf("valid-1", "invalid", "valid-2"), listOf("valid-1"), listOf("invalid"), listOf("valid-2")),
+            attempts
+        )
+        assertEquals(SyncState.SYNCED, repo.rows.single { it.id == "valid-1" }.state)
+        assertEquals(SyncState.FAILED_PERMANENT, repo.rows.single { it.id == "invalid" }.state)
+        assertEquals(SyncState.SYNCED, repo.rows.single { it.id == "valid-2" }.state)
+        assertEquals(1, failures.size)
+    }
+
+    @Test fun `transient batch failure marks the batch retryable without single-record fallback`() = runBlocking {
+        val repo = Repository(listOf(session().copy(id = "one"), session().copy(id = "two")))
+        val failures = mutableListOf<Throwable>()
+        var writeCalls = 0
+
+        val complete = AutomaticSyncQueue.drainBatch(repo::read, repo::update, failures::add) {
+            writeCalls++
+            throw IOException("offline")
+        }
+
+        assertFalse(complete)
+        assertEquals(1, writeCalls)
+        assertTrue(repo.rows.all { it.state == SyncState.FAILED_RETRYABLE })
+        assertEquals(1, failures.size)
     }
 
     @Test fun `interrupted upload is resumed without new id`() = runBlocking {

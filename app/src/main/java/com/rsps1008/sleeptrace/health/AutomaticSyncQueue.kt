@@ -84,9 +84,45 @@ object AutomaticSyncQueue {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                onFailure(error)
-                writing.forEach { update(it, it.copy(state = failureState(error), syncError = error.message ?: "同步失敗")) }
-                break
+                if (isTransientSyncError(error)) {
+                    onFailure(error)
+                    writing.forEach { update(it, it.copy(
+                        state = SyncState.FAILED_RETRYABLE,
+                        syncError = error.message ?: "同步失敗"
+                    )) }
+                    break
+                }
+
+                if (writing.size == 1) {
+                    onFailure(error)
+                    val only = writing.single()
+                    update(only, only.copy(
+                        state = SyncState.FAILED_PERMANENT,
+                        syncError = error.message ?: "同步失敗"
+                    ))
+                    continue
+                }
+
+                // Health Connect can reject a batch because of one invalid record. Retry this
+                // permanent failure one record at a time so valid siblings still get uploaded.
+                var transientFallbackFailure = false
+                writing.forEach { session ->
+                    try {
+                        writeBatch(listOf(session))
+                        update(session, session.copy(state = SyncState.SYNCED))
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (recordError: Exception) {
+                        onFailure(recordError)
+                        val state = failureState(recordError)
+                        if (state == SyncState.FAILED_RETRYABLE) transientFallbackFailure = true
+                        update(session, session.copy(
+                            state = state,
+                            syncError = recordError.message ?: "同步失敗"
+                        ))
+                    }
+                }
+                if (transientFallbackFailure) break
             }
         }
         read().none(::eligible)
