@@ -10,6 +10,7 @@ import androidx.health.connect.client.records.metadata.Metadata
 import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepUsageSnapshot
+import kotlinx.coroutines.CancellationException
 import com.rsps1008.sleeptrace.sleep.sleepParts
 import java.time.Instant
 import java.time.ZoneId
@@ -66,6 +67,8 @@ class HealthConnectSync(private val context: Context) {
                     syncError = null,
                     reason = "已由較完整的睡眠紀錄取代，舊的 Health Connect 資料已移除"
                 ))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 store.updateIfCurrent(session, session.copy(syncError = error.message ?: "移除舊的 Health Connect 資料暫時失敗"))
                 return false
