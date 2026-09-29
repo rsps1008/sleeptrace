@@ -135,4 +135,17 @@ class AutomaticSyncTest {
 
         assertEquals(snapped, mergeSleepSessions(listOf(snapped), listOf(session().copy(id = "new"))).single())
     }
+
+    @Test fun `multiple overlapping history records keep one id and retire the extra synced id`() {
+        val first = session(SyncState.SYNCED).copy(id = "first", startMillis = 1_000, endMillis = 3_601_000)
+        val second = session(SyncState.SYNCED).copy(id = "second", startMillis = 3_601_000, endMillis = 7_201_000)
+        val candidate = session().copy(id = "new", startMillis = 1_000, endMillis = 7_201_000)
+
+        val merged = mergeSleepSessions(listOf(first, second), listOf(candidate))
+
+        val replacement = merged.single { it.id == "first" }
+        assertEquals(SyncState.PENDING, replacement.state)
+        assertEquals(first.revision + 1, replacement.revision)
+        assertEquals(SyncState.RETIRED, merged.single { it.id == "second" }.state)
+    }
 }

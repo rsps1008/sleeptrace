@@ -50,7 +50,27 @@ class HealthConnectSync(private val context: Context) {
         val store = SleepStore(context)
         // Permission needs a system grant, not approval for each sleep record. Resume after grant/on launch.
         if (!hasWritePermission()) return true
+        if (!retireSuperseded(store)) return false
         SleepUsageSnapshot(context).applyPending(store)
         return AutomaticSyncQueue.drain(store::sessions, store::updateIfCurrent, ::sync)
+    }
+
+    private suspend fun retireSuperseded(store: SleepStore): Boolean {
+        store.sessions().filter { it.state == com.rsps1008.sleeptrace.sleep.SyncState.RETIRED }.forEach { session ->
+            try {
+                HealthConnectClient.getOrCreate(context).deleteRecords(
+                    SleepSessionRecord::class, emptyList(), listOf(session.id)
+                )
+                store.updateIfCurrent(session, session.copy(
+                    state = com.rsps1008.sleeptrace.sleep.SyncState.SKIPPED,
+                    syncError = null,
+                    reason = "已由較完整的睡眠紀錄取代，舊的 Health Connect 資料已移除"
+                ))
+            } catch (error: Exception) {
+                store.updateIfCurrent(session, session.copy(syncError = error.message ?: "移除舊的 Health Connect 資料暫時失敗"))
+                return false
+            }
+        }
+        return true
     }
 }

@@ -6,7 +6,7 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 enum class SyncState {
-    PENDING, SYNCING, SYNCED, FAILED, SKIPPED;
+    PENDING, SYNCING, SYNCED, FAILED, SKIPPED, RETIRED;
     companion object {
         fun fromStored(value: String) = if (value == "NEEDS_REVIEW") PENDING else valueOf(value)
     }

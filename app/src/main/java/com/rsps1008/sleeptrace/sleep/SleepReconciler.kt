@@ -21,7 +21,7 @@ class SleepReconciler(private val context: Context) {
         val allSegments = store.segments()
         val samples = store.samples()
         val existing = store.sessions()
-        val unresolved = existing.filter { it.state !in setOf(SyncState.SYNCED, SyncState.SKIPPED) }
+        val unresolved = existing.filter { it.state !in setOf(SyncState.SYNCED, SyncState.SKIPPED, SyncState.RETIRED) }
         val segments = allSegments.filter { segment ->
             segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
         }
@@ -55,11 +55,20 @@ fun selectBestSessions(api: List<SleepSession>, motion: List<SleepSession>): Lis
 fun mergeSleepSessions(existing: List<SleepSession>, calculated: List<SleepSession>): List<SleepSession> {
     val result = existing.toMutableList()
     calculated.forEach { candidate ->
-        val matches = result.filter { it.id == candidate.id || overlaps(it, candidate) }
+        val matches = result.filter { it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED) && (it.id == candidate.id || overlaps(it, candidate)) }
         if (matches.any { it.manuallyEdited }) return@forEach
-        // Avoid silently merging multiple already-exported identities into one remote record.
-        if (matches.size > 1) return@forEach
         val old = matches.firstOrNull()
+        if (matches.size > 1) {
+            // Keep one identity/version as the replacement record. Any other successful remote
+            // records must be deleted before the replacement is sent; unsynced fragments are local only.
+            val canonical = matches.firstOrNull { it.state == SyncState.SYNCED } ?: old!!
+            result.removeAll(matches.toSet())
+            result += matches.filter { it != canonical && it.state == SyncState.SYNCED }.map {
+                it.copy(state = SyncState.RETIRED, syncError = null, reason = "已由較完整的睡眠紀錄取代，等待移除舊的 Health Connect 資料")
+            }
+            result += candidate.copy(id = canonical.id, revision = canonical.revision + 1, state = SyncState.PENDING, syncError = null)
+            return@forEach
+        }
         // Phone-use deduction is frozen immediately before the first upload; a routine raw-event
         // reconciliation with the same interval must not erase it and trigger another scan.
         if (old?.usageSnapshotApplied == true && old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis) return@forEach

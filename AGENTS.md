@@ -101,7 +101,7 @@
 - `SleepStore` 在外部寫入前以可檢查成功與否的同步 `commit()` 保存 ID／版本；不要改成忽略結果的非同步保存，否則中斷後可能失去去重依據。
 - 使用 `updateIfCurrent`，同步舊請求完成時不能覆蓋已修正的新資料。
 - `mergeSleepSessions` 保留歷史及穩定 ID；起訖／清醒內容改變時遞增 `revision`，回到 PENDING。內容相同不重傳；手動修正不被自動分析覆蓋。
-- 目前候選若同時匹配多筆既有紀錄，會保留既有紀錄而跳過合併，以避免丟失已匯出 ID。這是現有保守處理，不代表已完整解決所有多筆重疊情況。
+- 新候選若同時匹配多筆既有紀錄，保留一筆既有穩定 ID 並遞增版本作為新版；其餘未同步碎片直接取代，已同步碎片標記為 `RETIRED`，Health Connect 成功依 clientRecordId 移除後才繼續送出新版。刪除失敗會保留 `RETIRED` 並重試，避免留下重複遠端資料。
 - 寫入 `SleepSessionRecord`，`Metadata.clientRecordId = session.id`、`clientRecordVersion = revision`。重試保持同一 ID／版本；資料修正才增加版本。
 - `normalizedAwake` 負責裁切並合併重疊手機使用區間；`sleepParts` 將整段切成 AWAKE／SLEEPING。本機扣除的手機使用時間與上傳階段必須一致。
 - Health Connect 系統健康資料使用說明頁與 Android 13 以下套件可見性已宣告；不是額外的 App 同意流程。

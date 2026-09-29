@@ -446,6 +446,7 @@ class MainActivity : AppCompatActivity() {
             SyncState.SYNCING -> Triple("同步中…", color(R.color.status_info), color(R.color.status_info_bg))
             SyncState.FAILED -> Triple("同步失敗待重試", color(R.color.status_warning), color(R.color.status_warning_bg))
             SyncState.SKIPPED -> Triple("App 已自動略過", color(R.color.status_neutral), color(R.color.status_neutral_bg))
+            SyncState.RETIRED -> Triple("正在整理舊資料", color(R.color.status_info), color(R.color.status_info_bg))
         }
     }
 
