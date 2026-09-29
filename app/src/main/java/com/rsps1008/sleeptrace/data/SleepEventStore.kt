@@ -14,7 +14,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Indexed, transactional storage for raw Sleep API events and local sleep records. */
-class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 5) {
+class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 6) {
     init {
         setWriteAheadLoggingEnabled(true)
     }
@@ -31,12 +31,14 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         createSegmentIndex(db)
         createSessionIndex(db)
         createSessionStateIndex(db)
+        createSessionOverlapIndex(db)
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createSessions(db)
         if (oldVersion < 3) createSegmentIndex(db)
         if (oldVersion < 4) createSessionIndex(db)
         if (oldVersion < 5) createSessionStateIndex(db)
+        if (oldVersion < 6) createSessionOverlapIndex(db)
     }
 
     private fun createSessions(db: SQLiteDatabase) = db.execSQL("""
@@ -58,6 +60,10 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
 
     private fun createSessionStateIndex(db: SQLiteDatabase) = db.execSQL(
         "CREATE INDEX IF NOT EXISTS sessions_state_idx ON sessions(state)"
+    )
+
+    private fun createSessionOverlapIndex(db: SQLiteDatabase) = db.execSQL(
+        "CREATE INDEX IF NOT EXISTS sessions_end_start_idx ON sessions(end, start)"
     )
 
     fun import(segments: List<SleepSegment>, samples: List<ClassificationSample>) { append(segments, samples) }
@@ -109,6 +115,45 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         sessions.forEach { insertSession(it) }
     }
     fun upsertSession(session: SleepSession) = writableDatabase.transaction { insertSession(session) }
+
+    /** Applies only rows changed by reconciliation, preserving untouched history. */
+    fun applySessionDiff(removeIds: Set<String>, upserts: List<SleepSession>) {
+        if (removeIds.isEmpty() && upserts.isEmpty()) return
+        writableDatabase.transaction {
+            removeIds.forEach { id -> delete("sessions", "id = ?", arrayOf(id)) }
+            upserts.forEach { insertSession(it) }
+        }
+    }
+
+    /** Loads the analysis window plus old records still waiting for sync. */
+    fun sessionsForReconciliation(
+        startMillis: Long,
+        endMillis: Long,
+        unresolvedStates: Set<SyncState>,
+        includeAwakeIntervals: Boolean = true
+    ): List<SleepSession> {
+        require(endMillis >= startMillis) { "endMillis must not be before startMillis" }
+        val states = unresolvedStates.sortedBy { it.name }
+        val stateClause = if (states.isEmpty()) null else
+            "state IN (${states.joinToString(",") { "?" }})"
+        val selection = if (stateClause == null) {
+            "end >= ? AND start <= ?"
+        } else {
+            "(end >= ? AND start <= ?) OR $stateClause"
+        }
+        val args = buildList {
+            add(startMillis.toString())
+            add(endMillis.toString())
+            addAll(states.map { it.name })
+        }
+        return readableDatabase.query(
+            "sessions", if (includeAwakeIntervals) null else SESSION_SUMMARY_COLUMNS,
+            selection, args.toTypedArray(), null, null, "start DESC, id DESC"
+        ).use { c ->
+            buildList { while (c.moveToNext()) add(c.readSession(includeAwakeIntervals)) }
+        }
+    }
+
     fun session(id: String, includeAwakeIntervals: Boolean = true): SleepSession? = readableDatabase.query(
         "sessions", if (includeAwakeIntervals) null else SESSION_SUMMARY_COLUMNS,
         "id = ?", arrayOf(id), null, null, null, "1"

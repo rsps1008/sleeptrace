@@ -249,22 +249,26 @@ object SleepDialogHelper {
         fun setLoading() {
             loading = true
             loadFailed = false
-            notifyDataSetChanged()
+            notifyItemChanged(sessions.size)
         }
 
         fun append(page: List<SleepSession>) {
+            val oldSessionCount = sessions.size
             sessions.addAll(page)
             hasMore = page.size >= HISTORY_PAGE_SIZE
             loading = false
             loadFailed = false
-            notifyDataSetChanged()
+            if (page.isNotEmpty()) notifyItemRangeInserted(oldSessionCount, page.size)
+            val footerPosition = sessions.size
+            if (hasMore) notifyItemChanged(footerPosition)
+            else notifyItemRemoved(footerPosition)
         }
 
         fun setLoadFailed() {
             loading = false
             loadFailed = true
             hasMore = true
-            notifyDataSetChanged()
+            notifyItemChanged(sessions.size)
         }
 
         private class SessionHolder(

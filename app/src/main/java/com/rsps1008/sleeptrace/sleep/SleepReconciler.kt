@@ -16,10 +16,12 @@ class SleepReconciler(private val context: Context) {
         val schedule = preferences.schedule()
         val now = System.currentTimeMillis()
         val analysisStart = now - RECENT_ANALYSIS_MILLIS
-        val existing = store.sessions()
-        val unresolved = existing.filter { it.state !in setOf(SyncState.SYNCED, SyncState.SKIPPED, SyncState.RETIRED) }
-        // Keep unresolved old sessions eligible for matching without loading the full
-        // fourteen-day segment table on every reconciliation.
+        // Keep unresolved old sessions eligible for matching without loading all historical
+        // sessions or deserializing awakeIntervals for completed history.
+        val unresolved = store.sessions(
+            includeAwakeIntervals = false,
+            states = RECONCILIATION_STATES
+        )
         val segmentStart = minOf(analysisStart, unresolved.minOfOrNull { it.startMillis } ?: analysisStart)
         val allSegments = store.segments(segmentStart, now)
         val samples = store.recentSamples(analysisStart)
@@ -33,11 +35,12 @@ class SleepReconciler(private val context: Context) {
         val resolved = AutomaticPlacement.resolve(motion, emptyList())
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
         val fallback = MotionSleepEstimator.estimate(resolved, emptyList(), schedule, now)
-        store.mergeCalculated(selectBestSessions(calculated, fallback))
+        store.mergeCalculated(selectBestSessions(calculated, fallback), analysisStart, now)
     }
     companion object {
         private val mutex = Mutex()
         private const val RECENT_ANALYSIS_MILLIS = 48L * 60 * 60 * 1000
+        private val RECONCILIATION_STATES = setOf(SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED)
     }
 }
 

@@ -139,8 +139,12 @@ class MainActivity : AppCompatActivity() {
                 homeViewModel.state.filterNotNull().collect { renderHome(it) }
             }
         }
-        WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("sleeptrace_reconcile_now").observe(this) { refresh() }
-        WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("sleeptrace_reconcile").observe(this) { refresh() }
+        WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("sleeptrace_reconcile_now").observe(this) { infos ->
+            if (infos.any { it.state.isFinished }) refresh()
+        }
+        WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("sleeptrace_reconcile").observe(this) { infos ->
+            if (infos.any { it.state.isFinished }) refresh()
+        }
         refresh()
     }
 

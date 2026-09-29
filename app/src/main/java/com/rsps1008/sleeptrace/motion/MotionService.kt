@@ -57,7 +57,7 @@ class MotionService : Service(), SensorEventListener2 {
     private var fallbackWindowStart: Long? = null
     private var screenOffSince: Long? = null
     private var clockOffset = 0L
-    private var lastPersist = 0L
+    private var lastPersistElapsedRealtime = 0L
     private val pendingMinutes = mutableListOf<MotionMinute>()
     private var pendingChange: (() -> Unit)? = null
     private var stopped = false
@@ -241,7 +241,9 @@ class MotionService : Service(), SensorEventListener2 {
         }
         engine.add(time, event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble())
         pendingMinutes += engine.drain(time)
-        if (time - lastPersist >= 5 * MINUTE_MS) { persist(); lastPersist = time }
+        // Sensor timestamps can jump across a whole FIFO batch. Throttle by elapsed wall time,
+        // which continues during device suspend, not by sample event time.
+        if (SystemClock.elapsedRealtime() - lastPersistElapsedRealtime >= PERSIST_INTERVAL_MS) persist()
     }
     override fun onFlushCompleted(sensor: Sensor?) { finishTransition() }
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -254,6 +256,7 @@ class MotionService : Service(), SensorEventListener2 {
             pendingMinutes.clear()
             publish("動作資料儲存失敗，請檢查儲存空間")
         }
+        lastPersistElapsedRealtime = SystemClock.elapsedRealtime()
     }
 
     private fun scheduleBoundary(value: SleepSchedule?) {
@@ -317,6 +320,7 @@ class MotionService : Service(), SensorEventListener2 {
         const val ACTION_STOP = "com.rsps1008.sleeptrace.STOP_MOTION"
         private const val CHANNEL = "motion_tracking"
         private const val NOTIFICATION_ID = 2000
+        private const val PERSIST_INTERVAL_MS = 5 * MINUTE_MS
         @Volatile var active: MotionService? = null
             private set
         fun start(context: Context) = ContextCompat.startForegroundService(context, Intent(context, MotionService::class.java))

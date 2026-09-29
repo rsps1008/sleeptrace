@@ -39,18 +39,31 @@ object UsageMonitor {
         fun add(left: Long, right: Long) {
             if (right > maxOf(start, left)) result += UsageInterval(maxOf(start, left), minOf(end, right))
         }
+        fun closeOpen(at: Long) {
+            screenStart?.let { add(it, at) }
+            screenStart = null
+            open.values.forEach { add(it, at) }
+            open.clear()
+        }
         val event = UsageEvents.Event()
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
             when (event.eventType) {
                 UsageEvents.Event.SCREEN_INTERACTIVE -> { screenStart = screenStart ?: event.timeStamp; screenOff = false }
                 UsageEvents.Event.SCREEN_NON_INTERACTIVE -> {
-                    screenStart?.let { add(it, event.timeStamp) }; screenStart = null; screenOff = true
-                    open.values.forEach { add(it, event.timeStamp) }; open.clear()
+                    closeOpen(event.timeStamp); screenOff = true
                 }
                 UsageEvents.Event.ACTIVITY_RESUMED -> if (!screenOff) open.putIfAbsent(event.packageName, event.timeStamp)
                 UsageEvents.Event.ACTIVITY_PAUSED -> {
                     open.remove(event.packageName)?.let { add(it, event.timeStamp) }
+                }
+                UsageEvents.Event.DEVICE_SHUTDOWN -> {
+                    // Usage events do not guarantee matching pause/screen-off events at power loss.
+                    closeOpen(event.timeStamp); screenOff = true
+                }
+                UsageEvents.Event.DEVICE_STARTUP -> {
+                    // Never carry an app or screen state from the previous boot into this one.
+                    closeOpen(event.timeStamp); screenOff = true
                 }
             }
         }

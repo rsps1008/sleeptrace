@@ -54,8 +54,22 @@ class SleepStore(context: Context) {
         migrateSessions()
         eventStore.upsertSession(session)
     }
-    fun mergeCalculated(calculated: List<SleepSession>) = synchronized(sessionLock) {
-        saveSessions(mergeSleepSessions(sessions(), calculated))
+    fun mergeCalculated(calculated: List<SleepSession>, analysisStartMillis: Long, analysisEndMillis: Long) = synchronized(sessionLock) {
+        migrateSessions()
+        val existing = eventStore.sessionsForReconciliation(
+            startMillis = analysisStartMillis,
+            endMillis = analysisEndMillis,
+            unresolvedStates = RECONCILIATION_STATES
+        )
+        val merged = mergeSleepSessions(existing, calculated)
+        val existingById = existing.associateBy { it.id }
+        val mergedIds = merged.mapTo(mutableSetOf()) { it.id }
+        val removedIds = existing.asSequence()
+            .map { it.id }
+            .filterNot { it in mergedIds }
+            .toSet()
+        val changed = merged.filter { existingById[it.id] != it }
+        eventStore.applySessionDiff(removedIds, changed)
     }
     fun updateIfCurrent(expected: SleepSession, replacement: SleepSession): Boolean = synchronized(sessionLock) {
         migrateSessions()
@@ -114,5 +128,6 @@ class SleepStore(context: Context) {
         private val sessionMigrationLock = Any()
         private const val rawMigrationKey = "raw_events_migrated_v1"
         private const val sessionMigrationKey = "sessions_migrated_v2"
+        private val RECONCILIATION_STATES = setOf(SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED)
     }
 }
