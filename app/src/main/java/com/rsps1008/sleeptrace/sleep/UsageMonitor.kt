@@ -18,7 +18,17 @@ object UsageMonitor {
     /** Returns only proven foreground-interaction periods; unavailable data is never treated as sleep. */
     @SuppressLint("MissingPermission") // PACKAGE_USAGE_STATS is verified through AppOps before querying.
     fun interactionIntervals(context: Context, start: Long, end: Long): List<UsageInterval> {
+        return interactionIntervals(context, listOf(UsageInterval(start, end)))
+    }
+
+    /** Reads the shared event span once; callers can pass overlapping sleep windows without duplicate scans. */
+    @SuppressLint("MissingPermission")
+    fun interactionIntervals(context: Context, targets: List<UsageInterval>): List<UsageInterval> {
         if (!hasAccess(context)) return emptyList()
+        val valid = targets.filter { it.endMillis > it.startMillis }
+        if (valid.isEmpty()) return emptyList()
+        val start = valid.minOf { it.startMillis }
+        val end = valid.maxOf { it.endMillis }
         val manager = context.getSystemService(UsageStatsManager::class.java)
         // Carry screen/foreground state across the left boundary, including an app opened earlier.
         val events = manager.queryEvents(start - 24 * 60 * 60 * 1000L, end) ?: return emptyList()

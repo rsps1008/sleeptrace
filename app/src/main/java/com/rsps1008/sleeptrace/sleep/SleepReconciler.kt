@@ -17,14 +17,22 @@ class SleepReconciler(private val context: Context) {
         val store = SleepStore(context)
         val usageAvailable = UsageMonitor.hasAccess(context)
         val schedule = preferences.schedule()
+        val now = System.currentTimeMillis()
+        val analysisStart = now - RECENT_ANALYSIS_MILLIS
+        val allSegments = store.segments()
+        val samples = store.samples()
+        val existing = store.sessions()
+        val unresolved = existing.filter { it.state !in setOf(SyncState.SYNCED, SyncState.SKIPPED) }
+        val segments = allSegments.filter { segment ->
+            segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
+        }
+        val segmentUsage = UsageMonitor.interactionIntervals(context, segments.map { UsageInterval(it.startMillis, it.endMillis) })
         val base = SleepAnalyzer.analyze(
-            store.segments(), store.samples(),
-            store.segments().flatMap { UsageMonitor.interactionIntervals(context, it.startMillis, it.endMillis) }, schedule
+            segments, samples, segmentUsage, schedule
         ).map {
             if (usageAvailable) it else it.copy(reason = "App 依現有資料推估；未授予使用情況存取權，無法排除手機使用")
         }
-        val now = System.currentTimeMillis()
-        val motion = MotionStore(context).use { it.read(now - 14L * 24 * 60 * 60 * 1000, now) }
+        val motion = MotionStore(context).use { it.read(analysisStart, now) }
         val motionUsage = if (motion.isEmpty()) emptyList() else UsageMonitor.interactionIntervals(context, motion.first().startMillis, now)
         val resolved = AutomaticPlacement.resolve(motion, motionUsage)
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
@@ -33,7 +41,10 @@ class SleepReconciler(private val context: Context) {
         }
         store.mergeCalculated(selectBestSessions(calculated, fallback))
     }
-    companion object { private val mutex = Mutex() }
+    companion object {
+        private val mutex = Mutex()
+        private const val RECENT_ANALYSIS_MILLIS = 48L * 60 * 60 * 1000
+    }
 }
 
 private fun overlaps(a: SleepSession, b: SleepSession) = a.startMillis < b.endMillis && a.endMillis > b.startMillis

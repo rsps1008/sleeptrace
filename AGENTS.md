@@ -69,8 +69,8 @@
 - 明確受背景限制時先開啟本 App 的應用程式設定，提示電池選「不受限制／無限制」；只是未排除最佳化時，使用系統 `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 要求一次豁免。系統頁不可用／SecurityException 時依序退回 App 設定、電池最佳化清單、一般設定，皆失敗則顯示操作路徑。
 - Manifest 宣告 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。`BatteryLife` lint 僅在 `batteryIntents()` 局部抑制並說明原因：整夜本機感測是核心功能，不能以 FCM 或延後工作取代；這不代表已通過 Google Play 審核。既有低頻／批次／低電量暫停策略不因豁免而改變。
 - 依 manufacturer／brand 辨識 Xiaomi、Redmi、POCO，提供 `com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity` 入口；不可用時退回本 App 設定及一般設定，並提示搜尋「自啟動」。這是廠商私有入口，不能保證所有 MIUI／HyperOS 都支援。
-- **沒有可靠公開 API 確認小米自啟動已開啟**；只記錄引導是否顯示過，不能顯示假的「已授權」勾選。小米裝置保留自啟動入口及此說明；電池最佳化豁免也不代表廠商全部省電限制已解除。
-- 每次回到首頁重新查詢 Android 電池狀態；已就緒的 Android 電池設定入口收起，被撤回時再次顯示。自啟動入口不影響候選、同步與記錄開關。
+- **沒有可靠公開 API 確認小米自啟動已開啟**；只記錄引導是否顯示過，不能顯示假的「已授權」勾選。小米入口只在首次引導中使用，首頁不顯示小米自啟動或「App 無法讀取」區塊；電池最佳化豁免也不代表廠商全部省電限制已解除。
+- 每次回到首頁重新查詢 Android 電池狀態；已就緒的 Android 電池設定入口收起，被撤回時再次顯示。小米一次性引導不影響候選、同步與記錄開關。
 
 ### 動作候選與來源選擇
 
@@ -85,7 +85,7 @@
 
 ### 畫面
 
-- 首頁保留既有 MaterialCardView 視覺：最近睡眠與歷史、每日時段及整體暫停／恢復、必要權限。權限就緒後只顯示簡短狀態；參考分數及判斷理由留在自選詳情中。
+- 首頁保留既有 MaterialCardView 視覺：最近睡眠與歷史、每日時段及整體暫停／恢復、必要權限，以及最後一筆已保存的 Sleep API 睡眠信心與回報時間。該分類分數只讀取本機保存資料，不會為顯示而即時查詢，且不是準確率；睡眠候選的參考分數及判斷理由仍留在自選詳情中。
 - 不再顯示放置選擇、動作開關、頻率／FIFO 參數、動作時間軸或手動試算按鈕。前景通知顯示自動睡眠記錄，仍遵守 Android 必要通知要求。
 - 主畫面使用 `Theme.SleepTrace.Home` 無 ActionBar，加上單一自訂標題。`enableEdgeToEdge` 搭配 systemBars／displayCutout insets，避免狀態列、瀏海及導覽列遮擋。更新前先取得資料，再同步重建畫面並保留捲動位置；不得重加第二個標題列或固定狀態列高度。
 
@@ -93,6 +93,7 @@
 
 - 現有狀態為 `PENDING`、`SYNCING`、`SYNCED`、`FAILED`、`SKIPPED`。`NEEDS_REVIEW` 僅是舊資料字串，由 `SyncState.fromStored` 轉成 `PENDING`，不能恢復為執行期狀態。
 - `SleepReconcileWorker` 先重新分析，再呼叫 `HealthConnectSync.syncPending()`。立即工作使用唯一名稱 `sleeptrace_reconcile_now`／`APPEND_OR_REPLACE`；定期工作為 `sleeptrace_reconcile`／每 6 小時／`UPDATE`。
+- Reconcile 只重新分析最近 48 小時的原始 Sleep API／動作資料，以及與未完成同步紀錄重疊的舊 Sleep API 區段；同一輪將所有 segment 的 UsageStats 時段合併成一次查詢，不再逐 segment 重複掃描。
 - 暫時失敗以 10 分鐘起的指數退避重試；時間受系統排程影響，不能承諾即時或精準分鐘數。App 恢復前景、健康授權回傳、時間修正及感測／Sleep API 完成事件也會排入工作。
 - 沒有健康寫入授權時保留本機紀錄，待授權後或後續工作自動繼續，不要求逐筆同意。
 - `AutomaticSyncQueue` 以 Mutex 避免同程序同步併行，處理 PENDING／FAILED／中斷殘留的 SYNCING。取消例外必須向外傳遞，不可吞成一般失敗。
