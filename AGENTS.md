@@ -1,6 +1,6 @@
 # 眠迹 SleepTrace：專案接手指南
 
-本文件供後續對話、AI 與開發者接手使用，適用於本專案全目錄。內容依 2026-09-28 的程式與已完成驗證整理；後續修改功能時，請同步維護本文件及 `README.md`。若描述與程式不同，先查實作並說明差異，不要把規劃或舊對話當作已完成功能。使用者後續明確指示優先於本文件。
+本文件供後續對話、AI 與開發者接手使用，適用於本專案全目錄。內容依 2026-09-29 的程式與已完成驗證整理；後續修改功能時，請同步維護本文件及 `README.md`。若描述與程式不同，先查實作並說明差異，不要把規劃或舊對話當作已完成功能。使用者後續明確指示優先於本文件。
 
 ## 1. 專案目標與已確定的使用者需求
 
@@ -54,7 +54,7 @@
 - 新的 `recording_enabled` 預設 true，取代舊版感測器 `enabled`；原來沒開啟動作感測的使用者升級後也會自動記錄。首頁與通知只保留整體「暫停／恢復自動記錄」，明確暫停後不自動重啟。
 - Google 高信心分類觸發後固定要求 1 Hz，接電時也不提高頻率；有硬體 FIFO 時批次延遲依 FIFO 容量 × 取樣間隔 × 80% 換算，不另設 App 時間上限，僅受 Android API `Int` 可表示範圍限制。硬體最小取樣間隔也會限制請求頻率。
 - 無 FIFO 時仍為 1 Hz，但不能宣稱有硬體批次。優先選有 FIFO 的 wake-up accelerometer；非 wake-up 感測器休眠時可能缺資料。
-- 未接電且電量 ≤ 15% 暫停；接電或電量恢復後重新評估。時段外不取樣，但保留前景服務通知與邊界排程。
+- 未接電且電量 ≤ 15% 暫停；接電或電量恢復後重新評估。服務只動態監聽 `ACTION_BATTERY_LOW`／`ACTION_BATTERY_OKAY` 與接／斷電事件；需要精確電量時才以一次性的 `ACTION_BATTERY_CHANGED` 快照讀取。時段外不取樣，但保留前景服務通知與邊界排程。
 - 不使用持續 CPU wake lock，不啟用陀螺儀、麥克風、定位或相機。`play-services-location` 是為了活動／Sleep API，不能據此聲稱有 GPS 定位功能。
 - `MotionService` 以 HandlerThread 收感測事件、以事件的單調時間轉成資料時間，不能用批次送達時間取代樣本時間。
 - 每分鐘保存覆蓋時間、活動時間、三軸變化 RMS 所需統計、樣本數及放置模式，不保存原始波形。約每 5 分鐘用 SQLite 交易寫入。
@@ -70,7 +70,7 @@
 - Manifest 宣告 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。`BatteryLife` lint 僅在 `batteryIntents()` 局部抑制並說明原因：整夜本機感測是核心功能，不能以 FCM 或延後工作取代；這不代表已通過 Google Play 審核。既有低頻／批次／低電量暫停策略不因豁免而改變。
 - 依 manufacturer／brand 辨識 Xiaomi、Redmi、POCO，提供 `com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity` 入口；不可用時退回本 App 設定及一般設定，並提示搜尋「自啟動」。這是廠商私有入口，不能保證所有 MIUI／HyperOS 都支援。
 - **沒有可靠公開 API 確認小米自啟動已開啟**；只記錄引導是否顯示過，不能顯示假的「已授權」勾選。小米入口只在首次引導中使用，首頁不顯示小米自啟動或「App 無法讀取」區塊；電池最佳化豁免也不代表廠商全部省電限制已解除。
-- 每次回到首頁重新查詢 Android 電池狀態；已就緒的 Android 電池設定入口收起，被撤回時再次顯示。小米一次性引導不影響候選、同步與記錄開關。
+- 每次回到首頁重新查詢 Android 電池狀態；已就緒的 Android 電池設定入口收起，被撤回時再次顯示。小米一次性引導不影響候選、同步與記錄開關。首頁 DataStore、Health Connect 權限與背景狀態查詢由 `HomeViewModel` 在 `Dispatchers.IO` 收集。
 
 ### 動作候選與來源選擇
 
@@ -85,14 +85,14 @@
 
 ### 畫面
 
-- 首頁保留既有 MaterialCardView 視覺：最近睡眠與歷史、每日時段及整體暫停／恢復、必要權限，以及最後一筆已保存的 Sleep API 睡眠信心與回報時間。該分類分數只讀取本機保存資料，不會為顯示而即時查詢，且不是準確率；睡眠候選的參考分數及判斷理由仍留在自選詳情中。
+- 首頁保留既有 MaterialCardView 視覺：最近睡眠與歷史、每日時段及整體暫停／恢復、必要權限，以及最後一筆已保存的 Sleep API 睡眠信心與回報時間。該分類分數只讀取本機保存資料，不會為顯示而即時查詢，且不是準確率；睡眠候選的參考分數及判斷理由仍留在自選詳情中。歷史超過首頁摘要上限時提供「查看全部紀錄」清單。
 - 不再顯示放置選擇、動作開關、頻率／FIFO 參數、動作時間軸或手動試算按鈕。首頁不顯示複雜感測圖；自選睡眠詳情可顯示簡約時段條，以色塊標記睡眠範圍及已扣除的手機使用／清醒區間。前景通知顯示自動睡眠記錄，仍遵守 Android 必要通知要求。
-- 主畫面使用 `Theme.SleepTrace.Home` 無 ActionBar，加上單一自訂標題。`enableEdgeToEdge` 搭配 systemBars／displayCutout insets，避免狀態列、瀏海及導覽列遮擋。更新前先取得資料；可見資料、權限、記錄或背景限制未變時略過整頁重建，變更時才同步重建畫面並保留捲動位置；不得重加第二個標題列或固定狀態列高度。
+- 主畫面使用 `Theme.SleepTrace.Home` 無 ActionBar，加上單一自訂標題。`enableEdgeToEdge` 搭配 systemBars／displayCutout insets，避免狀態列、瀏海及導覽列遮擋。Activity 建立時一次建立首頁卡片骨架，資料更新只改文字、Badge 與 visibility，保留捲動位置，不得以 `removeAllViews()` 重建整頁、重加第二個標題列或固定狀態列高度。睡眠詳情、排程與時間修正對話框由 `SleepDialogHelper.kt` 管理；時間修正同一對話框同時選兩個時間並顯示時長。
 
 ## 4. 自動同步、資料完整性與重試
 
 - 現有狀態為 `PENDING`、`SYNCING`、`SYNCED`、`FAILED`、`SKIPPED`。`NEEDS_REVIEW` 僅是舊資料字串，由 `SyncState.fromStored` 轉成 `PENDING`，不能恢復為執行期狀態。
-- `SleepReconcileWorker` 先重新分析，再呼叫 `HealthConnectSync.syncPending()`。立即工作使用唯一名稱 `sleeptrace_reconcile_now`／`APPEND_OR_REPLACE`；定期工作為 `sleeptrace_reconcile`／每 6 小時／`UPDATE`。
+- `SleepReconcileWorker` 先重新分析，再呼叫 `HealthConnectSync.syncPendingOutcome()`；暫態錯誤回傳 retry，永久性錯誤回傳 failure，取消例外仍向外傳遞。立即工作使用唯一名稱 `sleeptrace_reconcile_now`／`APPEND_OR_REPLACE`；定期工作為 `sleeptrace_reconcile`／每 6 小時／`UPDATE`。
 - Reconcile 只重新分析最近 48 小時的原始 Sleep API／動作資料，以及與未完成同步紀錄重疊的舊 Sleep API 區段；同一輪將所有 segment 的 UsageStats 時段合併成一次查詢，不再逐 segment 重複掃描。
 - 暫時失敗以 10 分鐘起的指數退避重試；時間受系統排程影響，不能承諾即時或精準分鐘數。App 恢復前景、健康授權回傳、時間修正及感測／Sleep API 完成事件也會排入工作。
 - 沒有健康寫入授權時保留本機紀錄，待授權後或後續工作自動繼續，不要求逐筆同意。
@@ -113,7 +113,7 @@
 | 路徑 | 責任 |
 | --- | --- |
 | `SleepTraceApplication.kt` | application-scoped 依賴容器；集中提供設定、睡眠資料、動作設定、背景存取及 Health Connect 同步元件給 UI、Worker、Receiver、Service |
-| `MainActivity.kt`、`HomeViewModel.kt` | 簡化首頁、系統安全間距、自動啟動記錄、權限、時間修正；ViewModel 負責首頁資料、授權與背景狀態彙整，Activity 僅觀察與繪製 |
+| `MainActivity.kt`、`HomeViewModel.kt`、`SleepDialogHelper.kt` | 簡化首頁、系統安全間距、自動啟動記錄、權限與歷史清單；ViewModel 負責首頁資料、授權與背景狀態彙整，Dialog helper 負責排程、詳情及單一時間修正，Activity 觀察並繪製 |
 | `power/BackgroundAccess.kt` | Android 電池限制查詢、一次性引導旗標、電池與小米自啟動設定及備援 Intent |
 | `sleep/SleepTracker.kt` | Sleep API 訂閱／取消；明確指向接收器的 mutable PendingIntent 用於事件載入 |
 | `sleep/SleepUpdateReceiver.kt` | 保存 Sleep API 區段／分類，區段事件排入工作 |
@@ -125,9 +125,9 @@
 | `motion/MotionEngine.kt` | 純 Kotlin 取樣策略、分鐘聚合、動作分類／候選與分數調整 |
 | `motion/AutomaticPlacement.kt` | 純 Kotlin 自動放置／床面動作證據判斷；無手動選擇 |
 | `motion/MotionService.kt` | 前景感測服務、電量／供電切換、flush、時段邊界 Receiver |
-| `motion/MotionStore.kt` | SQLite 分鐘摘要及 SharedPreferences 動作設定 |
+| `motion/MotionStore.kt` | SQLite 分鐘摘要及 SharedPreferences 動作設定；由 Application 容器共用並啟用 WAL |
 | `motion/MotionTimelineView.kt` | 保留的時間軸繪製工具，首頁已不使用 |
-| `data/SleepPreferences.kt`、`data/SleepStore.kt` | 時段設定及 Sleep API 原始事件／睡眠紀錄 |
+| `data/SleepPreferences.kt`、`data/SleepStore.kt`、`data/SleepEventStore.kt` | 時段設定及 Sleep API 原始事件／睡眠紀錄；支援主鍵 session、segment 時間範圍與近期 sample 查詢 |
 | `health/AutomaticSyncQueue.kt`、`health/HealthConnectSync.kt` | 自動同步佇列、版本競態保護及 Health Connect 寫入 |
 | `health/HealthPrivacyActivity.kt` | 系統健康授權畫面的資料使用說明入口 |
 | `work/WorkScheduler.kt`、`work/SleepReconcileWorker.kt` | 排程、分析→同步、重試 |
@@ -142,7 +142,7 @@
 | SharedPreferences `sleeptrace_records` | 僅作為舊版 JSON `sessions`／raw `segments`／`samples` 的一次性遷移來源；遷移完成後移除內容 |
 | SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、內部狀態、battery_guide_shown／xiaomi_guide_shown 引導旗標（不是授權狀態）；舊 enabled／placement 不再控制新資料 |
 | SQLite `motion.db`／`minutes` | 每分鐘感測統計，以開始時間為主鍵；沒有原始感測波形 |
-| SQLite `sleep_events.db`／`segments`、`samples`、`sessions` | Sleep API 原始區段與分類以時間鍵去重、交易批次寫入及 14 天清理；睡眠紀錄、穩定 ID、版本、同步狀態與清醒明細也在同一交易式資料庫保存 |
+| SQLite `sleep_events.db`／`segments`、`samples`、`sessions` | Sleep API 原始區段與分類以時間鍵去重、交易批次寫入及 14 天清理；睡眠紀錄、穩定 ID、版本、同步狀態與清醒明細也在同一交易式資料庫保存。兩個 SQLite helper 啟用 WAL；session 狀態／修正使用 id 單筆 upsert，`replaceSessions` 僅用於遷移及完整重算 |
 
 Sleep API 原始事件及動作摘要在新增／寫入時清理 14 天前資料，不是到期即定時刪除；歷史睡眠紀錄會保留。相關資料已在 `app/src/main/res/xml/backup_rules.xml` 與 `app/src/main/res/xml/data_extraction_rules.xml` 排除備份。
 
@@ -188,6 +188,10 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 2026-09-29 本輪效能、同步、分段睡眠與詳情介面更新：40 個 JVM 測試通過，Lint 無 issue，Debug APK 與測試 APK 建置成功。涵蓋原始 Sleep API 事件 SQLite 保存、排程裁切、上傳前單次手機使用快照、分段動作候選、Google 分類延遲備援、重疊已同步紀錄回收與詳情清醒色塊。未執行會修改授權、時段或資料的 instrumentation test；Health Connect 實際刪除／寫入、Google 分類延遲、Doze／OEM 背景限制、FIFO 與整夜耗電仍未在實機端到端驗證。
 
 2026-09-29 架構整合更新：40 個 JVM 測試通過，Lint 無 issue，Debug APK 與測試 APK 建置成功。首頁資料載入已移到 `HomeViewModel`；睡眠 session、raw segment 與分類統一至 `sleep_events.db`，並在首次讀取時交易式遷移舊版 `sleeptrace_records` JSON。`AutoSyncStorageTest` 已隨新 schema 編譯，但因當時連接的 Mi Note 10 與 Pixel 均為實機，依規則未實跑會寫入／遷移資料的 instrumentation test；實際升級遷移、Health Connect 寫入／刪除和整夜感測仍未端到端驗證。
+
+2026-09-29 資料庫／UI／同步效能更新：43 個 JVM 測試通過、Lint 無 issue，Debug APK 與 Android 測試 APK 建置成功。`SleepStore.updateIfCurrent` 與 `upsert` 已改為單筆 session id 查詢／upsert；首頁與 MotionService 改用最新／近期 classification 查詢；`MotionStore` 納入 Application 容器並與 `SleepEventStore` 啟用 WAL；首頁固定骨架更新、DST 跨日修正、MotionAccumulator 零配置差值、ACTION_TIME_CHANGED 校時補償及 Worker 暫態／永久錯誤分流已完成。當時連接的 Mi Note 10、Pixel 與另一支實機皆非可丟棄模擬器，未執行會修改資料／授權的 instrumentation test；Health Connect 實際寫入／刪除、整夜感測、OEM 背景恢復與耗電仍未端到端驗證。
+
+2026-09-29 背景與 UI 查詢優化：完成 `MotionService` 低電量事件監聽、`SleepReconciler` segment／sample 時間範圍查詢、`SleepStore.reviseTimes` 主鍵查詢、`MotionStore.append` 批次既有資料查詢、`HomeViewModel` 全段 I/O 卸載、時間條圓角裁切、`SleepDialogHelper` 單一時間修正對話框及完整歷史清單入口。`testDebugUnitTest`、`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest` 均通過；未在裝置執行會修改資料／權限的 instrumentation test，真實電量喚醒次數、OEM 背景行為、Health Connect 端到端寫入與整夜耗電仍未驗證。
 
 尚未完成或不能保證的項目：
 

@@ -20,17 +20,36 @@ class MotionSettings(context: Context) {
 
 /** Stores minute features only; no raw accelerometer stream. Inserts are batched in one transaction. */
 class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 1) {
+    init {
+        setWriteAheadLoggingEnabled(true)
+    }
+
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.enableWriteAheadLogging()
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE minutes (start INTEGER PRIMARY KEY, covered INTEGER NOT NULL, active INTEGER NOT NULL, squared REAL NOT NULL, samples INTEGER NOT NULL, placement TEXT NOT NULL)")
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
 
     fun append(minutes: List<MotionMinute>, now: Long = System.currentTimeMillis()) {
+        if (minutes.isEmpty()) return
         val db = writableDatabase
         db.transaction {
+            val existingByStart = db.query(
+                "minutes", null, "start >= ? AND start <= ?",
+                arrayOf(minutes.minOf { it.startMillis }.toString(), minutes.maxOf { it.startMillis }.toString()),
+                null, null, "start ASC"
+            ).use { cursor ->
+                buildMap {
+                    while (cursor.moveToNext()) put(cursor.getLong(0), cursor.readMinute())
+                }.toMutableMap()
+            }
             minutes.forEach { item ->
                 // Restarting or changing mode can yield two partial contributions to the same minute.
-                val existing = read(item.startMillis, item.startMillis + MINUTE_MS).firstOrNull()
+                val existing = existingByStart[item.startMillis]
                 val compatible = existing?.takeIf { it.placement == item.placement }
                 val row = ContentValues().apply {
                     put("start", item.startMillis)
@@ -41,18 +60,28 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
                     put("placement", item.placement.name)
                 }
                 db.insertWithOnConflict("minutes", null, row, SQLiteDatabase.CONFLICT_REPLACE)
+                existingByStart[item.startMillis] = MotionMinute(
+                    item.startMillis,
+                    row.getAsLong("covered"),
+                    row.getAsLong("active"),
+                    row.getAsDouble("squared"),
+                    row.getAsInteger("samples"),
+                    item.placement
+                )
             }
             db.delete("minutes", "start < ?", arrayOf((now - 14L * 24 * 60 * MINUTE_MS).toString()))
         }
     }
 
+    private fun android.database.Cursor.readMinute() = MotionMinute(
+        getLong(0), getLong(1), getLong(2), getDouble(3), getInt(4), Placement.valueOf(getString(5))
+    )
+
     fun read(start: Long, end: Long): List<MotionMinute> = readableDatabase.query(
         "minutes", null, "start >= ? AND start < ?", arrayOf(start.toString(), end.toString()), null, null, "start ASC"
     ).use { cursor ->
         buildList {
-            while (cursor.moveToNext()) add(MotionMinute(
-                cursor.getLong(0), cursor.getLong(1), cursor.getLong(2), cursor.getDouble(3), cursor.getInt(4), Placement.valueOf(cursor.getString(5))
-            ))
+            while (cursor.moveToNext()) add(cursor.readMinute())
         }
     }
 }

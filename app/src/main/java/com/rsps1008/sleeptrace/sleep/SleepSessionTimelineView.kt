@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.view.View
 import kotlin.math.max
@@ -15,6 +16,7 @@ class SleepSessionTimelineView(context: Context, private val session: SleepSessi
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(85, 83, 110); textSize = 12 * density }
     private val track = RectF()
+    private val clip = Path()
 
     init {
         contentDescription = "睡眠時段；紅色區塊是已扣除的手機使用時間"
@@ -29,14 +31,20 @@ class SleepSessionTimelineView(context: Context, private val session: SleepSessi
         val bottom = top + 16 * density
         track.set(left, top, right, bottom)
         paint.color = Color.rgb(103, 80, 164)
-        canvas.drawRoundRect(track, 8 * density, 8 * density, paint)
+        val radius = 8 * density
+        canvas.drawRoundRect(track, radius, radius, paint)
         val span = (session.endMillis - session.startMillis).coerceAtLeast(1)
         paint.color = Color.rgb(198, 72, 113)
+        canvas.save()
+        clip.reset()
+        clip.addRoundRect(track, radius, radius, Path.Direction.CW)
+        canvas.clipPath(clip)
         normalizedAwake(session.startMillis, session.endMillis, session.awakeIntervals).forEach { awake ->
             val start = left + (awake.startMillis - session.startMillis).toFloat() / span * track.width()
             val end = left + (awake.endMillis - session.startMillis).toFloat() / span * track.width()
             canvas.drawRect(max(left, start), top, min(right, end), bottom, paint)
         }
+        canvas.restore()
         canvas.drawText("入睡", left, 12 * density, labelPaint)
         val endLabel = "醒來"
         canvas.drawText(endLabel, right - labelPaint.measureText(endLabel), 12 * density, labelPaint)

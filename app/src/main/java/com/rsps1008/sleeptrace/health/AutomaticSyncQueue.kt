@@ -17,6 +17,13 @@ object AutomaticSyncQueue {
         read: () -> List<SleepSession>,
         update: (SleepSession, SleepSession) -> Boolean,
         write: suspend (SleepSession) -> Unit
+    ): Boolean = drain(read, update, {}, write)
+
+    suspend fun drain(
+        read: () -> List<SleepSession>,
+        update: (SleepSession, SleepSession) -> Boolean,
+        onFailure: (Throwable) -> Unit,
+        write: suspend (SleepSession) -> Unit
     ): Boolean = mutex.withLock {
         read().filter(::eligible).forEach { session ->
             val knownAwake = normalizedAwake(session.startMillis, session.endMillis, session.awakeIntervals).sumOf { it.endMillis - it.startMillis }
@@ -33,6 +40,7 @@ object AutomaticSyncQueue {
             } catch (cancelled: CancellationException) {
                 throw cancelled // Keep SYNCING for idempotent recovery on the next worker run.
             } catch (error: Exception) {
+                onFailure(error)
                 update(writing, writing.copy(state = SyncState.FAILED, syncError = error.message ?: "同步暫時失敗"))
             }
         }

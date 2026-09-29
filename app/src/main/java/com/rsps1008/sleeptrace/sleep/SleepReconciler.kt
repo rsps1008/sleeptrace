@@ -3,7 +3,6 @@ package com.rsps1008.sleeptrace.sleep
 import android.content.Context
 import com.rsps1008.sleeptrace.motion.MotionSleepEstimator
 import com.rsps1008.sleeptrace.motion.AutomaticPlacement
-import com.rsps1008.sleeptrace.motion.MotionStore
 import com.rsps1008.sleeptrace.sleepDependencies
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -17,17 +16,20 @@ class SleepReconciler(private val context: Context) {
         val schedule = preferences.schedule()
         val now = System.currentTimeMillis()
         val analysisStart = now - RECENT_ANALYSIS_MILLIS
-        val allSegments = store.segments()
-        val samples = store.samples()
         val existing = store.sessions()
         val unresolved = existing.filter { it.state !in setOf(SyncState.SYNCED, SyncState.SKIPPED, SyncState.RETIRED) }
+        // Keep unresolved old sessions eligible for matching without loading the full
+        // fourteen-day segment table on every reconciliation.
+        val segmentStart = minOf(analysisStart, unresolved.minOfOrNull { it.startMillis } ?: analysisStart)
+        val allSegments = store.segments(segmentStart, now)
+        val samples = store.recentSamples(analysisStart)
         val segments = allSegments.filter { segment ->
             segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
         }
         val base = SleepAnalyzer.analyze(
             segments, samples, emptyList(), schedule
         )
-        val motion = MotionStore(context).use { it.read(analysisStart, now) }
+        val motion = dependencies.motionStore.read(analysisStart, now)
         val resolved = AutomaticPlacement.resolve(motion, emptyList())
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
         val fallback = MotionSleepEstimator.estimate(resolved, emptyList(), schedule, now)

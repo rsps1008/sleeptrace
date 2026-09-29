@@ -14,14 +14,25 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Indexed, transactional storage for raw Sleep API events and local sleep records. */
-class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 2) {
+class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 3) {
+    init {
+        setWriteAheadLoggingEnabled(true)
+    }
+
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.enableWriteAheadLogging()
+    }
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE segments (start INTEGER NOT NULL, end INTEGER NOT NULL, confidence INTEGER NOT NULL, source TEXT NOT NULL, PRIMARY KEY(start, end, source))")
         db.execSQL("CREATE TABLE samples (time INTEGER PRIMARY KEY, confidence INTEGER NOT NULL, motion INTEGER NOT NULL, light INTEGER NOT NULL)")
         createSessions(db)
+        createSegmentIndex(db)
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createSessions(db)
+        if (oldVersion < 3) createSegmentIndex(db)
     }
 
     private fun createSessions(db: SQLiteDatabase) = db.execSQL("""
@@ -32,6 +43,10 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             awakeIntervals TEXT NOT NULL, usageSnapshotApplied INTEGER NOT NULL
         )
     """.trimIndent())
+
+    private fun createSegmentIndex(db: SQLiteDatabase) = db.execSQL(
+        "CREATE INDEX IF NOT EXISTS segments_end_start_idx ON segments(end, start)"
+    )
 
     fun import(segments: List<SleepSegment>, samples: List<ClassificationSample>) { append(segments, samples) }
     fun append(segments: List<SleepSegment> = emptyList(), samples: List<ClassificationSample> = emptyList(), now: Long = System.currentTimeMillis()) {
@@ -46,33 +61,66 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             delete("samples", "time < ?", arrayOf((now - RETENTION).toString()))
         }
     }
-    fun segments(): List<SleepSegment> = readableDatabase.query("segments", null, null, null, null, null, "start ASC").use { c -> buildList { while (c.moveToNext()) add(SleepSegment(c.getLong(0), c.getLong(1), c.getInt(2), c.getString(3))) } }
+    fun segments(): List<SleepSegment> = querySegments(null, null)
+    fun segments(sinceMillis: Long, untilMillis: Long? = null): List<SleepSegment> = querySegments(sinceMillis, untilMillis)
+    private fun querySegments(sinceMillis: Long?, untilMillis: Long?): List<SleepSegment> {
+        val selection = when {
+            sinceMillis != null && untilMillis != null -> "end >= ? AND start <= ?"
+            sinceMillis != null -> "end >= ?"
+            untilMillis != null -> "start <= ?"
+            else -> null
+        }
+        val args = when {
+            sinceMillis != null && untilMillis != null -> arrayOf(sinceMillis.toString(), untilMillis.toString())
+            sinceMillis != null -> arrayOf(sinceMillis.toString())
+            untilMillis != null -> arrayOf(untilMillis.toString())
+            else -> null
+        }
+        return readableDatabase.query("segments", null, selection, args, null, null, "start ASC").use { c ->
+            buildList { while (c.moveToNext()) add(SleepSegment(c.getLong(0), c.getLong(1), c.getInt(2), c.getString(3))) }
+        }
+    }
     fun samples(): List<ClassificationSample> = readableDatabase.query("samples", null, null, null, null, null, "time ASC").use { c -> buildList { while (c.moveToNext()) add(ClassificationSample(c.getLong(0), c.getInt(1), c.getInt(2), c.getInt(3))) } }
+    fun latestSample(): ClassificationSample? = readableDatabase.query(
+        "samples", null, null, null, null, null, "time DESC", "1"
+    ).use { c ->
+        if (!c.moveToFirst()) null else ClassificationSample(c.getLong(0), c.getInt(1), c.getInt(2), c.getInt(3))
+    }
+    fun recentSamples(sinceMillis: Long): List<ClassificationSample> = readableDatabase.query(
+        "samples", null, "time >= ?", arrayOf(sinceMillis.toString()), null, null, "time ASC"
+    ).use { c ->
+        buildList { while (c.moveToNext()) add(ClassificationSample(c.getLong(0), c.getInt(1), c.getInt(2), c.getInt(3))) }
+    }
     fun importSessions(sessions: List<SleepSession>) = writableDatabase.transaction { sessions.forEach { insertSession(it) } }
     fun replaceSessions(sessions: List<SleepSession>) = writableDatabase.transaction {
         delete("sessions", null, null)
         sessions.forEach { insertSession(it) }
     }
+    fun upsertSession(session: SleepSession) = writableDatabase.transaction { insertSession(session) }
+    fun session(id: String): SleepSession? = readableDatabase.query(
+        "sessions", null, "id = ?", arrayOf(id), null, null, null, "1"
+    ).use { c -> if (c.moveToFirst()) c.readSession() else null }
     fun sessions(): List<SleepSession> = readableDatabase.query("sessions", null, null, null, null, null, "start DESC").use { c ->
         buildList {
-            while (c.moveToNext()) add(SleepSession(
-                id = c.getString(c.getColumnIndexOrThrow("id")),
-                startMillis = c.getLong(c.getColumnIndexOrThrow("start")),
-                endMillis = c.getLong(c.getColumnIndexOrThrow("end")),
-                confidence = c.getInt(c.getColumnIndexOrThrow("confidence")),
-                awakeMillis = c.getLong(c.getColumnIndexOrThrow("awake")),
-                state = SyncState.fromStored(c.getString(c.getColumnIndexOrThrow("state"))),
-                reason = c.getString(c.getColumnIndexOrThrow("reason")),
-                manuallyEdited = c.getInt(c.getColumnIndexOrThrow("manual")) != 0,
-                syncError = c.getString(c.getColumnIndexOrThrow("error")),
-                revision = c.getLong(c.getColumnIndexOrThrow("revision")),
-                awakeIntervals = JSONArray(c.getString(c.getColumnIndexOrThrow("awakeIntervals"))).let { array ->
-                    List(array.length()) { index -> array.getJSONObject(index).let { UsageInterval(it.getLong("start"), it.getLong("end")) } }
-                },
-                usageSnapshotApplied = c.getInt(c.getColumnIndexOrThrow("usageSnapshotApplied")) != 0
-            ))
+            while (c.moveToNext()) add(c.readSession())
         }
     }
+    private fun android.database.Cursor.readSession(): SleepSession = SleepSession(
+        id = getString(getColumnIndexOrThrow("id")),
+        startMillis = getLong(getColumnIndexOrThrow("start")),
+        endMillis = getLong(getColumnIndexOrThrow("end")),
+        confidence = getInt(getColumnIndexOrThrow("confidence")),
+        awakeMillis = getLong(getColumnIndexOrThrow("awake")),
+        state = SyncState.fromStored(getString(getColumnIndexOrThrow("state"))),
+        reason = getString(getColumnIndexOrThrow("reason")),
+        manuallyEdited = getInt(getColumnIndexOrThrow("manual")) != 0,
+        syncError = getString(getColumnIndexOrThrow("error")),
+        revision = getLong(getColumnIndexOrThrow("revision")),
+        awakeIntervals = JSONArray(getString(getColumnIndexOrThrow("awakeIntervals"))).let { array ->
+            List(array.length()) { index -> array.getJSONObject(index).let { UsageInterval(it.getLong("start"), it.getLong("end")) } }
+        },
+        usageSnapshotApplied = getInt(getColumnIndexOrThrow("usageSnapshotApplied")) != 0
+    )
     private fun SQLiteDatabase.insertSession(item: SleepSession) {
         insertWithOnConflict("sessions", null, ContentValues().apply {
             put("id", item.id); put("start", item.startMillis); put("end", item.endMillis)

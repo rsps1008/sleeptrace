@@ -71,17 +71,21 @@ class MotionAccumulator(private val plan: SamplingPlan, private val placement: P
     private data class Bucket(var covered: Long = 0, var active: Long = 0, var squared: Double = 0.0, var count: Int = 0)
     private val buckets = sortedMapOf<Long, Bucket>()
     private var lastTime = Long.MIN_VALUE
-    private var last = doubleArrayOf(0.0, 0.0, 0.0)
+    private var lastX = 0.0
+    private var lastY = 0.0
+    private var lastZ = 0.0
 
     fun add(timeMillis: Long, x: Double, y: Double, z: Double) {
         if (timeMillis <= lastTime || !x.isFinite() || !y.isFinite() || !z.isFinite()) return
-        val values = doubleArrayOf(x, y, z)
         val bucket = buckets.getOrPut(timeMillis / MINUTE_MS * MINUTE_MS) { Bucket() }
         bucket.count++
         if (lastTime != Long.MIN_VALUE) {
             val dt = timeMillis - lastTime
             if (dt <= maxOf(1_500L, plan.periodUs / 1000L * 3)) {
-                val deltaSquared = values.indices.sumOf { (values[it] - last[it]) * (values[it] - last[it]) }
+                val deltaX = x - lastX
+                val deltaY = y - lastY
+                val deltaZ = z - lastZ
+                val deltaSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
                 var cursor = lastTime
                 while (cursor < timeMillis) {
                     val key = cursor / MINUTE_MS * MINUTE_MS
@@ -96,7 +100,9 @@ class MotionAccumulator(private val plan: SamplingPlan, private val placement: P
             }
         }
         lastTime = timeMillis
-        last = values
+        lastX = x
+        lastY = y
+        lastZ = z
     }
 
     fun drain(throughMillis: Long, includePartial: Boolean = false): List<MotionMinute> {

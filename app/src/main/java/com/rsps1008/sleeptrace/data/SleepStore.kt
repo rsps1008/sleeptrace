@@ -38,21 +38,22 @@ class SleepStore(context: Context) {
 
     fun saveSessions(sessions: List<SleepSession>) { migrateSessions(); eventStore.replaceSessions(sessions) }
     fun upsert(session: SleepSession) = synchronized(sessionLock) {
-        val current = sessions().filterNot { it.id == session.id }.plus(session)
-        saveSessions(current)
+        migrateSessions()
+        eventStore.upsertSession(session)
     }
     fun mergeCalculated(calculated: List<SleepSession>) = synchronized(sessionLock) {
         saveSessions(mergeSleepSessions(sessions(), calculated))
     }
     fun updateIfCurrent(expected: SleepSession, replacement: SleepSession): Boolean = synchronized(sessionLock) {
-        val current = sessions()
-        if (current.none { it == expected }) return@synchronized false
-        saveSessions(current.map { if (it.id == expected.id) replacement else it })
+        migrateSessions()
+        if (eventStore.session(expected.id) != expected) return@synchronized false
+        eventStore.upsertSession(replacement)
         true
     }
 
     fun reviseTimes(id: String, start: Long, end: Long) = synchronized(sessionLock) {
-        val current = sessions().firstOrNull { it.id == id } ?: return@synchronized
+        migrateSessions()
+        val current = eventStore.session(id) ?: return@synchronized
         // Keep the time correction local. The one shared UsageStats snapshot is applied right before upload.
         upsert(current.copy(startMillis = start, endMillis = end, awakeMillis = 0, awakeIntervals = emptyList(),
             revision = current.revision + 1, state = SyncState.PENDING,
@@ -64,12 +65,18 @@ class SleepStore(context: Context) {
         SleepSegment(it.getLong("start"), it.getLong("end"), it.getInt("confidence"), it.optString("source", "Sleep API"))
     }
     fun segments(): List<SleepSegment> { migrateRawEvents(); return eventStore.segments() }
+    fun segments(sinceMillis: Long, untilMillis: Long? = null): List<SleepSegment> {
+        migrateRawEvents()
+        return eventStore.segments(sinceMillis, untilMillis)
+    }
     fun appendSegments(events: List<SleepSegment>) { migrateRawEvents(); eventStore.append(segments = events) }
 
     private fun legacySamples(): List<ClassificationSample> = readArray(samplesKey).map {
         ClassificationSample(it.getLong("time"), it.getInt("confidence"), it.getInt("motion"), it.getInt("light"))
     }
     fun samples(): List<ClassificationSample> { migrateRawEvents(); return eventStore.samples() }
+    fun latestSample(): ClassificationSample? { migrateRawEvents(); return eventStore.latestSample() }
+    fun recentSamples(sinceMillis: Long): List<ClassificationSample> { migrateRawEvents(); return eventStore.recentSamples(sinceMillis) }
     fun appendSamples(events: List<ClassificationSample>) { migrateRawEvents(); eventStore.append(samples = events) }
 
     private fun migrateRawEvents() = synchronized(rawLock) {

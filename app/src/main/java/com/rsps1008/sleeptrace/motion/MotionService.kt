@@ -70,6 +70,7 @@ class MotionService : Service(), SensorEventListener2 {
             when (intent.action) {
                 Intent.ACTION_SCREEN_OFF -> screenOffSince = now
                 Intent.ACTION_SCREEN_ON -> screenOffSince = null
+                Intent.ACTION_TIME_CHANGED -> clockOffset = System.currentTimeMillis() - SystemClock.elapsedRealtime()
             }
             refreshConfiguration()
         }
@@ -78,7 +79,7 @@ class MotionService : Service(), SensorEventListener2 {
     override fun onCreate() {
         super.onCreate()
         settings = sleepDependencies().motionSettings
-        store = MotionStore(this)
+        store = sleepDependencies().motionStore
         sensors = getSystemService(SensorManager::class.java)
         // Wake-up FIFO can retain events while the CPU sleeps. Prefer it over non-wake-up sensors.
         sensor = sensors.getSensorList(Sensor.TYPE_ACCELEROMETER).sortedWith(
@@ -116,7 +117,8 @@ class MotionService : Service(), SensorEventListener2 {
         if (active == null) {
             active = this
             ContextCompat.registerReceiver(this, powerReceiver, IntentFilter().apply {
-                addAction(Intent.ACTION_BATTERY_CHANGED)
+                addAction(Intent.ACTION_BATTERY_LOW)
+                addAction(Intent.ACTION_BATTERY_OKAY)
                 addAction(Intent.ACTION_POWER_CONNECTED)
                 addAction(Intent.ACTION_POWER_DISCONNECTED)
                 addAction(Intent.ACTION_TIME_CHANGED)
@@ -134,7 +136,9 @@ class MotionService : Service(), SensorEventListener2 {
         scope.launch(Dispatchers.IO) {
             val prefs = sleepDependencies().preferences
             val newSchedule = if (prefs.configured()) prefs.schedule() else null
-            val classifications = sleepDependencies().store.samples()
+            val classifications = sleepDependencies().store.recentSamples(
+                System.currentTimeMillis() - SleepClassificationTrigger.MAX_EVENT_AGE_MILLIS
+            )
             handler.post { if (!stopped && !destroyed) configure(newSchedule, classifications) }
         }
     }
@@ -298,7 +302,7 @@ class MotionService : Service(), SensorEventListener2 {
             accumulator?.let { pendingMinutes += it.drain(Long.MAX_VALUE, true) }
             accumulator = null; pendingChange = null
             handler.removeCallbacks(finishChange)
-            persist(); store.close()
+            persist()
             settings.status = if (settings.enabled) "動作偵測已中斷，請開啟 App 重新啟動" else "動作偵測已關閉"
             WorkScheduler.reconcileSoon(this)
             thread.quitSafely()

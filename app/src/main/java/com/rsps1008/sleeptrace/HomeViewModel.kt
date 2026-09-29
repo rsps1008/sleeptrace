@@ -3,11 +3,6 @@ package com.rsps1008.sleeptrace
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.rsps1008.sleeptrace.data.SleepPreferences
-import com.rsps1008.sleeptrace.data.SleepStore
-import com.rsps1008.sleeptrace.health.HealthConnectSync
-import com.rsps1008.sleeptrace.motion.MotionSettings
-import com.rsps1008.sleeptrace.power.BackgroundAccess
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
@@ -41,20 +36,20 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<HomeSnapshot?> = mutableState.asStateFlow()
 
     fun refresh() = viewModelScope.launch {
-        val configured = preferences.configured()
-        val schedule = if (configured) preferences.schedule() else null
-        val (sessions, latestClassification) = withContext(Dispatchers.IO) {
-            store.sessions() to store.samples().maxByOrNull { it.timeMillis }
+        val snapshot = withContext(Dispatchers.IO) {
+            val configured = preferences.configured()
+            val schedule = if (configured) preferences.schedule() else null
+            HomeSnapshot(
+                configured = configured,
+                schedule = schedule,
+                sessions = store.sessions(),
+                latestClassification = store.latestSample(),
+                healthGranted = healthSync.hasWritePermission(),
+                recordingEnabled = motionSettings.enabled,
+                backgroundRestricted = backgroundAccess.restricted,
+                batteryExempt = backgroundAccess.exempt
+            )
         }
-        mutableState.value = HomeSnapshot(
-            configured = configured,
-            schedule = schedule,
-            sessions = sessions,
-            latestClassification = latestClassification,
-            healthGranted = healthSync.hasWritePermission(),
-            recordingEnabled = motionSettings.enabled,
-            backgroundRestricted = backgroundAccess.restricted,
-            batteryExempt = backgroundAccess.exempt
-        )
+        mutableState.value = snapshot
     }
 }

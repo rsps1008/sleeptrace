@@ -1,0 +1,195 @@
+package com.rsps1008.sleeptrace
+
+import android.content.Context
+import android.view.View
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.TimePicker
+import androidx.core.content.ContextCompat
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.rsps1008.sleeptrace.sleep.SleepSchedule
+import com.rsps1008.sleeptrace.sleep.SleepSession
+import com.rsps1008.sleeptrace.sleep.SleepSessionTimelineView
+import java.time.Instant
+import java.time.ZoneId
+
+/** Keeps sizeable, stateful dialogs out of MainActivity while preserving the existing callbacks. */
+object SleepDialogHelper {
+    fun showSchedule(context: Context, existing: SleepSchedule?, onSave: (SleepSchedule) -> Unit) {
+        val start = existing?.startMinute ?: 0
+        val end = existing?.endMinute ?: 540
+        val startPicker = timePicker(context, start / 60, start % 60)
+        val endPicker = timePicker(context, end / 60, end % 60)
+        val range = TextView(context).apply {
+            textSize = 14f
+            setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
+            setPadding(dp(context, 24), dp(context, 8), dp(context, 24), dp(context, 4))
+        }
+        fun updateRange() {
+            val startMinute = startPicker.hour * 60 + startPicker.minute
+            val endMinute = endPicker.hour * 60 + endPicker.minute
+            range.text = "每日 ${SleepSchedule(startMinute, endMinute).label()}" +
+                if (endMinute <= startMinute) "（跨午夜）" else ""
+        }
+        startPicker.setOnTimeChangedListener { _, _, _ -> updateRange() }
+        endPicker.setOnTimeChangedListener { _, _, _ -> updateRange() }
+        updateRange()
+        val content = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(range)
+            addView(label(context, "開始"))
+            addView(startPicker)
+            addView(label(context, "結束"))
+            addView(endPicker)
+        }
+        MaterialAlertDialogBuilder(context).setTitle("每日偵測時段").setView(content)
+            .setPositiveButton("儲存") { _, _ ->
+                onSave(SleepSchedule(startPicker.hour * 60 + startPicker.minute, endPicker.hour * 60 + endPicker.minute))
+            }
+            .setNegativeButton("取消", null).show()
+    }
+
+    fun showSession(
+        context: Context,
+        session: SleepSession,
+        formatDuration: (Long) -> String,
+        onEdit: () -> Unit
+    ) {
+        val detail = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(context, 24), 0, dp(context, 24), 0)
+            addView(TextView(context).apply {
+                text = "推估睡眠：${formatDuration(session.durationMillis)}\n" +
+                    "夜間手機使用：${formatDuration(session.awakeMillis)}\n" +
+                    "參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}"
+                setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
+                textSize = 14f
+            })
+            addView(SleepSessionTimelineView(context, session), LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 58)
+            ).apply { topMargin = dp(context, 16) })
+        }
+        MaterialAlertDialogBuilder(context).setTitle(session.title()).setView(detail)
+            .setPositiveButton("關閉", null)
+            .setNeutralButton("修正時間") { _, _ -> onEdit() }
+            .show()
+    }
+
+    fun showTimeEditor(
+        context: Context,
+        session: SleepSession,
+        formatDuration: (Long) -> String,
+        onSave: (startMillis: Long, endMillis: Long) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val zone = ZoneId.systemDefault()
+        val start = Instant.ofEpochMilli(session.startMillis).atZone(zone)
+        val end = Instant.ofEpochMilli(session.endMillis).atZone(zone)
+        val startPicker = timePicker(context, start.hour, start.minute)
+        val endPicker = timePicker(context, end.hour, end.minute)
+        val duration = TextView(context).apply {
+            textSize = 14f
+            setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
+            setPadding(dp(context, 24), dp(context, 8), dp(context, 24), dp(context, 8))
+        }
+
+        fun editedTimes(): Pair<Long, Long> {
+            val newStart = start.withHour(startPicker.hour).withMinute(startPicker.minute)
+                .withSecond(0).withNano(0)
+            var newEnd = end.withHour(endPicker.hour).withMinute(endPicker.minute)
+                .withSecond(0).withNano(0)
+            if (!newEnd.isAfter(newStart)) newEnd = newEnd.plusDays(1)
+            return newStart.toInstant().toEpochMilli() to newEnd.toInstant().toEpochMilli()
+        }
+        fun updateDuration() {
+            val (newStart, newEnd) = editedTimes()
+            val millis = newEnd - newStart
+            duration.text = "預計睡眠時間：${formatDuration(millis)}" +
+                if (millis < MINIMUM_EDIT_MILLIS) "（至少需 30 分鐘）" else ""
+            duration.setTextColor(ContextCompat.getColor(
+                context,
+                if (millis < MINIMUM_EDIT_MILLIS) R.color.status_warning else R.color.text_secondary
+            ))
+        }
+        startPicker.setOnTimeChangedListener { _, _, _ -> updateDuration() }
+        endPicker.setOnTimeChangedListener { _, _, _ -> updateDuration() }
+        updateDuration()
+        val content = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(duration)
+            addView(label(context, "入睡時間"))
+            addView(startPicker)
+            addView(label(context, "醒來時間"))
+            addView(endPicker)
+        }
+        MaterialAlertDialogBuilder(context).setTitle("修正睡眠時間（保留日期）").setView(content)
+            .setPositiveButton("儲存") { _, _ ->
+                val (newStart, newEnd) = editedTimes()
+                if (newEnd - newStart < MINIMUM_EDIT_MILLIS) onError("睡眠時間至少需 30 分鐘")
+                else onSave(newStart, newEnd)
+            }
+            .setNegativeButton("取消", null).show()
+    }
+
+    fun showAllSessions(
+        context: Context,
+        sessions: List<SleepSession>,
+        formatDuration: (Long) -> String,
+        onSelected: (SleepSession) -> Unit
+    ) {
+        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(context).apply { addView(list) }
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setTitle("全部睡眠紀錄（${sessions.size} 筆）")
+            .setView(scroll)
+            .setPositiveButton("關閉", null)
+            .create()
+        sessions.forEachIndexed { index, session ->
+            if (index > 0) list.addView(View(context).apply {
+                setBackgroundColor(ContextCompat.getColor(context, R.color.card_stroke))
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 1))
+            })
+            list.addView(LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                isClickable = true
+                isFocusable = true
+                setPadding(dp(context, 16), dp(context, 12), dp(context, 16), dp(context, 12))
+                addView(TextView(context).apply {
+                    text = session.title()
+                    textSize = 15f
+                    setTextColor(ContextCompat.getColor(context, R.color.text_primary))
+                })
+                addView(TextView(context).apply {
+                    text = "睡眠 ${formatDuration(session.durationMillis)} · 手機使用 ${formatDuration(session.awakeMillis)}"
+                    textSize = 13f
+                    setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
+                    setPadding(0, dp(context, 3), 0, 0)
+                })
+                setOnClickListener {
+                    dialog.dismiss()
+                    onSelected(session)
+                }
+            })
+        }
+        dialog.show()
+    }
+
+    private fun label(context: Context, text: String) = TextView(context).apply {
+        this.text = text
+        setTextColor(ContextCompat.getColor(context, R.color.text_primary))
+        setPadding(dp(context, 24), dp(context, 8), dp(context, 24), 0)
+    }
+
+    private fun timePicker(context: Context, hour: Int, minute: Int) = TimePicker(
+        context, null, 0, R.style.SleepTraceSpinnerTimePicker
+    ).apply {
+        setIs24HourView(true)
+        this.hour = hour
+        this.minute = minute
+    }
+
+    private fun dp(context: Context, value: Int) = (value * context.resources.displayMetrics.density).toInt()
+
+    private const val MINIMUM_EDIT_MILLIS = 30 * 60 * 1000L
+}
