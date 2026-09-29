@@ -6,10 +6,10 @@ App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 And
 
 ## 自動記錄睡眠
 
-1. 首次開啟先設定偵測時段；每次開啟 App 都會自動檢查活動辨識、通知、Health Connect 與使用情況存取。可由 App 發起的權限會直接交由系統要求，使用情況存取則開啟 Android 系統設定頁。
-2. 偵測時段在同一個對話框內以兩個 24 小時制拉選欄位選擇開始／結束，會即時標示跨午夜狀態；不使用時鐘式選擇器。
+1. 首次開啟先設定平日偵測時段；可選擇為週六、週日各使用同一組週末時段。跨午夜時依睡眠窗開始日套用，國定假日不會自動識別。每次開啟 App 都會自動檢查活動辨識、通知、Health Connect 與使用情況存取。可由 App 發起的權限會直接交由系統要求，使用情況存取則開啟 Android 系統設定頁。
+2. 平日及可選的週末時段在同一個對話框內以 24 小時制拉選欄位設定開始／結束，會即時標示跨午夜狀態；不使用時鐘式選擇器。
 3. 完成設定及必要授權後，App 在偵測時段內先等待 Google Sleep API 的高信心睡眠分類；達到工程門檻後才以 1 Hz 啟動加速度計。手機放床上或床邊均由 App 自行評估，不用選擇位置，也不用另外開啟動作偵測。
-4. 前景通知只顯示自動睡眠記錄，App 或通知可暫停整體記錄。一般程序回收、開機或 App 更新後會嘗試恢復；若 Android 強制停止或 OEM 限制背景啟動，回到 App 時會自動補啟動。明確暫停後則保留暫停，直到按恢復。
+4. 前景服務任何情況都只在睡眠窗內執行；睡眠窗開始／結束由獨立鬧鐘接收器切換，睡眠窗外仍訂閱 Sleep API 區段事件。Android 12 以上允許「鬧鐘與提醒」後，鬧鐘可準時啟動邊界；若略過，App 仍設非精準鬧鐘並嘗試從睡眠分類回呼啟動，但 Android 可能拒絕或延遲背景服務，造成動作資料缺口。首頁可重新開啟特殊存取設定。前景通知只在睡眠窗服務執行時顯示，App 或通知可暫停整體記錄。開機、App 更新或程序回收只會在睡眠窗內嘗試恢復；若 Android 強制停止或 OEM 限制背景啟動，回到 App 後且當下位於睡眠窗才會補啟動。明確暫停後則保留暫停，直到按恢復。
 5. 首頁只呈現睡眠紀錄、排程與必要連線狀態，不顯示感測器設定或動作時間軸；並顯示本機已保存的最後一筆 Sleep API 睡眠信心與回報時間，不會為此發起即時查詢，且該分數不是經過校準的準確率。睡眠紀錄的工程分數／理由可在自選詳情查看。
 6. 完成 Health Connect 系統授權後，App 自動同步睡眠紀錄。動作推估會在偵測時段結束後產生，不需要開啟 App 或按確認上傳；可選擇修正時間，儲存後也會自動更新。動作資料不會上傳為深眠、淺眠或 REM。
 
@@ -23,25 +23,26 @@ App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 And
 
 | 情況 | 要求取樣頻率 | 要求硬體批次回報 |
 | --- | --- | --- |
-| 時段內，Google 尚未判斷入睡 | 不取樣 | 保留 Sleep API 訂閱及前景服務 |
+| 睡眠窗前 15 分鐘 | 不取樣；預熱 classify | 前景服務尚未啟動 |
+| 睡眠窗內，Google 尚未判斷入睡 | 不取樣 | classify 訂閱及前景服務已啟動 |
 | Google 睡眠信心值 ≥ 80、有 FIFO | 1 Hz | 使用硬體宣告 FIFO 容量的 80% |
 | Google 睡眠信心值 ≥ 80、無 FIFO | 1 Hz | 不支援批次 |
 | 未接電且電量 ≤ 15% | 暫停 | 接電或電量恢復後重新評估 |
-| 偵測時段外 | 不取樣 | 保留服務通知與時段邊界排程 |
+| 窗外且距下一睡眠窗超過 15 分鐘 | 不取樣 | 僅訂閱 Sleep API 區段；前景服務停止；有特殊存取時設精準鬧鐘，否則用可能延遲的非精準鬧鐘 |
 
-睡眠分類是 Google Play services 定期提供的推估，不是即時或確定的入睡事件；官方舉例可能約每 10 分鐘回報。原始分類、區段與本機睡眠紀錄都在同一個 SQLite 資料庫中以交易保存；原始事件有時間索引與 14 天保留期，既有 SharedPreferences JSON 首次讀取後會遷移並移除，不再為每筆分類重寫完整 JSON。Sleep API 區段會先裁切到每日偵測時段；手機使用只會在已有 Health Connect 寫入權限、準備上傳待同步候選時合併查詢一次，結果會保存，因此週期分析、時間修正及同步重試不會重複掃描 UsageStats 或重算扣除時間。App 只接受目前時段內、最近 20 分鐘且信心值至少 80 的分類，觸發後持續取樣到時段結束。若時段開始已過 2 小時仍無分類，且螢幕已持續關閉至少 2 小時，會啟動同樣 1 Hz 的低頻動作備援；它只避免整夜資料空窗，並不能證明使用者已靜止或入睡。這些門檻都是未校準的工程規則，可能延後啟動或整晚未觸發；缺少的前段動作資料不會補成安靜，最終仍可使用 Sleep API 區段及手機使用紀錄推估。
+睡眠分類是 Google Play services 定期提供的推估，不是即時或確定的入睡事件；官方舉例可能約每 10 分鐘回報。睡眠窗前 15 分鐘至窗結束才訂閱分類，其餘時間只訂閱區段事件，以減少白天不需要的分類回呼。預熱 classify 不會啟動 FGS 或加速度計，但其中最近 20 分鐘、信心值至少 80 的分類可在睡眠窗開始時觸發取樣。原始分類、區段、每晚 UsageStats snapshot 與本機睡眠紀錄都在同一個 SQLite 資料庫中以交易保存；原始事件有時間索引與 14 天保留期，retention 最多每日檢查並清理一次。既有 SharedPreferences JSON 首次讀取後會遷移並移除，不再為每筆分類重寫完整 JSON。Sleep API 區段會先裁切到平日／週末對應睡眠窗；只在完整睡眠窗結束後查詢並保存該窗的 UsageStats snapshot，未結束的當晚不會凍結半窗資料或提早產生／同步候選。完整 snapshot 由 AutomaticPlacement、SleepAnalyzer 與 Health Connect 上傳共用，因此來源／位置判斷、reason 與最後扣除的手機使用時間一致；App 偵測使用情況權限由無到有時會排入整理，以更新先前不可用的 snapshot。沒有使用情況存取權時，其他來源仍可推估，並保留無法排除手機使用的說明。若睡眠窗開始已過 2 小時仍無分類，且螢幕已持續關閉至少 2 小時，會啟動同樣 1 Hz 的低頻動作備援；它只避免整夜資料空窗，並不能證明使用者已靜止或入睡。這些門檻都是未校準的工程規則，可能延後啟動或整晚未觸發；缺少的前段動作資料不會補成安靜，最終仍可使用 Sleep API 區段及手機使用紀錄推估。
 
 資料庫使用 SQLite WAL；歷史 session 的同步狀態、版本與時間修正都以 id 做單筆 upsert，不會因單筆狀態變更清空並重建整張 `sessions` 表。reconcile 只讀取最近 48 小時重疊的 session，加上仍待同步的舊 session；合併後只在同一個 transaction 內刪除被取代的未同步列、upsert 新增／版本／退休列，未變更歷史不會重寫。`replaceSessions` 僅保留給明確的完整重算／遷移用途。`sessions` 依開始時間與同步狀態建索引，支援 limit／offset 及只讀摘要欄位；首頁只讀最新 5 筆（最近睡眠加最多 4 筆歷史），不解析清醒區間 JSON。歷史紀錄用 RecyclerView 分頁載入，追加頁面只通知插入範圍，選取後才按 ID 讀取該筆詳情與清醒區間。首頁只查詢最新一筆 classification，前景服務只查詢最近 20 分鐘的樣本；`MotionStore` 由 `SleepTraceApplication` 共用，避免服務與背景整理各自持有 SQLite helper。首頁骨架在 Activity 建立時建立一次，資料刷新只更新既有 View 的文字、Badge 與 visibility。
 
-背景服務只監聽 `ACTION_BATTERY_LOW`／`ACTION_BATTERY_OKAY` 及接／斷電事件；精確電量仍在配置刷新時以一次性的 `ACTION_BATTERY_CHANGED` 快照取得，不因每 1% 電量變化持續喚醒。背景整理對 Sleep API segment 使用時間範圍查詢、分類只取最近 48 小時；未完成同步的舊 session 仍會擴大 segment 起點以保留匹配能力。`MotionStore.append` 會在單一交易內先讀出批次涵蓋範圍的既有分鐘，避免逐筆建立 Cursor。首頁的 DataStore、Health Connect 權限與 Android 背景狀態讀取也由 `HomeViewModel` 的 I/O 工作收集後一次更新畫面。
+睡眠窗內的背景服務監聽 `ACTION_BATTERY_LOW`／`ACTION_BATTERY_OKAY` 及接／斷電事件；精確電量在配置需要時以一次性的 `ACTION_BATTERY_CHANGED` 快照取得，不因每 1% 電量變化持續喚醒。螢幕 ON／OFF 只更新記憶體中的狀態，不重查排程、SQLite 或電量。未改變的下一個睡眠窗邊界不會重設鬧鐘。背景整理對 Sleep API segment 使用時間範圍查詢、分類只取最近 48 小時；未完成同步的舊 session 仍會擴大 segment 起點以保留匹配能力。`MotionStore.append` 會在單一交易內先讀出批次涵蓋範圍的既有分鐘，避免逐筆建立 Cursor。立即 reconcile 使用 WorkManager `KEEP` 合併重複觸發；每日 24 小時 recovery 有 6 小時 flex 並要求電量非低。首頁只在有待整理／待同步資料時安排立即 reconcile。首頁的 DataStore、Health Connect 權限與 Android 背景狀態讀取也由 `HomeViewModel` 的 I/O 工作收集後一次更新畫面。
 
-Health Connect 待同步 session 會先驗證、保存 `SYNCING` 狀態，再以多筆 `SleepSessionRecord` 批次寫入；每個請求最多 1,000 筆，較大的佇列切成多批。每批失敗只回復該批為 `FAILED`，保留穩定 client ID／revision 供安全重試。內部 `SleepStage` enum 為後續擴充保留型別空間，但目前只產生／上傳 AWAKE 與 SLEEPING。時間軸顏色取自主題 primary、error 與次要文字色，Android 12 以上可套用系統動態色彩。自動放置以局部靜止分鐘 RMS 的低分位數估計底噪並調整相對門檻；絕對下限與現有時長條件仍保留，這只是尚未跨機型／床墊校準的保守工程啟發式，不能視為精度提升證明。不會因預留擴充而宣稱深眠、淺眠或 REM。
+Health Connect 待同步 session 會先驗證、保存 `SYNCING` 狀態，再以多筆 `SleepSessionRecord` 批次寫入；每個請求最多 1,000 筆，較大的佇列切成多批。每批錯誤按類型保存為 `FAILED_RETRYABLE` 或 `FAILED_PERMANENT`：暫態錯誤可退避重試，永久失敗不會被每日 recovery 再次提交；使用者可從詳情手動重試，取得 Health Connect 權限時也會重新排入。舊版 `FAILED` 會遷移為可重試狀態。穩定 client ID／revision 保留供安全重試。內部 `SleepStage` enum 為後續擴充保留型別空間，但目前只產生／上傳 AWAKE 與 SLEEPING。時間軸顏色取自主題 primary、error 與次要文字色，Android 12 以上可套用系統動態色彩。自動放置以局部靜止分鐘 RMS 的低分位數估計底噪並調整相對門檻；絕對下限與現有時長條件仍保留，這只是尚未跨機型／床墊校準的保守工程啟發式，不能視為精度提升證明。不會因預留擴充而宣稱深眠、淺眠或 REM。
 
 依感測器最小取樣間隔調整實際請求；批次延遲以 FIFO 容量 × 取樣間隔 × 80% 換算成 Android API 要求的微秒值，不另設 App 時間上限。若換算結果超過 API `Int` 可表示範圍，才限制為 `Int.MAX_VALUE`。以上是要求值，Android／硬體可能提前回報或以不同頻率取樣。優先使用帶 FIFO 的 wake-up accelerometer；非 wake-up 或無 FIFO 的感測器在 CPU 休眠時可能漏資料，內部保留診斷狀態，不要求使用者處理。接電時也維持 1 Hz，不會提高取樣頻率。
 
-不持有持續 CPU wake lock，不開陀螺儀、麥克風、定位或相機。只用非精準、允許休眠期間執行的時段邊界鬧鐘，因此開始時間可能受系統省電影響而延後；事件本身也會檢查時段。批次以 SensorEvent 的單調時鐘時間轉換成資料時間，不使用整批送達時刻。
+不持有持續 CPU wake lock，不開陀螺儀、麥克風、定位或相機。睡眠窗限定 FGS 不會因缺少特殊存取而退回全天常駐。Android 12+ 允許「鬧鐘與提醒」時使用 exact alarm 喚醒邊界接收器；未允許時使用非精準鬧鐘並盡力啟動，但系統可能拒絕／延遲背景 FGS，進而漏掉動作資料。事件本身仍會檢查平日／週末睡眠窗。批次以 SensorEvent 的單調時鐘時間轉換成資料時間，不使用整批送達時刻。
 
-每分鐘累積三軸變化的 RMS、活動持續時間、有效覆蓋時間及樣本數。每約 5 分鐘以 SQLite 交易保存摘要；節流依 HandlerThread 實際處理的 `elapsedRealtime()` 計算，且包含裝置深度休眠時間，因此硬體 FIFO 一次釋放跨多分鐘的樣本時，不會在同一批事件中連續開啟多次交易。停止、暫停或切換模式時會先要求 flush，最多等待 2 秒，再保存已收到資料。系統直接殺死程序可能遺失最後約 5 分鐘尚未儲存的摘要及未送達批次，這些缺口不補成安靜。每次寫入清理超過 14 天的動作摘要，不保存原始波形，並排除系統備份。
+每分鐘累積三軸變化的 RMS、活動持續時間、有效覆蓋時間及樣本數。每約 5 分鐘以 SQLite 交易保存摘要；節流依 HandlerThread 實際處理的 `elapsedRealtime()` 計算，且包含裝置深度休眠時間，因此硬體 FIFO 一次釋放跨多分鐘的樣本時，不會在同一批事件中連續開啟多次交易。停止、暫停或切換模式時會先要求 flush，最多等待 2 秒，再保存已收到資料。系統直接殺死程序可能遺失最後約 5 分鐘尚未儲存的摘要及未送達批次，這些缺口不補成安靜。保留 14 天以上的動作摘要會在新增資料時至多每日清理一次，不保存原始波形，並排除系統備份。
 
 ### 試驗規則
 
@@ -71,12 +72,14 @@ Health Connect 待同步 session 會先驗證、保存 `SYNCING` 狀態，再以
 ```powershell
 $env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.11'
 $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
-.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --no-configuration-cache
+.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --no-configuration-cache
 ```
 
-`MotionEngineTest` 涵蓋 Google 分類觸發門檻、1 Hz／FIFO 設定、批次時間、資料缺口、手機使用、床邊放置、跨午夜、候選分段、動作衝突及同步 ID 保留。`MotionRuntimeTest` **僅供可丟棄的模擬器**：會改測試 App 時段、授權並模擬分類與電池狀態，檢查等待分類、觸發取樣、摘要保存、低電量暫停與供電恢復。不要對日常使用的實機執行該測試。
+`SleepScheduleTest` 涵蓋平日／週末時段與跨午夜邊界；`SleepUsageSnapshotTest` 檢查手機使用區間和理由文字；`AutomaticSyncTest` 也覆蓋永久錯誤不會自動重試。`MotionEngineTest` 涵蓋 Google 分類觸發門檻、1 Hz／FIFO 設定、批次時間、資料缺口、手機使用、床邊放置、跨午夜、候選分段、動作衝突及同步 ID 保留。`MotionRuntimeTest` **僅供可丟棄的模擬器**：會改測試 App 時段、授權並模擬分類與電池狀態，檢查等待分類、觸發取樣、摘要保存、低電量暫停與供電恢復。不要對日常使用的實機執行該測試。
 
 2026-09-29 本輪資料庫／UI／同步效能更新已通過 43 個 JVM 測試、Lint（無 issue）、Debug APK 及 Android 測試 APK 建置；未在裝置執行會改動資料或權限的 instrumentation test。已涵蓋單筆 session 更新、最新／近期 classification 查詢、WAL 共用資料庫、固定首頁骨架、DST 跨日計算、零配置動作差值、校時補償及 Worker 暫態／永久錯誤分流的程式實作。真實 Health Connect 寫入／刪除、Google 分類延遲、Doze／OEM 背景行為、FIFO 與整夜耗電仍需在可丟棄模擬器或受控實機另外驗證。
+
+2026-09-29 P0／P1／P2 省電與排程更新：完整睡眠窗結束後才擷取每晚 UsageStats snapshot，共用於 AutomaticPlacement、SleepAnalyzer 與 Health Connect；未完成窗口不凍結半窗 snapshot、不產生或同步候選；App 偵測 UsageStats 權限由無到有時排入整理更新舊 snapshot；Sleep API 分類改為睡眠窗前 15 分鐘至結束，窗外只訂閱 segment；同步永久失敗不再被 recovery 重送；睡眠窗邊界避免無變化重設；立即整理採 KEEP，每日 recovery 有 BatteryNotLow；資料 retention 每日最多清理一次；Release R8 啟用；新增平日／週末排程。FGS 任何情況都只於睡眠窗執行；未授予鬧鐘特殊存取時使用非精準鬧鐘並提示背景啟動可能漏記，無全天 FGS fallback。53 個 JVM 測試通過；Debug lint 30 條 Warning、無 Error／Fatal；Debug APK、Android 測試 APK 與啟用 R8 的 unsigned Release APK 建置成功。未在實機驗證鬧鐘權限、背景啟動、Health Connect 或整夜耗電。
 
 2026-09-29 背景與 UI 查詢優化：完成低電量事件監聽、SleepReconciler 時間範圍查詢、SleepStore 主鍵修正、MotionStore 批次既有資料查詢、HomeViewModel I/O 卸載、時間條圓角裁切、單一時間修正對話框及完整歷史清單入口。`testDebugUnitTest`、`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest` 均通過；未在裝置執行會修改資料／權限的 instrumentation test，真實電量喚醒次數、OEM 背景行為與整夜耗電仍未量測。
 

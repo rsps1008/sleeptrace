@@ -2,6 +2,7 @@ package com.rsps1008.sleeptrace
 
 import android.content.Context
 import android.view.View
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -30,31 +31,72 @@ object SleepDialogHelper {
         val end = existing?.endMinute ?: 540
         val startPicker = timePicker(context, start / 60, start % 60)
         val endPicker = timePicker(context, end / 60, end % 60)
+        val weekendEnabled = CheckBox(context).apply {
+            text = "週末（週六、週日）使用不同時段"
+            isChecked = existing?.weekendStartMinute != null && existing.weekendEndMinute != null
+            setPadding(dp(context, 20), dp(context, 8), dp(context, 20), dp(context, 4))
+        }
+        val weekendStart = existing?.weekendStartMinute ?: start
+        val weekendEnd = existing?.weekendEndMinute ?: end
+        val weekendStartPicker = timePicker(context, weekendStart / 60, weekendStart % 60)
+        val weekendEndPicker = timePicker(context, weekendEnd / 60, weekendEnd % 60)
         val range = TextView(context).apply {
             textSize = 14f
             setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
             setPadding(dp(context, 24), dp(context, 8), dp(context, 24), dp(context, 4))
         }
         fun updateRange() {
-            val startMinute = startPicker.hour * 60 + startPicker.minute
-            val endMinute = endPicker.hour * 60 + endPicker.minute
-            range.text = "每日 ${SleepSchedule(startMinute, endMinute).label()}" +
-                if (endMinute <= startMinute) "（跨午夜）" else ""
+            val weekdayStart = startPicker.hour * 60 + startPicker.minute
+            val weekdayEnd = endPicker.hour * 60 + endPicker.minute
+            val weekendStartMinute = weekendStartPicker.hour * 60 + weekendStartPicker.minute
+            val weekendEndMinute = weekendEndPicker.hour * 60 + weekendEndPicker.minute
+            val schedule = SleepSchedule(
+                weekdayStart, weekdayEnd,
+                weekendStartMinute.takeIf { weekendEnabled.isChecked },
+                weekendEndMinute.takeIf { weekendEnabled.isChecked }
+            )
+            val crossings = buildList {
+                if (weekdayEnd <= weekdayStart) add("平日跨午夜")
+                if (weekendEnabled.isChecked && weekendEndMinute <= weekendStartMinute) add("週末跨午夜")
+            }
+            range.text = schedule.label() + if (crossings.isEmpty()) "" else "（${crossings.joinToString("、")}）"
         }
         startPicker.setOnTimeChangedListener { _, _, _ -> updateRange() }
         endPicker.setOnTimeChangedListener { _, _, _ -> updateRange() }
+        weekendStartPicker.setOnTimeChangedListener { _, _, _ -> updateRange() }
+        weekendEndPicker.setOnTimeChangedListener { _, _, _ -> updateRange() }
+        val weekendControls = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (weekendEnabled.isChecked) View.VISIBLE else View.GONE
+            addView(label(context, "週末開始"))
+            addView(weekendStartPicker)
+            addView(label(context, "週末結束"))
+            addView(weekendEndPicker)
+        }
+        weekendEnabled.setOnCheckedChangeListener { _, checked ->
+            weekendControls.visibility = if (checked) View.VISIBLE else View.GONE
+            updateRange()
+        }
         updateRange()
         val content = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             addView(range)
-            addView(label(context, "開始"))
+            addView(label(context, "平日開始"))
             addView(startPicker)
-            addView(label(context, "結束"))
+            addView(label(context, "平日結束"))
             addView(endPicker)
+            addView(weekendEnabled)
+            addView(weekendControls)
         }
-        MaterialAlertDialogBuilder(context).setTitle("每日偵測時段").setView(content)
+        val scroll = android.widget.ScrollView(context).apply { addView(content) }
+        MaterialAlertDialogBuilder(context).setTitle("睡眠偵測時段").setView(scroll)
             .setPositiveButton("儲存") { _, _ ->
-                onSave(SleepSchedule(startPicker.hour * 60 + startPicker.minute, endPicker.hour * 60 + endPicker.minute))
+                onSave(SleepSchedule(
+                    startPicker.hour * 60 + startPicker.minute,
+                    endPicker.hour * 60 + endPicker.minute,
+                    (weekendStartPicker.hour * 60 + weekendStartPicker.minute).takeIf { weekendEnabled.isChecked },
+                    (weekendEndPicker.hour * 60 + weekendEndPicker.minute).takeIf { weekendEnabled.isChecked }
+                ))
             }
             .setNegativeButton("取消", null).show()
     }
@@ -63,7 +105,8 @@ object SleepDialogHelper {
         context: Context,
         session: SleepSession,
         formatDuration: (Long) -> String,
-        onEdit: () -> Unit
+        onEdit: () -> Unit,
+        onRetry: (() -> Unit)? = null
     ) {
         val detail = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -71,7 +114,8 @@ object SleepDialogHelper {
             addView(TextView(context).apply {
                 text = "推估睡眠：${formatDuration(session.durationMillis)}\n" +
                     "夜間手機使用：${formatDuration(session.awakeMillis)}\n" +
-                    "參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}"
+                    "參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}" +
+                    (session.syncError?.let { "\n\n同步錯誤：$it" } ?: "")
                 setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
                 textSize = 14f
             })
@@ -79,10 +123,11 @@ object SleepDialogHelper {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 58)
             ).apply { topMargin = dp(context, 16) })
         }
-        MaterialAlertDialogBuilder(context).setTitle(session.title()).setView(detail)
-            .setPositiveButton("關閉", null)
+        val dialog = MaterialAlertDialogBuilder(context).setTitle(session.title()).setView(detail)
+            .setNegativeButton("關閉", null)
             .setNeutralButton("修正時間") { _, _ -> onEdit() }
-            .show()
+        if (onRetry != null) dialog.setPositiveButton("重新同步") { _, _ -> onRetry() }
+        dialog.show()
     }
 
     fun showTimeEditor(

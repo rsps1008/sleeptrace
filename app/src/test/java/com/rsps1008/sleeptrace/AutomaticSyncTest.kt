@@ -24,6 +24,7 @@ class AutomaticSyncTest {
     @Test fun `legacy review is automatically eligible`() {
         assertEquals(SyncState.PENDING, SyncState.fromStored("NEEDS_REVIEW"))
         assertEquals(SyncState.SYNCED, SyncState.fromStored("SYNCED"))
+        assertEquals(SyncState.FAILED_RETRYABLE, SyncState.fromStored("FAILED"))
     }
 
     @Test fun `low scoring estimate uploads without any confirmation and is not uploaded twice`() = runBlocking {
@@ -39,11 +40,23 @@ class AutomaticSyncTest {
         val repo = Repository(listOf(session()))
         var first: SleepSession? = null
         assertFalse(AutomaticSyncQueue.drain(repo::read, repo::update) { first = it; throw IllegalStateException("temporary") })
-        assertEquals(SyncState.FAILED, repo.rows.single().state)
+        assertEquals(SyncState.FAILED_RETRYABLE, repo.rows.single().state)
         assertTrue(AutomaticSyncQueue.drain(repo::read, repo::update) {
             assertEquals(first!!.id, it.id)
             assertEquals(first!!.revision, it.revision)
         })
+    }
+
+    @Test fun `permanent failure stays out of automatic retries until explicitly reset`() = runBlocking {
+        val repo = Repository(listOf(session()))
+        var writes = 0
+        assertTrue(AutomaticSyncQueue.drain(repo::read, repo::update) {
+            writes++
+            throw IllegalArgumentException("invalid record")
+        })
+        assertEquals(SyncState.FAILED_PERMANENT, repo.rows.single().state)
+        assertTrue(AutomaticSyncQueue.drain(repo::read, repo::update) { writes++ })
+        assertEquals(1, writes)
     }
 
     @Test fun `interrupted upload is resumed without new id`() = runBlocking {

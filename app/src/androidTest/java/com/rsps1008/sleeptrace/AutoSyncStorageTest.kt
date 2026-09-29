@@ -33,7 +33,7 @@ class AutoSyncStorageTest {
             assertEquals(SyncState.PENDING, record(store).state)
             assertFalse(AutomaticSyncQueue.drain(store::sessions, store::updateIfCurrent) { throw IllegalStateException("offline") })
             val reloaded = SleepStore(context)
-            assertEquals(SyncState.FAILED, record(reloaded).state)
+            assertEquals(SyncState.FAILED_RETRYABLE, record(reloaded).state)
             var writes = 0
             assertTrue(AutomaticSyncQueue.drain(reloaded::sessions, reloaded::updateIfCurrent) { writes++ })
             assertEquals(SyncState.SYNCED, record(SleepStore(context)).state)

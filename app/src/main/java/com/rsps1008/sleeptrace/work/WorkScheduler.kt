@@ -7,15 +7,19 @@ import androidx.work.WorkManager
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.BackoffPolicy
+import androidx.work.Constraints
 import java.util.concurrent.TimeUnit
 
 object WorkScheduler {
     fun reconcileSoon(context: Context) = WorkManager.getInstance(context).enqueueUniqueWork(
-        "sleeptrace_reconcile_now", ExistingWorkPolicy.APPEND_OR_REPLACE,
+        "sleeptrace_reconcile_now", ExistingWorkPolicy.KEEP,
         OneTimeWorkRequestBuilder<SleepReconcileWorker>().setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.MINUTES).build()
     )
     fun schedule(context: Context) = WorkManager.getInstance(context).enqueueUniquePeriodicWork(
         "sleeptrace_reconcile", ExistingPeriodicWorkPolicy.UPDATE,
-        PeriodicWorkRequestBuilder<SleepReconcileWorker>(6, TimeUnit.HOURS).setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.MINUTES).build()
+        PeriodicWorkRequestBuilder<SleepReconcileWorker>(24, TimeUnit.HOURS, 6, TimeUnit.HOURS)
+            .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(true).build())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.MINUTES)
+            .build()
     )
 }

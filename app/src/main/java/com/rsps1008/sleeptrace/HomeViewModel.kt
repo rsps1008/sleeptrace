@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
+import com.rsps1008.sleeptrace.motion.SleepWindowScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -24,7 +25,8 @@ data class HomeSnapshot(
     val healthGranted: Boolean,
     val recordingEnabled: Boolean,
     val backgroundRestricted: Boolean,
-    val batteryExempt: Boolean
+    val batteryExempt: Boolean,
+    val exactAlarmAllowed: Boolean
 )
 
 /** Owns homepage data loading so activity rendering stays separate from repository access. */
@@ -54,7 +56,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             healthGranted = healthSync.hasWritePermission(),
                             recordingEnabled = motionSettings.enabled,
                             backgroundRestricted = backgroundAccess.restricted,
-                            batteryExempt = backgroundAccess.exempt
+                            batteryExempt = backgroundAccess.exempt,
+                            exactAlarmAllowed = SleepWindowScheduler.hasExactAlarmAccess(getApplication())
                         )
                     }
                     mutableState.value = snapshot

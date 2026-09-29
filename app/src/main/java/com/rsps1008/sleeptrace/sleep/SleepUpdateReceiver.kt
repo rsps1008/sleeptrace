@@ -34,7 +34,18 @@ class SleepUpdateReceiver : BroadcastReceiver() {
                         ClassificationSample(it.timestampMillis, it.confidence, it.motion, it.light)
                     }
                     store.appendSamples(samples)
-                    MotionService.active?.onSleepClassifications(samples)
+                    val active = MotionService.active
+                    if (active != null) {
+                        active.onSleepClassifications(samples)
+                    } else {
+                        val dependencies = context.sleepDependencies()
+                        val schedule = if (dependencies.preferences.configured()) dependencies.preferences.schedule() else null
+                        if (dependencies.motionSettings.enabled && schedule?.windowAt(System.currentTimeMillis()) != null) {
+                            runCatching { MotionService.start(context) }.onFailure {
+                                dependencies.motionSettings.status = "Sleep API 已回報，但系統限制背景服務啟動；開啟 App 可恢復記錄"
+                            }
+                        }
+                    }
                 }
                 // Classification arrives frequently. Reconcile on completed segments or the periodic worker.
                 if (SleepSegmentEvent.hasEvents(intent)) WorkScheduler.reconcileSoon(context)

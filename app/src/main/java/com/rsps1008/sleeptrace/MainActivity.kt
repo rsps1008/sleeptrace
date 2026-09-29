@@ -4,10 +4,12 @@ import android.Manifest
 import android.content.Intent
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -26,6 +28,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.health.connect.client.PermissionController
 import androidx.lifecycle.lifecycleScope
 import androidx.work.WorkManager
@@ -69,9 +72,15 @@ class MainActivity : AppCompatActivity() {
         backgroundSettingsOpen = false
         ensureAutomaticRecording()
         refresh()
+        guideBackgroundAccessIfNeeded()
+    }
+    private val windowAlarmSettingsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        ensureAutomaticRecording()
+        refresh()
     }
     private val usageSettingsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         permissionFlowComplete = true
+        reconcileIfUsageAccessChanged()
         refresh()
         guideBackgroundAccessIfNeeded()
     }
@@ -86,12 +95,15 @@ class MainActivity : AppCompatActivity() {
     private val requestHealthPermissions = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract()
     ) {
-        WorkScheduler.reconcileSoon(this)
-        if (continueStartupPermissionFlow) {
-            continueStartupPermissionFlow = false
-            openUsageAccessIfNeeded()
+        lifecycleScope.launch {
+            if (healthSync.hasWritePermission()) withContext(Dispatchers.IO) { store.retryPermanentFailures() }
+            WorkScheduler.reconcileSoon(this@MainActivity)
+            if (continueStartupPermissionFlow) {
+                continueStartupPermissionFlow = false
+                openUsageAccessIfNeeded()
+            }
+            refresh()
         }
-        refresh()
     }
     private val requestAndroidPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -151,7 +163,8 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         WorkScheduler.schedule(this)
-        WorkScheduler.reconcileSoon(this)
+        reconcileIfUsageAccessChanged()
+        if (store.hasPendingAutomaticWork()) WorkScheduler.reconcileSoon(this)
         ensureAutomaticRecording()
         if (!startupPermissionCheckDone) {
             startupPermissionCheckDone = true
@@ -169,6 +182,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh() = homeViewModel.refresh()
+
+    private fun reconcileIfUsageAccessChanged() {
+        val current = UsageMonitor.hasAccess(this)
+        val prefs = getSharedPreferences("sleeptrace_maintenance", MODE_PRIVATE)
+        val key = "usage_access_last_seen"
+        val known = prefs.contains(key)
+        val previous = prefs.getBoolean(key, false)
+        if (current && (!known || !previous)) WorkScheduler.reconcileSoon(this)
+        prefs.edit { putBoolean(key, current) }
+    }
 
     private data class PermissionViews(
         val row: LinearLayout,
@@ -210,6 +233,7 @@ class MainActivity : AppCompatActivity() {
         val historyAllButton: MaterialButton,
         val scheduleTime: TextView,
         val scheduleMode: TextView,
+        val windowAlarmAccess: MaterialButton,
         val scheduleToggle: MaterialButton,
         val permissionsReady: TextView,
         val permissionRows: List<PermissionViews>,
@@ -344,6 +368,11 @@ class MainActivity : AppCompatActivity() {
             setTextColor(color(R.color.purple_500))
             setPadding(0, dp(4), 0, dp(4))
         }
+        val windowAlarmAccess = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "允許鬧鐘與提醒"
+            isAllCaps = false
+            setOnClickListener { openWindowAlarmSettings() }
+        }
         val scheduleToggle = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             isAllCaps = false
             setOnClickListener {
@@ -352,6 +381,7 @@ class MainActivity : AppCompatActivity() {
                     ensureAutomaticRecording()
                     guideBackgroundAccessIfNeeded()
                 } else {
+                    SleepWindowScheduler.cancel(this@MainActivity)
                     runCatching { SleepTracker.unsubscribe(this@MainActivity) }
                     if (MotionService.active != null) startService(Intent(this@MainActivity, MotionService::class.java).setAction(MotionService.ACTION_STOP))
                 }
@@ -373,6 +403,7 @@ class MainActivity : AppCompatActivity() {
                     })
                 })
                 addView(scheduleMode)
+                addView(windowAlarmAccess)
                 addView(TextView(this@MainActivity).apply {
                     setText(R.string.automatic_recording_description)
                     textSize = 13f
@@ -449,7 +480,7 @@ class MainActivity : AppCompatActivity() {
         return HomeViews(
             setupCard, configuredRoot, classificationScore, classificationDetail, emptyCard,
             latest.card, latest.title, latest.status, latest.duration, latest.times, latest.awake,
-            historyCard, historyRows, historyAllButton, scheduleTime, scheduleMode, scheduleToggle, permissionsReady,
+            historyCard, historyRows, historyAllButton, scheduleTime, scheduleMode, windowAlarmAccess, scheduleToggle, permissionsReady,
             permissionRows, permissionSummary, permissionGrant, backgroundSection, backgroundDescription
         )
     }
@@ -592,7 +623,7 @@ class MainActivity : AppCompatActivity() {
         homeViews.configuredRoot.visibility = if (configured) View.VISIBLE else View.GONE
         if (configured) {
             updateSleepSection(snapshot.sessions, snapshot.latestClassification)
-            updateSchedule(requireNotNull(snapshot.schedule), snapshot.recordingEnabled)
+            updateSchedule(requireNotNull(snapshot.schedule), snapshot.recordingEnabled, snapshot.exactAlarmAllowed)
             updatePermissions(snapshot.healthGranted)
             updateBackgroundAccess(snapshot.backgroundRestricted, snapshot.batteryExempt)
         }
@@ -633,10 +664,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateSchedule(schedule: SleepSchedule, recordingEnabled: Boolean) {
+    private fun updateSchedule(schedule: SleepSchedule, recordingEnabled: Boolean, exactAlarmAllowed: Boolean) {
         renderedSchedule = schedule
         homeViews.scheduleTime.text = schedule.label()
-        homeViews.scheduleMode.text = if (recordingEnabled) "自動記錄已開啟" else "自動記錄已暫停"
+        homeViews.scheduleMode.text = when {
+            !recordingEnabled -> "自動記錄已暫停"
+            !schedule.requiresWindowBoundary() -> "自動記錄已開啟 · 目前排程涵蓋全天"
+            exactAlarmAllowed -> "自動記錄已開啟 · 只在睡眠窗維持背景服務"
+            else -> "未允許鬧鐘與提醒 · 睡眠窗背景啟動可能受限"
+        }
+        homeViews.windowAlarmAccess.visibility = if (recordingEnabled && schedule.requiresWindowBoundary() && !exactAlarmAllowed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) View.VISIBLE else View.GONE
         homeViews.scheduleToggle.text = if (recordingEnabled) "暫停自動記錄" else "恢復自動記錄"
     }
 
@@ -691,21 +728,54 @@ class MainActivity : AppCompatActivity() {
             SyncState.SYNCED -> Triple("已同步", color(R.color.status_success), color(R.color.status_success_bg))
             SyncState.PENDING -> Triple("等待自動同步", color(R.color.status_info), color(R.color.status_info_bg))
             SyncState.SYNCING -> Triple("同步中…", color(R.color.status_info), color(R.color.status_info_bg))
-            SyncState.FAILED -> Triple("同步失敗待重試", color(R.color.status_warning), color(R.color.status_warning_bg))
+            SyncState.FAILED_RETRYABLE -> Triple("同步失敗待重試", color(R.color.status_warning), color(R.color.status_warning_bg))
+            SyncState.FAILED_PERMANENT -> Triple("同步失敗需處理", color(R.color.status_warning), color(R.color.status_warning_bg))
             SyncState.SKIPPED -> Triple("App 已自動略過", color(R.color.status_neutral), color(R.color.status_neutral_bg))
             SyncState.RETIRED -> Triple("正在整理舊資料", color(R.color.status_info), color(R.color.status_info_bg))
+            SyncState.RETIRED_FAILED_PERMANENT -> Triple("舊資料移除失敗", color(R.color.status_warning), color(R.color.status_warning_bg))
         }
     }
 
     private fun guideBackgroundAccessIfNeeded() = lifecycleScope.launch {
         if (!permissionFlowComplete || !preferences.configured() || !motionSettings.enabled) return@launch
+        val schedule = preferences.schedule()
         lifecycle.withResumed {
             if (!backgroundSettingsOpen && motionSettings.enabled) {
                 when {
                     !backgroundAccess.batteryReady && !backgroundAccess.batteryGuideShown -> openBatterySettings()
                     backgroundAccess.isXiaomi && !backgroundAccess.xiaomiGuideShown -> openXiaomiSettings()
+                    schedule.requiresWindowBoundary() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                        !SleepWindowScheduler.hasExactAlarmAccess(this@MainActivity) && !motionSettings.windowAlarmGuideShown -> guideWindowAlarm()
                 }
             }
+        }
+    }
+
+    private fun guideWindowAlarm() {
+        motionSettings.windowAlarmGuideShown = true
+        MaterialAlertDialogBuilder(this)
+            .setTitle("睡眠窗外關閉背景服務")
+            .setMessage("允許「鬧鐘與提醒」後，眠迹可準時啟動睡眠窗前景服務，並在睡眠窗結束時關閉。若略過，睡眠窗外仍會停止前景服務，但 Android 可能限制鬧鐘或 Sleep API 回呼從背景啟動服務，造成動作資料缺口；Sleep API 睡眠區段仍會接收，開啟 App 時也會補啟動。")
+            .setPositiveButton("開啟系統設定") { _, _ -> openWindowAlarmSettings() }
+            .setNegativeButton("稍後", null)
+            .show()
+    }
+
+    private fun openWindowAlarmSettings() {
+        motionSettings.windowAlarmGuideShown = true
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || SleepWindowScheduler.hasExactAlarmAccess(this)) {
+            ensureAutomaticRecording()
+            refresh()
+            return
+        }
+        val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+            .setData(Uri.parse("package:$packageName"))
+        try {
+            windowAlarmSettingsLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            showMessage("請在系統設定的「特殊應用程式存取權」中開啟「鬧鐘與提醒」。")
+        } catch (_: SecurityException) {
+            showMessage("系統未提供鬧鐘與提醒設定入口，請從 App 資訊手動開啟。")
         }
     }
 
@@ -780,11 +850,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensureAutomaticRecording() = lifecycleScope.launch {
-        if (!preferences.configured() || !motionSettings.enabled || !SleepTracker.hasActivityRecognition(this@MainActivity)) return@launch
-        lifecycle.withResumed {
-            if (motionSettings.enabled) {
-                SleepTracker.subscribe(this@MainActivity)
-                if (MotionService.active == null) runCatching { MotionService.start(this@MainActivity) }.onFailure {
+        val configured = preferences.configured()
+        val schedule = if (configured) preferences.schedule() else null
+        if (schedule == null || !motionSettings.enabled || !SleepTracker.hasActivityRecognition(this@MainActivity)) {
+            SleepWindowScheduler.cancel(this@MainActivity)
+            runCatching { SleepTracker.unsubscribe(this@MainActivity) }
+            MotionService.active?.refreshConfiguration()
+            return@launch
+        }
+        SleepWindowScheduler.schedule(this@MainActivity, schedule)
+        SleepTracker.syncSubscription(this@MainActivity, schedule, motionSettings.enabled, System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        val shouldKeepService = SleepWindowScheduler.shouldRunForegroundService(schedule, now)
+        if (MotionService.active != null) MotionService.active?.refreshConfiguration()
+        if (shouldKeepService && MotionService.active == null) {
+            lifecycle.withResumed {
+                if (motionSettings.enabled) runCatching { MotionService.start(this@MainActivity) }.onFailure {
                     motionSettings.status = "系統暫時無法啟動記錄，重新開啟 App 後會自動再試"
                 }
             }
@@ -798,6 +879,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupSchedule(schedule: SleepSchedule) = lifecycleScope.launch {
         preferences.saveSchedule(schedule)
         MotionService.active?.refreshConfiguration()
+        SleepTracker.syncSubscription(this@MainActivity, schedule, motionSettings.enabled, System.currentTimeMillis(), force = true)
         WorkScheduler.schedule(this@MainActivity)
         ensureAutomaticRecording()
         guideBackgroundAccessIfNeeded()
@@ -845,11 +927,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun subscribe() = SleepTracker.subscribe(this) { result ->
-        if (result.isFailure) runOnUiThread { showMessage("無法啟用偵測：${result.exceptionOrNull()?.message}") }
-        else refresh()
-    }
-
     @Suppress("unused")
     private fun connectHealth() {
         if (!healthSync.available()) { showMessage("Health Connect 尚未安裝、已停用或需要更新。請先在系統健康設定完成處理。"); return }
@@ -863,7 +940,21 @@ class MainActivity : AppCompatActivity() {
     private fun loadSessionDetails(id: String) {
         lifecycleScope.launch {
             val session = withContext(Dispatchers.IO) { store.session(id) } ?: return@launch
-            SleepDialogHelper.showSession(this@MainActivity, session, ::formatDuration) { editSession(session) }
+            SleepDialogHelper.showSession(
+                this@MainActivity, session, ::formatDuration,
+                onEdit = { editSession(session) },
+                onRetry = if (session.state in setOf(SyncState.FAILED_PERMANENT, SyncState.RETIRED_FAILED_PERMANENT)) {
+                    ({ retrySession(session) })
+                } else null
+            )
+        }
+    }
+
+    private fun retrySession(session: SleepSession) = lifecycleScope.launch {
+        val restored = withContext(Dispatchers.IO) { store.retryPermanentFailure(session.id) }
+        if (restored) {
+            WorkScheduler.reconcileSoon(this@MainActivity)
+            refresh()
         }
     }
 

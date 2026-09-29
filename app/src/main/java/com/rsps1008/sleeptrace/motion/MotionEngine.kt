@@ -5,8 +5,7 @@ import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageInterval
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
-import java.time.Instant
-import java.time.ZoneId
+import com.rsps1008.sleeptrace.sleep.SleepWindow
 import kotlin.math.sqrt
 
 const val MINUTE_MS = 60_000L
@@ -34,13 +33,14 @@ object SleepClassificationTrigger {
     const val MIN_CONFIDENCE = 80
     const val MAX_EVENT_AGE_MILLIS = 20 * MINUTE_MS
     const val FALLBACK_DELAY_MILLIS = 2 * 60 * MINUTE_MS
+    const val CLASSIFICATION_LEAD_MILLIS = SleepSchedule.CLASSIFICATION_LEAD_MILLIS
     private const val FUTURE_TOLERANCE_MILLIS = 2 * MINUTE_MS
 
     /** A recent high-confidence Google classification may start motion capture for this window. */
     fun shouldStart(samples: List<ClassificationSample>, window: MotionWindow, now: Long): Boolean =
         samples.any {
             it.confidence >= MIN_CONFIDENCE &&
-                it.timeMillis >= window.start && it.timeMillis < window.end &&
+                it.timeMillis >= window.start - CLASSIFICATION_LEAD_MILLIS && it.timeMillis < window.end &&
                 it.timeMillis >= now - MAX_EVENT_AGE_MILLIS &&
                 it.timeMillis <= now + FUTURE_TOLERANCE_MILLIS
         }
@@ -114,17 +114,7 @@ class MotionAccumulator(private val plan: SamplingPlan, private val placement: P
     }
 }
 
-data class MotionWindow(val start: Long, val end: Long)
-fun SleepSchedule.windowAt(time: Long, zone: ZoneId = ZoneId.systemDefault()): MotionWindow {
-    val local = Instant.ofEpochMilli(time).atZone(zone)
-    var date = local.toLocalDate()
-    val minute = local.hour * 60 + local.minute
-    if (endMinute <= startMinute && minute < startMinute) date = date.minusDays(1)
-    val start = date.atStartOfDay().plusMinutes(startMinute.toLong()).atZone(zone).toInstant().toEpochMilli()
-    val endDate = if (endMinute <= startMinute) date.plusDays(1) else date
-    val end = endDate.atStartOfDay().plusMinutes(endMinute.toLong()).atZone(zone).toInstant().toEpochMilli()
-    return MotionWindow(start, end)
-}
+typealias MotionWindow = SleepWindow
 
 /** Experimental motion-only fallback. Accepted sessions sync automatically without sleep staging. */
 object MotionSleepEstimator {
@@ -139,8 +129,15 @@ object MotionSleepEstimator {
         )
     }
 
-    fun estimate(minutes: List<MotionMinute>, usage: List<UsageInterval>, schedule: SleepSchedule, now: Long): List<SleepSession> {
-        return minutes.groupBy { schedule.windowAt(it.startMillis) }.flatMap { (window, all) ->
+    fun estimate(
+        minutes: List<MotionMinute>,
+        usage: List<UsageInterval>,
+        schedule: SleepSchedule,
+        now: Long,
+        usageAvailable: Boolean = true
+    ): List<SleepSession> {
+        return minutes.mapNotNull { minute -> schedule.windowAt(minute.startMillis)?.let { it to minute } }
+            .groupBy({ it.first }, { it.second }).flatMap { (window, all) ->
             if (window.end > now) return@flatMap emptyList()
             val usable = all.filter { it.startMillis >= window.start && it.startMillis + MINUTE_MS <= window.end }.sortedBy { it.startMillis }
             var quietStart: Long? = null
@@ -176,7 +173,9 @@ object MotionSleepEstimator {
                 SleepSession(
                     id = "motion-${window.start}-${run.first}", startMillis = run.first, endMillis = run.second,
                     confidence = 50, awakeMillis = 0, state = SyncState.PENDING,
-                    reason = "加速度計推估：持續安靜至少 20 分鐘；分段睡眠會分別保存；非睡眠分期"
+                    reason = "加速度計推估：持續安靜至少 20 分鐘；分段睡眠會分別保存；非睡眠分期" +
+                        if (usageAvailable) "" else "；未授予使用情況存取權，無法排除手機使用",
+                    usageSnapshotApplied = true
                 )
             }
         }

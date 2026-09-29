@@ -13,11 +13,16 @@ private val Context.sleepDataStore by preferencesDataStore("sleeptrace_settings"
 class SleepPreferences(private val context: Context) {
     private val startKey = intPreferencesKey("schedule_start_minute")
     private val endKey = intPreferencesKey("schedule_end_minute")
+    private val weekendStartKey = intPreferencesKey("schedule_weekend_start_minute")
+    private val weekendEndKey = intPreferencesKey("schedule_weekend_end_minute")
     private val enabledKey = booleanPreferencesKey("tracking_enabled")
 
     suspend fun schedule(): SleepSchedule {
         val values = context.sleepDataStore.data.first()
-        return SleepSchedule(values[startKey] ?: 0, values[endKey] ?: 540)
+        val weekendStart = values[weekendStartKey]?.takeIf { it in 0 until MINUTES_PER_DAY }
+        val weekendEnd = values[weekendEndKey]?.takeIf { it in 0 until MINUTES_PER_DAY }
+        return SleepSchedule(values[startKey] ?: 0, values[endKey] ?: 540,
+            weekendStart?.takeIf { weekendEnd != null }, weekendEnd?.takeIf { weekendStart != null })
     }
 
     suspend fun configured(): Boolean = context.sleepDataStore.data.first()[enabledKey] ?: false
@@ -26,7 +31,18 @@ class SleepPreferences(private val context: Context) {
         context.sleepDataStore.edit {
             it[startKey] = schedule.startMinute
             it[endKey] = schedule.endMinute
+            if (schedule.weekendStartMinute == null || schedule.weekendEndMinute == null) {
+                it.remove(weekendStartKey)
+                it.remove(weekendEndKey)
+            } else {
+                it[weekendStartKey] = schedule.weekendStartMinute
+                it[weekendEndKey] = schedule.weekendEndMinute
+            }
             it[enabledKey] = true
         }
+    }
+
+    private companion object {
+        const val MINUTES_PER_DAY = 24 * 60
     }
 }

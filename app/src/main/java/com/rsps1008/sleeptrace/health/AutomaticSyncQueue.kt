@@ -11,7 +11,9 @@ import kotlinx.coroutines.sync.withLock
 /** Serialized queue; optimistic updates prevent an old request from overwriting a newer estimate. */
 object AutomaticSyncQueue {
     private val mutex = Mutex()
-    private fun eligible(session: SleepSession) = session.state in setOf(SyncState.PENDING, SyncState.FAILED, SyncState.SYNCING)
+    private fun eligible(session: SleepSession) = session.state in setOf(
+        SyncState.PENDING, SyncState.FAILED_RETRYABLE, SyncState.SYNCING
+    )
     private fun valid(session: SleepSession): Boolean {
         val knownAwake = normalizedAwake(session.startMillis, session.endMillis, session.awakeIntervals)
             .sumOf { it.endMillis - it.startMillis }
@@ -46,7 +48,7 @@ object AutomaticSyncQueue {
                 throw cancelled // Keep SYNCING for idempotent recovery on the next worker run.
             } catch (error: Exception) {
                 onFailure(error)
-                update(writing, writing.copy(state = SyncState.FAILED, syncError = error.message ?: "同步暫時失敗"))
+                update(writing, writing.copy(state = failureState(error), syncError = error.message ?: "同步失敗"))
             }
         }
         read().none(::eligible)
@@ -83,7 +85,7 @@ object AutomaticSyncQueue {
                 throw cancelled
             } catch (error: Exception) {
                 onFailure(error)
-                writing.forEach { update(it, it.copy(state = SyncState.FAILED, syncError = error.message ?: "同步暫時失敗")) }
+                writing.forEach { update(it, it.copy(state = failureState(error), syncError = error.message ?: "同步失敗")) }
                 break
             }
         }
@@ -91,4 +93,7 @@ object AutomaticSyncQueue {
     }
 
     private const val MAX_BATCH_SIZE = 1_000
+
+    private fun failureState(error: Throwable) =
+        if (isTransientSyncError(error)) SyncState.FAILED_RETRYABLE else SyncState.FAILED_PERMANENT
 }

@@ -10,7 +10,8 @@ import java.time.ZoneId
 class MotionEngineTest {
     private val start = LocalDate.of(2026, 9, 27).atTime(23, 0).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
     private val schedule = SleepSchedule(23 * 60, 7 * 60)
-    private val end = schedule.windowAt(start).end
+    private val window = requireNotNull(schedule.windowAt(start))
+    private val end = window.end
     private fun minute(index: Int, level: MotionLevel = MotionLevel.QUIET, placement: Placement = Placement.BED) = MotionMinute(
         start + index * MINUTE_MS, if (level == MotionLevel.UNKNOWN) 10_000 else MINUTE_MS,
         if (level == MotionLevel.ACTIVE) MINUTE_MS else 0, if (level == MotionLevel.ACTIVE) 60_000.0 else 0.0, 300, placement
@@ -24,16 +25,17 @@ class MotionEngineTest {
         assertEquals(Int.MAX_VALUE, SamplingPlan.choose(10_000).latencyUs)
     }
 
-    @Test fun `recent high confidence classification starts current window only`() {
-        val window = schedule.windowAt(start)
+    @Test fun `recent classification from the lead-in can start capture at window start`() {
+        val window = requireNotNull(schedule.windowAt(start))
         assertTrue(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start + MINUTE_MS, 80, 0, 0)), window, start + 2 * MINUTE_MS))
+        assertTrue(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start - 10 * MINUTE_MS, 80, 0, 0)), window, start + MINUTE_MS))
         assertFalse(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start + MINUTE_MS, 79, 0, 0)), window, start + 2 * MINUTE_MS))
         assertFalse(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start + MINUTE_MS, 100, 0, 0)), window, start + 22 * MINUTE_MS))
-        assertFalse(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start - MINUTE_MS, 100, 0, 0)), window, start + MINUTE_MS))
+        assertFalse(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start - SleepClassificationTrigger.CLASSIFICATION_LEAD_MILLIS - 1, 100, 0, 0)), window, start + MINUTE_MS))
     }
 
     @Test fun `long screen off starts low frequency fallback after Google delay`() {
-        val window = schedule.windowAt(start)
+        val window = requireNotNull(schedule.windowAt(start))
         val delayed = window.start + SleepClassificationTrigger.FALLBACK_DELAY_MILLIS
 
         assertTrue(SleepClassificationTrigger.shouldFallback(window, delayed, window.start))

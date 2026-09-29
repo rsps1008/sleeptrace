@@ -6,9 +6,13 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 enum class SyncState {
-    PENDING, SYNCING, SYNCED, FAILED, SKIPPED, RETIRED;
+    PENDING, SYNCING, SYNCED, FAILED_RETRYABLE, FAILED_PERMANENT, SKIPPED, RETIRED, RETIRED_FAILED_PERMANENT;
     companion object {
-        fun fromStored(value: String) = if (value == "NEEDS_REVIEW") PENDING else valueOf(value)
+        fun fromStored(value: String) = when (value) {
+            "NEEDS_REVIEW" -> PENDING
+            "FAILED" -> FAILED_RETRYABLE
+            else -> valueOf(value)
+        }
     }
 }
 
@@ -20,6 +24,14 @@ data class SleepSegment(
 )
 
 data class UsageInterval(val startMillis: Long, val endMillis: Long)
+
+data class UsageSnapshot(
+    val windowStartMillis: Long,
+    val windowEndMillis: Long,
+    val accessAvailable: Boolean,
+    val intervals: List<UsageInterval>,
+    val capturedAtMillis: Long
+)
 
 data class SleepSession(
     val id: String = UUID.randomUUID().toString(),
@@ -33,7 +45,7 @@ data class SleepSession(
     val syncError: String? = null,
     val revision: Long = 1,
     val awakeIntervals: List<UsageInterval> = emptyList(),
-    /** True once the one-time pre-upload UsageStats snapshot has been persisted. */
+    /** True once the shared per-window UsageStats snapshot has been applied and persisted. */
     val usageSnapshotApplied: Boolean = false
 ) {
     val durationMillis: Long get() = (endMillis - startMillis - awakeMillis).coerceAtLeast(0)

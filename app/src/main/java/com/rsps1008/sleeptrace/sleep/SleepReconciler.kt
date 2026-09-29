@@ -3,6 +3,7 @@ package com.rsps1008.sleeptrace.sleep
 import android.content.Context
 import com.rsps1008.sleeptrace.motion.MotionSleepEstimator
 import com.rsps1008.sleeptrace.motion.AutomaticPlacement
+import com.rsps1008.sleeptrace.data.ReconciliationSignals
 import com.rsps1008.sleeptrace.sleepDependencies
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -13,6 +14,7 @@ class SleepReconciler(private val context: Context) {
         val preferences = dependencies.preferences
         if (!preferences.configured() || !dependencies.motionSettings.enabled) return@withLock
         val store = dependencies.store
+        val capturedGeneration = ReconciliationSignals.generation(context)
         val schedule = preferences.schedule()
         val now = System.currentTimeMillis()
         val analysisStart = now - RECENT_ANALYSIS_MILLIS
@@ -25,22 +27,41 @@ class SleepReconciler(private val context: Context) {
         val segmentStart = minOf(analysisStart, unresolved.minOfOrNull { it.startMillis } ?: analysisStart)
         val allSegments = store.segments(segmentStart, now)
         val samples = store.recentSamples(analysisStart)
+        val windows = schedule.windowsBetween(segmentStart, now)
+        val completedWindows = SleepUsageSnapshot.completedWindows(windows, now)
+        val usageResult = SleepUsageSnapshot(context).captureWindows(store, completedWindows, now)
         val segments = allSegments.filter { segment ->
             segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
         }
+        val completedSegments = segments.flatMap { segment ->
+            completedWindows.mapNotNull { window ->
+                val start = maxOf(segment.startMillis, window.startMillis)
+                val end = minOf(segment.endMillis, window.endMillis)
+                if (end <= start) null else segment.copy(startMillis = start, endMillis = end)
+            }
+        }
         val base = SleepAnalyzer.analyze(
-            segments, samples, emptyList(), schedule
+            completedSegments,
+            samples,
+            usageResult.intervals,
+            schedule,
+            usageAvailable = usageResult.availableFor(completedWindows)
         )
         val motion = dependencies.motionStore.read(analysisStart, now)
-        val resolved = AutomaticPlacement.resolve(motion, emptyList())
+        val resolved = AutomaticPlacement.resolve(motion, usageResult.intervals)
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
-        val fallback = MotionSleepEstimator.estimate(resolved, emptyList(), schedule, now)
+        val fallback = MotionSleepEstimator.estimate(
+            resolved, usageResult.intervals, schedule, now, usageAvailable = usageResult.availableFor(completedWindows)
+        )
         store.mergeCalculated(selectBestSessions(calculated, fallback), analysisStart, now)
+        store.markReconciled(capturedGeneration)
     }
     companion object {
         private val mutex = Mutex()
         private const val RECENT_ANALYSIS_MILLIS = 48L * 60 * 60 * 1000
-        private val RECONCILIATION_STATES = setOf(SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED)
+        private val RECONCILIATION_STATES = setOf(
+            SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED_RETRYABLE, SyncState.FAILED_PERMANENT
+        )
     }
 }
 
@@ -59,7 +80,10 @@ fun selectBestSessions(api: List<SleepSession>, motion: List<SleepSession>): Lis
 fun mergeSleepSessions(existing: List<SleepSession>, calculated: List<SleepSession>): List<SleepSession> {
     val result = existing.toMutableList()
     calculated.forEach { candidate ->
-        val matches = result.filter { it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED) && (it.id == candidate.id || overlaps(it, candidate)) }
+        val matches = result.filter {
+            it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT) &&
+                (it.id == candidate.id || overlaps(it, candidate))
+        }
         if (matches.any { it.manuallyEdited }) return@forEach
         val old = matches.firstOrNull()
         if (matches.size > 1) {
@@ -73,9 +97,10 @@ fun mergeSleepSessions(existing: List<SleepSession>, calculated: List<SleepSessi
             result += candidate.copy(id = canonical.id, revision = canonical.revision + 1, state = SyncState.PENDING, syncError = null)
             return@forEach
         }
-        // Phone-use deduction is frozen immediately before the first upload; a routine raw-event
-        // reconciliation with the same interval must not erase it and trigger another scan.
-        if (old?.usageSnapshotApplied == true && old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis) return@forEach
+        // Keep a previously applied snapshot if the recalculation has no replacement snapshot.
+        // Once a complete replacement snapshot is applied, changed awake intervals revise the row.
+        if (old?.usageSnapshotApplied == true && !candidate.usageSnapshotApplied &&
+            old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis) return@forEach
         if (old != null && old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis &&
             old.awakeMillis == candidate.awakeMillis && old.awakeIntervals == candidate.awakeIntervals) return@forEach
         result.removeAll(matches.toSet())

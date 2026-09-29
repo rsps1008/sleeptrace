@@ -6,6 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import androidx.core.content.edit
 import androidx.core.database.sqlite.transaction
+import com.rsps1008.sleeptrace.data.ReconciliationSignals
 
 class MotionSettings(context: Context) {
     private val prefs = context.getSharedPreferences("sleeptrace_motion", Context.MODE_PRIVATE)
@@ -16,10 +17,15 @@ class MotionSettings(context: Context) {
     var status: String
         get() = prefs.getString("status", "尚未啟動")!!
         set(value) = prefs.edit { putString("status", value) }
+    var windowAlarmGuideShown: Boolean
+        get() = prefs.getBoolean("window_alarm_guide_shown", false)
+        set(value) = prefs.edit { putBoolean("window_alarm_guide_shown", value) }
 }
 
 /** Stores minute features only; no raw accelerometer stream. Inserts are batched in one transaction. */
 class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 1) {
+    private val appContext = context.applicationContext
+    private val maintenancePrefs = appContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
         setWriteAheadLoggingEnabled(true)
     }
@@ -34,8 +40,10 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
 
+    @Synchronized
     fun append(minutes: List<MotionMinute>, now: Long = System.currentTimeMillis()) {
         if (minutes.isEmpty()) return
+        val shouldCleanup = now - maintenancePrefs.getLong(CLEANUP_KEY, 0L) >= CLEANUP_INTERVAL
         val db = writableDatabase
         db.transaction {
             val existingByStart = db.query(
@@ -69,8 +77,12 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
                     item.placement
                 )
             }
-            db.delete("minutes", "start < ?", arrayOf((now - 14L * 24 * 60 * MINUTE_MS).toString()))
+            if (shouldCleanup) {
+                db.delete("minutes", "start < ?", arrayOf((now - RETENTION).toString()))
+            }
         }
+        if (shouldCleanup) maintenancePrefs.edit { putLong(CLEANUP_KEY, now) }
+        ReconciliationSignals.markDirty(appContext)
     }
 
     private fun android.database.Cursor.readMinute() = MotionMinute(
@@ -83,5 +95,11 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
         buildList {
             while (cursor.moveToNext()) add(cursor.readMinute())
         }
+    }
+
+    private companion object {
+        const val CLEANUP_KEY = "motion_last_cleanup"
+        const val CLEANUP_INTERVAL = 24L * 60 * 60 * 1000
+        const val RETENTION = 14L * 24 * 60 * MINUTE_MS
     }
 }

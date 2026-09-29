@@ -4,17 +4,20 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import androidx.core.content.edit
 import androidx.core.database.sqlite.transaction
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSegment
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageInterval
+import com.rsps1008.sleeptrace.sleep.UsageSnapshot
 import org.json.JSONArray
 import org.json.JSONObject
 
 /** Indexed, transactional storage for raw Sleep API events and local sleep records. */
-class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 6) {
+class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 7) {
+    private val maintenancePrefs = context.applicationContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
         setWriteAheadLoggingEnabled(true)
     }
@@ -32,6 +35,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         createSessionIndex(db)
         createSessionStateIndex(db)
         createSessionOverlapIndex(db)
+        createUsageSnapshots(db)
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createSessions(db)
@@ -39,6 +43,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         if (oldVersion < 4) createSessionIndex(db)
         if (oldVersion < 5) createSessionStateIndex(db)
         if (oldVersion < 6) createSessionOverlapIndex(db)
+        if (oldVersion < 7) createUsageSnapshots(db)
     }
 
     private fun createSessions(db: SQLiteDatabase) = db.execSQL("""
@@ -66,8 +71,14 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         "CREATE INDEX IF NOT EXISTS sessions_end_start_idx ON sessions(end, start)"
     )
 
+    private fun createUsageSnapshots(db: SQLiteDatabase) = db.execSQL(
+        "CREATE TABLE IF NOT EXISTS usage_snapshots (windowStart INTEGER PRIMARY KEY, windowEnd INTEGER NOT NULL, accessAvailable INTEGER NOT NULL, intervals TEXT NOT NULL, capturedAt INTEGER NOT NULL)"
+    )
+
     fun import(segments: List<SleepSegment>, samples: List<ClassificationSample>) { append(segments, samples) }
+    @Synchronized
     fun append(segments: List<SleepSegment> = emptyList(), samples: List<ClassificationSample> = emptyList(), now: Long = System.currentTimeMillis()) {
+        val shouldCleanup = now - maintenancePrefs.getLong(EVENT_CLEANUP_KEY, 0L) >= CLEANUP_INTERVAL
         writableDatabase.transaction {
             segments.forEach { item ->
                 insertWithOnConflict("segments", null, ContentValues().apply { put("start", item.startMillis); put("end", item.endMillis); put("confidence", item.confidence); put("source", item.source) }, SQLiteDatabase.CONFLICT_REPLACE)
@@ -75,9 +86,42 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             samples.forEach { item ->
                 insertWithOnConflict("samples", null, ContentValues().apply { put("time", item.timeMillis); put("confidence", item.confidence); put("motion", item.motion); put("light", item.light) }, SQLiteDatabase.CONFLICT_REPLACE)
             }
-            delete("segments", "end < ?", arrayOf((now - RETENTION).toString()))
-            delete("samples", "time < ?", arrayOf((now - RETENTION).toString()))
+            if (shouldCleanup) {
+                delete("segments", "end < ?", arrayOf((now - RETENTION).toString()))
+                delete("samples", "time < ?", arrayOf((now - RETENTION).toString()))
+                delete("usage_snapshots", "windowEnd < ?", arrayOf((now - RETENTION).toString()))
+            }
         }
+        if (shouldCleanup) maintenancePrefs.edit { putLong(EVENT_CLEANUP_KEY, now) }
+    }
+
+    fun usageSnapshot(windowStartMillis: Long): UsageSnapshot? = readableDatabase.query(
+        "usage_snapshots", null, "windowStart = ?", arrayOf(windowStartMillis.toString()), null, null, null, "1"
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null else {
+            val intervals = JSONArray(cursor.getString(cursor.getColumnIndexOrThrow("intervals")))
+            UsageSnapshot(
+                windowStartMillis = cursor.getLong(cursor.getColumnIndexOrThrow("windowStart")),
+                windowEndMillis = cursor.getLong(cursor.getColumnIndexOrThrow("windowEnd")),
+                accessAvailable = cursor.getInt(cursor.getColumnIndexOrThrow("accessAvailable")) != 0,
+                intervals = List(intervals.length()) { index -> intervals.getJSONObject(index).let {
+                    UsageInterval(it.getLong("start"), it.getLong("end"))
+                } },
+                capturedAtMillis = cursor.getLong(cursor.getColumnIndexOrThrow("capturedAt"))
+            )
+        }
+    }
+
+    fun saveUsageSnapshot(snapshot: UsageSnapshot) {
+        writableDatabase.insertWithOnConflict("usage_snapshots", null, ContentValues().apply {
+            put("windowStart", snapshot.windowStartMillis)
+            put("windowEnd", snapshot.windowEndMillis)
+            put("accessAvailable", if (snapshot.accessAvailable) 1 else 0)
+            put("intervals", JSONArray(snapshot.intervals.map {
+                JSONObject().put("start", it.startMillis).put("end", it.endMillis)
+            }).toString())
+            put("capturedAt", snapshot.capturedAtMillis)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
     }
     fun segments(): List<SleepSegment> = querySegments(null, null)
     fun segments(sinceMillis: Long, untilMillis: Long? = null): List<SleepSegment> = querySegments(sinceMillis, untilMillis)
@@ -221,5 +265,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             "id", "start", "end", "confidence", "awake", "state", "reason", "manual", "error", "revision", "usageSnapshotApplied"
         )
         private const val RETENTION = 14L * 24 * 60 * 60 * 1000
+        private const val CLEANUP_INTERVAL = 24L * 60 * 60 * 1000
+        private const val EVENT_CLEANUP_KEY = "sleep_events_last_cleanup"
     }
 }

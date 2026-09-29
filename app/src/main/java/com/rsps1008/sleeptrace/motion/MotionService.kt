@@ -1,6 +1,5 @@
 package com.rsps1008.sleeptrace.motion
 
-import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -38,8 +37,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import java.time.Instant
-import java.time.ZoneId
 
 /** Automatic foreground recording after setup; no continuous wake lock or raw sensor persistence. */
 class MotionService : Service(), SensorEventListener2 {
@@ -55,7 +52,9 @@ class MotionService : Service(), SensorEventListener2 {
     private var schedule: SleepSchedule? = null
     private var triggeredWindowStart: Long? = null
     private var fallbackWindowStart: Long? = null
-    private var screenOffSince: Long? = null
+    @Volatile private var screenOffSince: Long? = null
+    private var recentClassifications: List<ClassificationSample> = emptyList()
+    private var windowEndedNormally = false
     private var clockOffset = 0L
     private var lastPersistElapsedRealtime = 0L
     private val pendingMinutes = mutableListOf<MotionMinute>()
@@ -68,8 +67,14 @@ class MotionService : Service(), SensorEventListener2 {
         override fun onReceive(context: Context, intent: Intent) {
             val now = System.currentTimeMillis()
             when (intent.action) {
-                Intent.ACTION_SCREEN_OFF -> screenOffSince = now
-                Intent.ACTION_SCREEN_ON -> screenOffSince = null
+                Intent.ACTION_SCREEN_OFF -> {
+                    screenOffSince = now
+                    return
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    screenOffSince = null
+                    return
+                }
                 Intent.ACTION_TIME_CHANGED -> clockOffset = System.currentTimeMillis() - SystemClock.elapsedRealtime()
             }
             refreshConfiguration()
@@ -97,6 +102,7 @@ class MotionService : Service(), SensorEventListener2 {
         if (intent?.action == ACTION_STOP) {
             settings.enabled = false
             runCatching { SleepTracker.unsubscribe(this) }
+            SleepWindowScheduler.cancel(this)
             handler.post {
                 stopped = true
                 transition { stopSelf() }
@@ -139,24 +145,32 @@ class MotionService : Service(), SensorEventListener2 {
             val classifications = sleepDependencies().store.recentSamples(
                 System.currentTimeMillis() - SleepClassificationTrigger.MAX_EVENT_AGE_MILLIS
             )
-            handler.post { if (!stopped && !destroyed) configure(newSchedule, classifications) }
+            handler.post {
+                if (!stopped && !destroyed) {
+                    recentClassifications = classifications
+                    configure(newSchedule, classifications)
+                }
+            }
         }
     }
 
     /** Called after Google Play services delivers sleep classifications. */
     fun onSleepClassifications(samples: List<ClassificationSample>) {
         handler.post {
-            if (!stopped && !destroyed) configure(schedule, samples)
+            if (!stopped && !destroyed) {
+                recentClassifications = samples
+                configure(schedule, samples)
+            }
         }
     }
 
-    private fun configure(newSchedule: SleepSchedule?, classifications: List<ClassificationSample> = emptyList()) {
+    private fun configure(newSchedule: SleepSchedule?, classifications: List<ClassificationSample> = recentClassifications) {
         schedule = newSchedule
         if (!settings.enabled || !SleepTracker.hasActivityRecognition(this)) {
             stopped = true
             transition { stopSelf() }; return
         }
-        scheduleBoundary(newSchedule)
+        SleepWindowScheduler.schedule(this, newSchedule)
         val now = System.currentTimeMillis()
         val window = newSchedule?.windowAt(now)
         val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -164,7 +178,7 @@ class MotionService : Service(), SensorEventListener2 {
         val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
         val lowBattery = !charging && level >= 0 && scale > 0 && level.toDouble() / scale <= 0.15
-        if (window == null || now < window.start || now >= window.end) {
+        if (window == null) {
             triggeredWindowStart = null
             fallbackWindowStart = null
         }
@@ -179,14 +193,23 @@ class MotionService : Service(), SensorEventListener2 {
         }
         val pauseReason = when {
             sensor == null -> "這支手機沒有可用的加速度計"
-            window == null || now < window.start || now >= window.end -> "等待設定的偵測時段"
+            window == null -> "睡眠窗外，沒有取樣"
             triggeredWindowStart != window.start -> "等待 Google 判斷進入睡眠"
             lowBattery -> "電量 ≤ 15%，暫停動作偵測"
             else -> null
         }
         if (pauseReason != null) {
             val wasRecording = accumulator != null
-            transition { publish(pauseReason); if (wasRecording) WorkScheduler.reconcileSoon(this) }; return
+            val stopOutsideWindow = window == null
+            transition {
+                publish(if (stopOutsideWindow) "睡眠窗外，背景服務已停止" else pauseReason)
+                if (wasRecording) WorkScheduler.reconcileSoon(this)
+                if (stopOutsideWindow) {
+                    windowEndedNormally = true
+                    stopSelf()
+                }
+            }
+            return
         }
         val activeWindow = requireNotNull(window)
         val selected = sensor!!
@@ -259,26 +282,6 @@ class MotionService : Service(), SensorEventListener2 {
         lastPersistElapsedRealtime = SystemClock.elapsedRealtime()
     }
 
-    private fun scheduleBoundary(value: SleepSchedule?) {
-        val alarm = getSystemService(AlarmManager::class.java)
-        alarm.cancel(boundaryIntent())
-        if (value == null) return
-        val now = System.currentTimeMillis()
-        val zone = ZoneId.systemDefault()
-        val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
-        val next = (0L..2L).flatMap { day ->
-            listOf(value.startMinute, value.endMinute, value.startMinute + SleepClassificationTrigger.FALLBACK_DELAY_MILLIS.toInt() / MINUTE_MS.toInt()).map { minute ->
-                today.plusDays(day).atStartOfDay().plusMinutes(minute.toLong()).atZone(zone).toInstant().toEpochMilli()
-            }
-        }.filter { it > now }.minOrNull()
-            ?: today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        // Inexact idle-aware boundary only; no periodic wake-up and no exact-alarm permission.
-        alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, boundaryIntent())
-    }
-
-    private fun boundaryIntent() = PendingIntent.getBroadcast(this, 2003,
-        Intent(this, MotionBoundaryReceiver::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-
     private fun publish(text: String) {
         if (notice == text) return
         notice = text; settings.status = text
@@ -299,7 +302,6 @@ class MotionService : Service(), SensorEventListener2 {
         active = null
         scope.cancel()
         runCatching { unregisterReceiver(powerReceiver) }
-        getSystemService(AlarmManager::class.java).cancel(boundaryIntent())
         handler.post {
             destroyed = true
             sensors.unregisterListener(this)
@@ -307,7 +309,11 @@ class MotionService : Service(), SensorEventListener2 {
             accumulator = null; pendingChange = null
             handler.removeCallbacks(finishChange)
             persist()
-            settings.status = if (settings.enabled) "動作偵測已中斷，請開啟 App 重新啟動" else "動作偵測已關閉"
+            settings.status = when {
+                !settings.enabled -> "動作偵測已關閉"
+                windowEndedNormally -> "睡眠窗外，已停止背景服務並等待下一個排程"
+                else -> "動作偵測已中斷，請開啟 App 重新啟動"
+            }
             WorkScheduler.reconcileSoon(this)
             thread.quitSafely()
         }
@@ -329,7 +335,43 @@ class MotionService : Service(), SensorEventListener2 {
 
 class MotionBoundaryReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        // Never restart a killed service from the background; user must restart from the app.
-        MotionService.active?.refreshConfiguration()
+        if (intent.action != SleepWindowScheduler.ACTION_BOUNDARY) return
+        val isWindowEnd = intent.getBooleanExtra(SleepWindowScheduler.EXTRA_WINDOW_END, false)
+        val pending = goAsync()
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            try {
+                val dependencies = context.sleepDependencies()
+                val preferences = dependencies.preferences
+                val schedule = if (preferences.configured()) preferences.schedule() else null
+                val enabled = dependencies.motionSettings.enabled && schedule != null && SleepTracker.hasActivityRecognition(context)
+                if (!enabled) {
+                    SleepWindowScheduler.cancel(context)
+                    runCatching { SleepTracker.unsubscribe(context) }
+                    MotionService.active?.refreshConfiguration()
+                    return@launch
+                }
+                val activeSchedule = requireNotNull(schedule)
+
+                SleepWindowScheduler.clearDelivered(context)
+                SleepWindowScheduler.schedule(context, activeSchedule)
+                SleepTracker.syncSubscription(context, activeSchedule, enabled, System.currentTimeMillis())
+                val inWindow = activeSchedule.windowAt(System.currentTimeMillis()) != null
+                val service = MotionService.active
+                if (service != null) {
+                    service.refreshConfiguration()
+                } else if (inWindow) {
+                    runCatching { MotionService.start(context) }.onFailure {
+                        dependencies.motionSettings.status = if (SleepWindowScheduler.hasExactAlarmAccess(context)) {
+                            "系統未能於睡眠窗啟動背景記錄；開啟 App 可重新安排"
+                        } else {
+                            "未允許鬧鐘與提醒，Android 限制睡眠窗背景啟動；開啟 App 可恢復記錄"
+                        }
+                    }
+                }
+                if (isWindowEnd) WorkScheduler.reconcileSoon(context)
+            } finally {
+                pending.finish()
+            }
+        }
     }
 }

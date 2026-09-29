@@ -33,7 +33,8 @@ internal fun isTransientSyncError(error: Throwable): Boolean {
         if (type.contains("timeout") || type.contains("ratelimit") || type.contains("servicebusy") ||
             type.contains("temporar") || message.contains("timed out") || message.contains("timeout") ||
             message.contains("temporar") || message.contains("rate limit") || message.contains("too many requests") ||
-            message.contains("database is locked") || message.contains("busy")) return true
+            message.contains("database is locked") || message.contains("busy") || message.contains("offline") ||
+            message.contains("network")) return true
         current = current.cause
     }
     return false
@@ -84,18 +85,23 @@ class HealthConnectSync(private val context: Context) {
             SyncOutcome.FAILURE -> return SyncOutcome.FAILURE
             SyncOutcome.SUCCESS -> Unit
         }
-        SleepUsageSnapshot(context).applyPending(store)
+        val schedule = context.sleepDependencies().preferences.schedule()
+        SleepUsageSnapshot(context).applyPending(store, schedule)
+        val now = System.currentTimeMillis()
         val failures = mutableListOf<Throwable>()
         val client = HealthConnectClient.getOrCreate(context)
         val complete = AutomaticSyncQueue.drainBatch(
-            read = { store.sessions(states = setOf(SyncState.PENDING, SyncState.FAILED, SyncState.SYNCING)) },
+            read = {
+                store.sessions(states = setOf(SyncState.PENDING, SyncState.FAILED_RETRYABLE, SyncState.SYNCING))
+                    .filter { it.usageSnapshotApplied && SleepUsageSnapshot.isWindowComplete(it, schedule, now) }
+            },
             update = store::updateIfCurrent,
             onFailure = failures::add,
             writeBatch = { sessions -> client.insertRecords(sessions.map(::toHealthRecord)) }
         )
+        if (failures.any { !isTransientSyncError(it) }) return SyncOutcome.FAILURE
         if (complete) return SyncOutcome.SUCCESS
-        if (failures.isEmpty() || failures.all(::isTransientSyncError)) return SyncOutcome.RETRY
-        return SyncOutcome.FAILURE
+        return SyncOutcome.RETRY
     }
 
     private suspend fun retireSuperseded(store: SleepStore): SyncOutcome {
@@ -112,8 +118,12 @@ class HealthConnectSync(private val context: Context) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                store.updateIfCurrent(session, session.copy(syncError = error.message ?: "移除舊的 Health Connect 資料暫時失敗"))
-                return if (isTransientSyncError(error)) SyncOutcome.RETRY else SyncOutcome.FAILURE
+                val transient = isTransientSyncError(error)
+                store.updateIfCurrent(session, session.copy(
+                    state = if (transient) SyncState.RETIRED else SyncState.RETIRED_FAILED_PERMANENT,
+                    syncError = error.message ?: if (transient) "移除舊資料暫時失敗" else "無法移除舊資料"
+                ))
+                return if (transient) SyncOutcome.RETRY else SyncOutcome.FAILURE
             }
         }
         return SyncOutcome.SUCCESS
