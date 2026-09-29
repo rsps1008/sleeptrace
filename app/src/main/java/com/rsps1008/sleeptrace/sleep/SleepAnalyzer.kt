@@ -11,7 +11,8 @@ object SleepAnalyzer {
         schedule: SleepSchedule
     ): List<SleepSession> = segments
         .filter { it.endMillis > it.startMillis && it.endMillis - it.startMillis >= MINIMUM_SLEEP_MILLIS }
-        .filter { schedule.overlaps(it.startMillis, it.endMillis) }
+        .flatMap { segment -> schedule.intersections(segment.startMillis, segment.endMillis).map { window -> segment.copy(startMillis = window.startMillis, endMillis = window.endMillis) } }
+        .filter { it.endMillis - it.startMillis >= MINIMUM_SLEEP_MILLIS }
         .map { segment -> buildSession(segment, classifications, phoneUse) }
         .filter { it.durationMillis >= MINIMUM_SLEEP_MILLIS }
 
