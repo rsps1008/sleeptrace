@@ -17,6 +17,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.withResumed
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.activity.viewModels
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -46,9 +49,9 @@ import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageMonitor
 import com.rsps1008.sleeptrace.work.WorkScheduler
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.filterNotNull
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -79,8 +82,7 @@ class MainActivity : AppCompatActivity() {
         refresh()
         guideBackgroundAccessIfNeeded()
     }
-    private var refreshJob: Job? = null
-    private var lastRendered: HomeSnapshot? = null
+    private val homeViewModel: HomeViewModel by viewModels()
     private var startupPermissionCheckDone = false
     private var continueStartupPermissionFlow = false
     private val requestHealthPermissions = registerForActivityResult(
@@ -133,6 +135,11 @@ class MainActivity : AppCompatActivity() {
         }
         ViewCompat.requestApplyInsets(scroll)
         scroll.requestFocus()
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                homeViewModel.state.filterNotNull().collect { renderHome(it) }
+            }
+        }
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("sleeptrace_reconcile_now").observe(this) { refresh() }
         WorkManager.getInstance(this).getWorkInfosForUniqueWorkLiveData("sleeptrace_reconcile").observe(this) { refresh() }
         refresh()
@@ -158,57 +165,22 @@ class MainActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
     }
 
-    private fun refresh() {
-        refreshJob?.cancel()
-        refreshJob = lifecycleScope.launch {
-            // Fetch before changing the view tree: async gaps used to collapse the scroll content.
-            val configured = preferences.configured()
-            val schedule = if (configured) preferences.schedule() else null
-            val (sessions, latestClassification) = withContext(Dispatchers.IO) {
-                store.sessions() to store.samples().maxByOrNull { it.timeMillis }
-            }
-            val healthGranted = healthSync.hasWritePermission()
-            val snapshot = HomeSnapshot(
-                configured = configured,
-                schedule = schedule,
-                sessions = sessions,
-                latestClassification = latestClassification,
-                healthGranted = healthGranted,
-                recordingEnabled = motionSettings.enabled,
-                recordingStatus = motionSettings.status,
-                backgroundRestricted = backgroundAccess.restricted,
-                batteryExempt = backgroundAccess.exempt
-            )
-            // WorkManager publishes intermediate state changes frequently. Rebuild only when the
-            // visible model actually changed, so the current Material view tree does not flicker.
-            if (snapshot == lastRendered) return@launch
-            lastRendered = snapshot
-            val previousScroll = scroll.scrollY
-            content.removeAllViews()
-            renderHeader()
-            if (!configured) {
-                renderSetupGuide()
-            } else {
-                renderSleepSection(sessions, latestClassification)
-                renderScheduleCard(schedule!!)
-                renderPermissionsSection(healthGranted)
-                renderBackgroundAccess()
-            }
-            scroll.post { scroll.scrollTo(0, previousScroll) }
-        }
-    }
+    private fun refresh() = homeViewModel.refresh()
 
-    private data class HomeSnapshot(
-        val configured: Boolean,
-        val schedule: SleepSchedule?,
-        val sessions: List<SleepSession>,
-        val latestClassification: ClassificationSample?,
-        val healthGranted: Boolean,
-        val recordingEnabled: Boolean,
-        val recordingStatus: String,
-        val backgroundRestricted: Boolean,
-        val batteryExempt: Boolean
-    )
+    private fun renderHome(snapshot: HomeSnapshot) {
+        val previousScroll = scroll.scrollY
+        content.removeAllViews()
+        renderHeader()
+        if (!snapshot.configured) {
+            renderSetupGuide()
+        } else {
+            renderSleepSection(snapshot.sessions, snapshot.latestClassification)
+            renderScheduleCard(requireNotNull(snapshot.schedule), snapshot.recordingEnabled)
+            renderPermissionsSection(snapshot.healthGranted)
+            renderBackgroundAccess(snapshot.backgroundRestricted, snapshot.batteryExempt)
+        }
+        scroll.post { scroll.scrollTo(0, previousScroll) }
+    }
 
     private fun renderHeader() {
         val headerLayout = LinearLayout(this).apply {
@@ -478,7 +450,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun renderScheduleCard(schedule: SleepSchedule) {
+    private fun renderScheduleCard(schedule: SleepSchedule, recordingEnabled: Boolean) {
         content.addView(createSectionTitle("自動偵測排程"))
         val card = createCard()
         val layout = LinearLayout(this).apply {
@@ -507,7 +479,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(topRow)
 
         val modeLabel = TextView(this).apply {
-            text = if (motionSettings.enabled) "自動記錄已開啟" else "自動記錄已暫停"
+            text = if (recordingEnabled) "自動記錄已開啟" else "自動記錄已暫停"
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(color(R.color.purple_500))
@@ -523,7 +495,7 @@ class MainActivity : AppCompatActivity() {
         }
         layout.addView(noteText)
         layout.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = if (motionSettings.enabled) "暫停自動記錄" else "恢復自動記錄"
+            text = if (recordingEnabled) "暫停自動記錄" else "恢復自動記錄"
             isAllCaps = false
             setOnClickListener {
                 motionSettings.enabled = !motionSettings.enabled
@@ -640,18 +612,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun renderBackgroundAccess() {
-        val access = backgroundAccess
-        if (access.batteryReady) return
+    private fun renderBackgroundAccess(backgroundRestricted: Boolean, batteryExempt: Boolean) {
+        if (!backgroundRestricted && batteryExempt) return
         content.addView(createSectionTitle(getString(R.string.background_recording_title)))
         val card = createCard()
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(16), dp(18), dp(16))
         }
-        if (!access.batteryReady) {
+        if (backgroundRestricted || !batteryExempt) {
             layout.addView(TextView(this).apply {
-                setText(if (access.restricted) R.string.battery_restricted_description else R.string.battery_optimized_description)
+                setText(if (backgroundRestricted) R.string.battery_restricted_description else R.string.battery_optimized_description)
                 textSize = 13f
                 setTextColor(color(R.color.text_secondary))
             })

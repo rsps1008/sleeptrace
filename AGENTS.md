@@ -112,7 +112,7 @@
 
 | 路徑 | 責任 |
 | --- | --- |
-| `MainActivity.kt` | 簡化首頁、系統安全間距、自動啟動記錄、權限、時間修正 |
+| `MainActivity.kt`、`HomeViewModel.kt` | 簡化首頁、系統安全間距、自動啟動記錄、權限、時間修正；ViewModel 負責首頁資料、授權與背景狀態彙整，Activity 僅觀察與繪製 |
 | `power/BackgroundAccess.kt` | Android 電池限制查詢、一次性引導旗標、電池與小米自啟動設定及備援 Intent |
 | `sleep/SleepTracker.kt` | Sleep API 訂閱／取消；明確指向接收器的 mutable PendingIntent 用於事件載入 |
 | `sleep/SleepUpdateReceiver.kt` | 保存 Sleep API 區段／分類，區段事件排入工作 |
