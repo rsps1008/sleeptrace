@@ -4,6 +4,8 @@ import android.content.Context
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSegment
 import com.rsps1008.sleeptrace.sleep.SleepSession
+import com.rsps1008.sleeptrace.sleep.SleepStage
+import com.rsps1008.sleeptrace.sleep.SleepStageInterval
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.mergeSleepSessions
 import com.rsps1008.sleeptrace.sleep.UsageInterval
@@ -32,7 +34,12 @@ class SleepStore(context: Context) {
                 List(array.length()) { index -> array.getJSONObject(index).let { UsageInterval(it.getLong("start"), it.getLong("end")) } }
             } ?: emptyList(),
             // Existing records were already calculated with the old pre-reconcile query.
-            usageSnapshotApplied = item.optBoolean("usageSnapshotApplied", true)
+            usageSnapshotApplied = item.optBoolean("usageSnapshotApplied", true),
+            stageIntervals = item.optJSONArray("stageIntervals")?.let { array ->
+                List(array.length()) { index -> array.getJSONObject(index).let {
+                    SleepStageInterval(it.getLong("start"), it.getLong("end"), SleepStage.valueOf(it.getString("stage")))
+                } }
+            } ?: emptyList()
         )
     }.sortedByDescending { it.startMillis }
 
@@ -58,6 +65,26 @@ class SleepStore(context: Context) {
     fun session(id: String, includeAwakeIntervals: Boolean = true): SleepSession? {
         migrateSessions()
         return eventStore.session(id, includeAwakeIntervals)
+    }
+
+    /** Recent sessions only, for refreshing manually edited stage estimates without loading all history. */
+    fun sessionsInRange(startMillis: Long, endMillis: Long): List<SleepSession> {
+        migrateSessions()
+        return eventStore.sessionsForReconciliation(startMillis, endMillis, emptySet())
+    }
+
+    fun updateStageIntervals(expected: SleepSession, stageIntervals: List<SleepStageInterval>): Boolean = synchronized(sessionLock) {
+        migrateSessions()
+        if (expected.stageIntervals == stageIntervals) return@synchronized false
+        val replacement = expected.copy(
+            stageIntervals = stageIntervals,
+            revision = expected.revision + 1,
+            state = if (expected.state == SyncState.SYNCED) SyncState.PENDING else expected.state,
+            syncError = if (expected.state == SyncState.SYNCED) null else expected.syncError
+        )
+        if (eventStore.session(expected.id) != expected) return@synchronized false
+        eventStore.upsertSession(replacement)
+        true
     }
 
     fun saveSessions(sessions: List<SleepSession>) { migrateSessions(); eventStore.replaceSessions(sessions) }
@@ -96,7 +123,7 @@ class SleepStore(context: Context) {
         upsert(current.copy(startMillis = start, endMillis = end, awakeMillis = 0, awakeIntervals = emptyList(),
             revision = current.revision + 1, state = SyncState.PENDING,
             manuallyEdited = true, reason = "使用者已修正時間，App 自動同步", syncError = null,
-            usageSnapshotApplied = false))
+            usageSnapshotApplied = false, stageIntervals = emptyList()))
         AutomaticWorkSignals.markDirty(appContext)
     }
 

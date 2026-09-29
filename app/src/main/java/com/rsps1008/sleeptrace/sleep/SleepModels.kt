@@ -25,6 +25,13 @@ data class SleepSegment(
 
 data class UsageInterval(val startMillis: Long, val endMillis: Long)
 
+/** A compact, reconciled estimate; raw accelerometer data is never stored here. */
+data class SleepStageInterval(
+    val startMillis: Long,
+    val endMillis: Long,
+    val stage: SleepStage
+)
+
 data class UsageSnapshot(
     val windowStartMillis: Long,
     val windowEndMillis: Long,
@@ -46,7 +53,9 @@ data class SleepSession(
     val revision: Long = 1,
     val awakeIntervals: List<UsageInterval> = emptyList(),
     /** True once the shared per-window UsageStats snapshot has been applied and persisted. */
-    val usageSnapshotApplied: Boolean = false
+    val usageSnapshotApplied: Boolean = false,
+    /** Merged stage intervals, recomputed during reconciliation; empty means legacy generic sleep. */
+    val stageIntervals: List<SleepStageInterval> = emptyList()
 ) {
     val durationMillis: Long get() = (endMillis - startMillis - awakeMillis).coerceAtLeast(0)
     fun title(): String = Instant.ofEpochMilli(startMillis).atZone(ZoneId.systemDefault())

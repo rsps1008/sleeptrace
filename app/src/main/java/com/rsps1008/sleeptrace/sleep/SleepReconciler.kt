@@ -42,8 +42,36 @@ class SleepReconciler(private val context: Context) {
         val fallback = MotionSleepEstimator.estimate(
             resolved, usageResult.intervals, schedule, now,
             usageAvailable = usageResult::availableFor
-        )
-        store.mergeCalculated(selectBestSessions(calculated, fallback), analysisStart, now)
+        ).mapNotNull { candidate -> confirmMotionCandidateOnset(candidate, segments, samples) }
+        val staged = selectBestSessions(calculated, fallback).map { session ->
+            val sessionUsage = usageResult.intervals.filter {
+                it.endMillis > session.startMillis && it.startMillis < session.endMillis
+            }
+            session.copy(stageIntervals = SleepStageEstimator.estimate(
+                session = session,
+                motionMinutes = resolved,
+                classifications = samples,
+                usageIntervals = sessionUsage,
+                sleepSegments = segments,
+                schedule = schedule
+            ))
+        }
+        store.mergeCalculated(staged, analysisStart, now)
+        store.sessionsInRange(analysisStart, now)
+            .filter { it.manuallyEdited && it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT) }
+            .forEach { session ->
+                val sessionUsage = usageResult.intervals.filter {
+                    it.endMillis > session.startMillis && it.startMillis < session.endMillis
+                }
+                store.updateStageIntervals(session, SleepStageEstimator.estimate(
+                    session = session,
+                    motionMinutes = resolved,
+                    classifications = samples,
+                    usageIntervals = sessionUsage,
+                    sleepSegments = segments,
+                    schedule = schedule
+                ))
+            }
         store.markReconciled(capturedGeneration)
     }
     companion object {
@@ -53,6 +81,32 @@ class SleepReconciler(private val context: Context) {
             SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED_RETRYABLE
         )
     }
+}
+
+/** Motion-only stillness may refine a confirmed onset, but can never establish sleep by itself. */
+internal fun confirmMotionCandidateOnset(
+    candidate: SleepSession,
+    segments: List<SleepSegment>,
+    classifications: List<ClassificationSample>
+): SleepSession? {
+    val segmentOnsets = segments.asSequence()
+        .filter { it.startMillis < candidate.endMillis && it.endMillis > candidate.startMillis }
+        .map { maxOf(candidate.startMillis, it.startMillis) }
+    val classificationOnsets = classifications.asSequence()
+        .filter {
+            it.confidence >= 80 && it.timeMillis >= candidate.startMillis && it.timeMillis < candidate.endMillis
+        }
+        .map { it.timeMillis }
+    val confirmedStart = (segmentOnsets + classificationOnsets).minOrNull() ?: return null
+    val start = maxOf(candidate.startMillis, confirmedStart)
+    if (candidate.endMillis - start < SleepAnalyzer.MINIMUM_SLEEP_MILLIS) return null
+    return candidate.copy(
+        id = "${candidate.id}-$start",
+        startMillis = start,
+        awakeMillis = 0,
+        awakeIntervals = emptyList(),
+        reason = candidate.reason + "；手機靜止僅延伸 Sleep API 已確認的睡眠起點"
+    )
 }
 
 private fun overlaps(a: SleepSession, b: SleepSession) = a.startMillis < b.endMillis && a.endMillis > b.startMillis
@@ -92,7 +146,8 @@ fun mergeSleepSessions(existing: List<SleepSession>, calculated: List<SleepSessi
         if (old?.usageSnapshotApplied == true && !candidate.usageSnapshotApplied &&
             old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis) return@forEach
         if (old != null && old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis &&
-            old.awakeMillis == candidate.awakeMillis && old.awakeIntervals == candidate.awakeIntervals) return@forEach
+            old.awakeMillis == candidate.awakeMillis && old.awakeIntervals == candidate.awakeIntervals &&
+            old.stageIntervals == candidate.stageIntervals) return@forEach
         result.removeAll(matches.toSet())
         result += if (old == null) candidate else candidate.copy(id = old.id, revision = old.revision + 1, state = SyncState.PENDING, syncError = null)
     }

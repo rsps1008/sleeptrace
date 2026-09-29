@@ -56,13 +56,17 @@ class HealthConnectSync(private val context: Context) {
             Stage(startTime = Instant.ofEpochMilli(it.start), endTime = Instant.ofEpochMilli(it.end),
                 stage = when (it.stage) {
                     SleepStage.AWAKE -> SleepSessionRecord.STAGE_TYPE_AWAKE
+                    SleepStage.LIGHT -> SleepSessionRecord.STAGE_TYPE_LIGHT
+                    SleepStage.DEEP -> SleepSessionRecord.STAGE_TYPE_DEEP
                     SleepStage.SLEEPING -> SleepSessionRecord.STAGE_TYPE_SLEEPING
                 })
         }
         return SleepSessionRecord(
                 startTime = start, startZoneOffset = zone.getOffset(start),
                 endTime = end, endZoneOffset = zone.getOffset(end),
-                title = "眠迹 SleepTrace", notes = "以手機推估；${session.reason}", stages = stages,
+                title = "眠迹 SleepTrace",
+                notes = if (session.stageIntervals.isNotEmpty()) "非醫療睡眠分期推估；${session.reason}" else "以手機推估；${session.reason}",
+                stages = stages,
                 metadata = Metadata.autoRecorded(
                     clientRecordId = session.id,
                     clientRecordVersion = session.revision,

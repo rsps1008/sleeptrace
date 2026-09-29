@@ -13,7 +13,9 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
+import com.rsps1008.sleeptrace.sleep.SleepStage
 import com.rsps1008.sleeptrace.sleep.SleepSessionTimelineView
+import com.rsps1008.sleeptrace.sleep.sleepParts
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
@@ -112,15 +114,28 @@ object SleepDialogHelper {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(context, 24), 0, dp(context, 24), 0)
             addView(TextView(context).apply {
-                text = "推估睡眠：${formatDuration(session.durationMillis)}\n" +
-                    "夜間手機使用：${formatDuration(session.awakeMillis)}\n" +
-                    "參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}" +
+                val parts = sleepParts(session)
+                val staged = session.stageIntervals.isNotEmpty()
+                val lightMillis = parts.filter { it.stage == SleepStage.LIGHT }.sumOf { it.end - it.start }
+                val deepMillis = parts.filter { it.stage == SleepStage.DEEP }.sumOf { it.end - it.start }
+                val awakeMillis = parts.filter { it.stage == SleepStage.AWAKE }.sumOf { it.end - it.start }
+                text = if (staged) {
+                    "總睡眠：${formatDuration(lightMillis + deepMillis)}\n" +
+                        "淺眠：約 ${formatDuration(lightMillis)}　深眠：約 ${formatDuration(deepMillis)}\n" +
+                        "清醒：約 ${formatDuration(awakeMillis)}\n" +
+                        "依手機活動與 Google Sleep API 推估，非醫療睡眠分期\n" +
+                        "參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}"
+                } else {
+                    "推估睡眠：${formatDuration(session.durationMillis)}\n" +
+                        "夜間手機使用：${formatDuration(session.awakeMillis)}\n" +
+                        "參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}"
+                } +
                     (session.syncError?.let { "\n\n同步錯誤：$it" } ?: "")
                 setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
                 textSize = 14f
             })
             addView(SleepSessionTimelineView(context, session), LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 58)
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 70)
             ).apply { topMargin = dp(context, 16) })
         }
         val dialog = MaterialAlertDialogBuilder(context).setTitle(session.title()).setView(detail)

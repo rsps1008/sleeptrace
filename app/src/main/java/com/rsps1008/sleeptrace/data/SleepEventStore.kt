@@ -9,6 +9,8 @@ import androidx.core.database.sqlite.transaction
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSegment
 import com.rsps1008.sleeptrace.sleep.SleepSession
+import com.rsps1008.sleeptrace.sleep.SleepStage
+import com.rsps1008.sleeptrace.sleep.SleepStageInterval
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageInterval
 import com.rsps1008.sleeptrace.sleep.UsageSnapshot
@@ -16,7 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Indexed, transactional storage for raw Sleep API events and local sleep records. */
-class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 8) {
+class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 9) {
     private val maintenancePrefs = context.applicationContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
         setWriteAheadLoggingEnabled(true)
@@ -45,6 +47,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         if (oldVersion < 6) createSessionOverlapIndex(db)
         if (oldVersion < 7) createUsageSnapshots(db)
         if (oldVersion < 8) upgradeUsageSnapshotsToCompositeKey(db)
+        if (oldVersion in 2 until 9) db.execSQL("ALTER TABLE sessions ADD COLUMN stageIntervals TEXT NOT NULL DEFAULT '[]'")
     }
 
     private fun createSessions(db: SQLiteDatabase) = db.execSQL("""
@@ -52,7 +55,8 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             id TEXT PRIMARY KEY NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL,
             confidence INTEGER NOT NULL, awake INTEGER NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL,
             manual INTEGER NOT NULL, error TEXT, revision INTEGER NOT NULL,
-            awakeIntervals TEXT NOT NULL, usageSnapshotApplied INTEGER NOT NULL
+            awakeIntervals TEXT NOT NULL, usageSnapshotApplied INTEGER NOT NULL,
+            stageIntervals TEXT NOT NULL DEFAULT '[]'
         )
     """.trimIndent())
 
@@ -257,7 +261,14 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
                 List(array.length()) { index -> array.getJSONObject(index).let { UsageInterval(it.getLong("start"), it.getLong("end")) } }
             }
         } else emptyList(),
-        usageSnapshotApplied = getInt(getColumnIndexOrThrow("usageSnapshotApplied")) != 0
+        usageSnapshotApplied = getInt(getColumnIndexOrThrow("usageSnapshotApplied")) != 0,
+        stageIntervals = if (includeAwakeIntervals) {
+            JSONArray(getString(getColumnIndexOrThrow("stageIntervals"))).let { array ->
+                List(array.length()) { index -> array.getJSONObject(index).let {
+                    SleepStageInterval(it.getLong("start"), it.getLong("end"), SleepStage.valueOf(it.getString("stage")))
+                } }
+            }
+        } else emptyList()
     )
     private fun SQLiteDatabase.insertSession(item: SleepSession) {
         insertWithOnConflict("sessions", null, ContentValues().apply {
@@ -267,6 +278,9 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             put("revision", item.revision)
             put("awakeIntervals", JSONArray(item.awakeIntervals.map { JSONObject().put("start", it.startMillis).put("end", it.endMillis) }).toString())
             put("usageSnapshotApplied", if (item.usageSnapshotApplied) 1 else 0)
+            put("stageIntervals", JSONArray(item.stageIntervals.map {
+                JSONObject().put("start", it.startMillis).put("end", it.endMillis).put("stage", it.stage.name)
+            }).toString())
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
     companion object {

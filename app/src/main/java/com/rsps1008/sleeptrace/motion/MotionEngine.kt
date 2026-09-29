@@ -125,7 +125,8 @@ object MotionSleepEstimator {
         val conflicts = active.toDouble() / bed.size >= 0.30
         return session.copy(
             confidence = if (conflicts) (session.confidence - 30).coerceAtLeast(0) else session.confidence,
-            reason = session.reason + "；床上動作摘要 ${bed.size} 分鐘，活動 $active 分鐘" + if (conflicts) "，已降低參考分數" else "（非分期）"
+            reason = session.reason + "；床上動作摘要 ${bed.size} 分鐘，活動 $active 分鐘" +
+                if (conflicts) "，已降低參考分數" else "（僅作相對活動參考）"
         )
     }
 

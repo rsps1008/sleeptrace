@@ -7,26 +7,34 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.view.View
+import androidx.core.graphics.ColorUtils
 import com.google.android.material.color.MaterialColors
 import kotlin.math.max
 import kotlin.math.min
 
-/** Compact detail-only timeline: sleeping is blue and persisted phone-use deductions are awake. */
+/** Compact detail-only timeline using the active theme colors for Awake, Light and Deep. */
 class SleepSessionTimelineView(context: Context, private val session: SleepSession) : View(context) {
     private val density = resources.displayMetrics.density
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = MaterialColors.getColor(this@SleepSessionTimelineView, android.R.attr.textColorSecondary, Color.rgb(85, 83, 110))
+        color = MaterialColors.getColor(this@SleepSessionTimelineView, android.R.attr.textColorSecondary, Color.GRAY)
         textSize = 12 * density
     }
-    private val trackColor = MaterialColors.getColor(this, androidx.appcompat.R.attr.colorPrimary, Color.rgb(103, 80, 164))
-    private val awakeColor = MaterialColors.getColor(this, androidx.appcompat.R.attr.colorError, Color.rgb(198, 72, 113))
+    private val primaryColor = MaterialColors.getColor(this, androidx.appcompat.R.attr.colorPrimary, Color.GRAY)
+    private val lightColor = ColorUtils.setAlphaComponent(primaryColor, 150)
+    private val deepColor = MaterialColors.getColor(
+        this,
+        com.google.android.material.R.attr.colorTertiary,
+        MaterialColors.getColor(this, com.google.android.material.R.attr.colorPrimaryVariant, primaryColor)
+    )
+    private val awakeColor = MaterialColors.getColor(this, androidx.appcompat.R.attr.colorError, primaryColor)
+    private val trackColor = ColorUtils.setAlphaComponent(primaryColor, 45)
     private val track = RectF()
     private val clip = Path()
 
     init {
-        contentDescription = "睡眠時段；紅色區塊是已扣除的手機使用時間"
-        minimumHeight = (58 * density).toInt()
+        contentDescription = "清醒、淺眠與深眠推估時間軸；依手機活動與 Google Sleep API 推估，非醫療睡眠分期"
+        minimumHeight = (70 * density).toInt()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -40,22 +48,40 @@ class SleepSessionTimelineView(context: Context, private val session: SleepSessi
         val radius = 8 * density
         canvas.drawRoundRect(track, radius, radius, paint)
         val span = (session.endMillis - session.startMillis).coerceAtLeast(1)
-        paint.color = awakeColor
         canvas.save()
         clip.reset()
         clip.addRoundRect(track, radius, radius, Path.Direction.CW)
         canvas.clipPath(clip)
-        normalizedAwake(session.startMillis, session.endMillis, session.awakeIntervals).forEach { awake ->
-            val start = left + (awake.startMillis - session.startMillis).toFloat() / span * track.width()
-            val end = left + (awake.endMillis - session.startMillis).toFloat() / span * track.width()
+        sleepParts(session).forEach { part ->
+            paint.color = when (part.stage) {
+                SleepStage.AWAKE -> awakeColor
+                SleepStage.LIGHT -> lightColor
+                SleepStage.DEEP -> deepColor
+                SleepStage.SLEEPING -> trackColor
+            }
+            val start = left + (part.start - session.startMillis).toFloat() / span * track.width()
+            val end = left + (part.end - session.startMillis).toFloat() / span * track.width()
             canvas.drawRect(max(left, start), top, min(right, end), bottom, paint)
         }
         canvas.restore()
         canvas.drawText("入睡", left, 12 * density, labelPaint)
         val endLabel = "醒來"
         canvas.drawText(endLabel, right - labelPaint.measureText(endLabel), 12 * density, labelPaint)
-        paint.color = awakeColor
-        canvas.drawCircle(left, bottom + 17 * density, 4 * density, paint)
-        canvas.drawText("已扣除的手機使用／清醒", left + 11 * density, bottom + 21 * density, labelPaint)
+        val legendY = bottom + 22 * density
+        val legend = if (session.stageIntervals.isNotEmpty()) listOf(
+            "清醒" to awakeColor,
+            "淺眠" to lightColor,
+            "深眠" to deepColor
+        ) else listOf(
+            "清醒" to awakeColor,
+            "未分期" to trackColor
+        )
+        val sectionWidth = track.width() / legend.size
+        legend.forEachIndexed { index, (label, color) ->
+            val markerX = left + sectionWidth * index
+            paint.color = color
+            canvas.drawCircle(markerX + 4 * density, legendY - 4 * density, 4 * density, paint)
+            canvas.drawText(label, markerX + 12 * density, legendY, labelPaint)
+        }
     }
 }
