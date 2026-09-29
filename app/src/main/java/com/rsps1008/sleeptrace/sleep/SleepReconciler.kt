@@ -1,20 +1,19 @@
 package com.rsps1008.sleeptrace.sleep
 
 import android.content.Context
-import com.rsps1008.sleeptrace.data.SleepPreferences
-import com.rsps1008.sleeptrace.data.SleepStore
-import com.rsps1008.sleeptrace.motion.MotionStore
 import com.rsps1008.sleeptrace.motion.MotionSleepEstimator
 import com.rsps1008.sleeptrace.motion.AutomaticPlacement
-import com.rsps1008.sleeptrace.motion.MotionSettings
+import com.rsps1008.sleeptrace.motion.MotionStore
+import com.rsps1008.sleeptrace.sleepDependencies
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 class SleepReconciler(private val context: Context) {
     suspend fun reconcile() = mutex.withLock {
-        val preferences = SleepPreferences(context)
-        if (!preferences.configured() || !MotionSettings(context).enabled) return@withLock
-        val store = SleepStore(context)
+        val dependencies = context.sleepDependencies()
+        val preferences = dependencies.preferences
+        if (!preferences.configured() || !dependencies.motionSettings.enabled) return@withLock
+        val store = dependencies.store
         val schedule = preferences.schedule()
         val now = System.currentTimeMillis()
         val analysisStart = now - RECENT_ANALYSIS_MILLIS

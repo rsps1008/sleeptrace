@@ -8,6 +8,7 @@ import androidx.health.connect.client.records.SleepSessionRecord.Stage
 import androidx.health.connect.client.records.metadata.Device
 import androidx.health.connect.client.records.metadata.Metadata
 import com.rsps1008.sleeptrace.data.SleepStore
+import com.rsps1008.sleeptrace.sleepDependencies
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepUsageSnapshot
 import kotlinx.coroutines.CancellationException
@@ -48,7 +49,7 @@ class HealthConnectSync(private val context: Context) {
     }
 
     suspend fun syncPending(): Boolean {
-        val store = SleepStore(context)
+        val store = context.sleepDependencies().store
         // Permission needs a system grant, not approval for each sleep record. Resume after grant/on launch.
         if (!hasWritePermission()) return true
         if (!retireSuperseded(store)) return false

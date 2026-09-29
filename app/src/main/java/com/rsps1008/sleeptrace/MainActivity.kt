@@ -59,11 +59,12 @@ import java.time.format.DateTimeFormatter
 class MainActivity : AppCompatActivity() {
     private lateinit var content: LinearLayout
     private lateinit var scroll: ScrollView
-    private val preferences by lazy { SleepPreferences(this) }
-    private val store by lazy { SleepStore(this) }
-    private val healthSync by lazy { HealthConnectSync(this) }
-    private val motionSettings by lazy { MotionSettings(this) }
-    private val backgroundAccess by lazy { BackgroundAccess(this) }
+    private val dependencies by lazy { sleepDependencies() }
+    private val preferences get() = dependencies.preferences
+    private val store get() = dependencies.store
+    private val healthSync get() = dependencies.healthSync
+    private val motionSettings get() = dependencies.motionSettings
+    private val backgroundAccess get() = dependencies.backgroundAccess
     private var permissionFlowComplete = false
     private var backgroundSettingsOpen = false
     private val batterySettingsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {

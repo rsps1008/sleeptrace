@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.google.android.gms.location.SleepClassifyEvent
 import com.google.android.gms.location.SleepSegmentEvent
-import com.rsps1008.sleeptrace.data.SleepStore
+import com.rsps1008.sleeptrace.sleepDependencies
 import com.rsps1008.sleeptrace.motion.MotionService
 import com.rsps1008.sleeptrace.work.WorkScheduler
 import kotlinx.coroutines.CoroutineScope
@@ -17,7 +17,7 @@ class SleepUpdateReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val store = SleepStore(context)
+                val store = context.sleepDependencies().store
                 if (SleepSegmentEvent.hasEvents(intent)) {
                     store.appendSegments(SleepSegmentEvent.extractEvents(intent)
                         .filter { it.status != SleepSegmentEvent.STATUS_NOT_DETECTED }

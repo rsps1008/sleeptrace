@@ -31,11 +31,12 @@ data class HomeSnapshot(
 
 /** Owns homepage data loading so activity rendering stays separate from repository access. */
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
-    private val preferences = SleepPreferences(application)
-    private val store = SleepStore(application)
-    private val healthSync = HealthConnectSync(application)
-    private val motionSettings = MotionSettings(application)
-    private val backgroundAccess = BackgroundAccess(application)
+    private val dependencies = application.sleepDependencies()
+    private val preferences = dependencies.preferences
+    private val store = dependencies.store
+    private val healthSync = dependencies.healthSync
+    private val motionSettings = dependencies.motionSettings
+    private val backgroundAccess = dependencies.backgroundAccess
     private val mutableState = MutableStateFlow<HomeSnapshot?>(null)
     val state: StateFlow<HomeSnapshot?> = mutableState.asStateFlow()
 

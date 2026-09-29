@@ -26,6 +26,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.rsps1008.sleeptrace.MainActivity
+import com.rsps1008.sleeptrace.sleepDependencies
 import com.rsps1008.sleeptrace.data.SleepPreferences
 import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
@@ -76,7 +77,7 @@ class MotionService : Service(), SensorEventListener2 {
 
     override fun onCreate() {
         super.onCreate()
-        settings = MotionSettings(this)
+        settings = sleepDependencies().motionSettings
         store = MotionStore(this)
         sensors = getSystemService(SensorManager::class.java)
         // Wake-up FIFO can retain events while the CPU sleeps. Prefer it over non-wake-up sensors.
@@ -131,9 +132,9 @@ class MotionService : Service(), SensorEventListener2 {
 
     fun refreshConfiguration() {
         scope.launch(Dispatchers.IO) {
-            val prefs = SleepPreferences(this@MotionService)
+            val prefs = sleepDependencies().preferences
             val newSchedule = if (prefs.configured()) prefs.schedule() else null
-            val classifications = SleepStore(this@MotionService).samples()
+            val classifications = sleepDependencies().store.samples()
             handler.post { if (!stopped && !destroyed) configure(newSchedule, classifications) }
         }
     }

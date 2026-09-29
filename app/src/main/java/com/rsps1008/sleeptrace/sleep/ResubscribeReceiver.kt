@@ -6,9 +6,8 @@ import android.content.Intent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import com.rsps1008.sleeptrace.data.SleepPreferences
-import com.rsps1008.sleeptrace.motion.MotionSettings
 import com.rsps1008.sleeptrace.motion.MotionService
+import com.rsps1008.sleeptrace.sleepDependencies
 import com.rsps1008.sleeptrace.work.WorkScheduler
 
 class ResubscribeReceiver : BroadcastReceiver() {
@@ -19,8 +18,9 @@ class ResubscribeReceiver : BroadcastReceiver() {
             try {
                 SleepTracker.resubscribeIfConfigured(context)
                 WorkScheduler.schedule(context)
-                val settings = MotionSettings(context)
-                if (SleepPreferences(context).configured() && settings.enabled && SleepTracker.hasActivityRecognition(context)) {
+                val dependencies = context.sleepDependencies()
+                val settings = dependencies.motionSettings
+                if (dependencies.preferences.configured() && settings.enabled && SleepTracker.hasActivityRecognition(context)) {
                     runCatching { MotionService.start(context) }.onFailure {
                         settings.status = "系統暫時限制背景啟動，開啟 App 後會自動恢復"
                     }
