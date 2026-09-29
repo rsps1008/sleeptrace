@@ -731,21 +731,40 @@ class MainActivity : AppCompatActivity() {
 
     private fun chooseSchedule(existing: SleepSchedule? = null) {
         val start = existing?.startMinute ?: 0
-        spinnerTimePicker().apply {
+        val end = existing?.endMinute ?: 540
+        val startPicker = spinnerTimePicker().apply {
             setIs24HourView(true); hour = start / 60; minute = start % 60
-            MaterialAlertDialogBuilder(this@MainActivity).setTitle("開始偵測時間").setView(this)
-                .setPositiveButton("下一步") { _, _ -> chooseEndSchedule(hour * 60 + minute, existing?.endMinute ?: 540) }
-                .setNegativeButton("取消", null).show()
         }
-    }
-
-    private fun chooseEndSchedule(startMinute: Int, currentEnd: Int) {
-        spinnerTimePicker().apply {
-            setIs24HourView(true); hour = currentEnd / 60; minute = currentEnd % 60
-            MaterialAlertDialogBuilder(this@MainActivity).setTitle("結束偵測時間").setView(this)
-                .setPositiveButton("儲存") { _, _ -> setupSchedule(SleepSchedule(startMinute, hour * 60 + minute)) }
-                .setNegativeButton("取消", null).show()
+        val endPicker = spinnerTimePicker().apply {
+            setIs24HourView(true); hour = end / 60; minute = end % 60
         }
+        val range = TextView(this).apply {
+            textSize = 14f
+            setTextColor(color(R.color.text_secondary))
+            setPadding(dp(24), dp(8), dp(24), dp(4))
+        }
+        fun updateRange() {
+            val startMinute = startPicker.hour * 60 + startPicker.minute
+            val endMinute = endPicker.hour * 60 + endPicker.minute
+            range.text = "每日 ${SleepSchedule(startMinute, endMinute).label()}" +
+                if (endMinute <= startMinute) "（跨午夜）" else ""
+        }
+        startPicker.setOnTimeChangedListener { _, _, _ -> updateRange() }
+        endPicker.setOnTimeChangedListener { _, _, _ -> updateRange() }
+        updateRange()
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(range)
+            addView(TextView(this@MainActivity).apply { text = "開始"; setPadding(dp(24), dp(8), dp(24), 0) })
+            addView(startPicker)
+            addView(TextView(this@MainActivity).apply { text = "結束"; setPadding(dp(24), dp(8), dp(24), 0) })
+            addView(endPicker)
+        }
+        MaterialAlertDialogBuilder(this).setTitle("每日偵測時段").setView(content)
+            .setPositiveButton("儲存") { _, _ ->
+                setupSchedule(SleepSchedule(startPicker.hour * 60 + startPicker.minute, endPicker.hour * 60 + endPicker.minute))
+            }
+            .setNegativeButton("取消", null).show()
     }
 
     private fun setupSchedule(schedule: SleepSchedule) = lifecycleScope.launch {
