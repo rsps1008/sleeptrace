@@ -16,14 +16,18 @@ fun normalizedAwake(start: Long, end: Long, input: List<UsageInterval>): List<Us
     return result
 }
 
-data class SleepPart(val start: Long, val end: Long, val awake: Boolean)
+enum class SleepStage { AWAKE, SLEEPING }
+
+data class SleepPart(val start: Long, val end: Long, val stage: SleepStage) {
+    val awake: Boolean get() = stage == SleepStage.AWAKE
+}
 
 fun sleepParts(session: SleepSession): List<SleepPart> = buildList {
     var cursor = session.startMillis
     normalizedAwake(session.startMillis, session.endMillis, session.awakeIntervals).forEach {
-        if (it.startMillis > cursor) add(SleepPart(cursor, it.startMillis, false))
-        add(SleepPart(it.startMillis, it.endMillis, true))
+        if (it.startMillis > cursor) add(SleepPart(cursor, it.startMillis, SleepStage.SLEEPING))
+        add(SleepPart(it.startMillis, it.endMillis, SleepStage.AWAKE))
         cursor = it.endMillis
     }
-    if (cursor < session.endMillis) add(SleepPart(cursor, session.endMillis, false))
+    if (cursor < session.endMillis) add(SleepPart(cursor, session.endMillis, SleepStage.SLEEPING))
 }

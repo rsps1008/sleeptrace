@@ -13,6 +13,8 @@ import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.sleepDependencies
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepUsageSnapshot
+import com.rsps1008.sleeptrace.sleep.SyncState
+import com.rsps1008.sleeptrace.sleep.SleepStage
 import kotlinx.coroutines.CancellationException
 import java.io.IOException
 import com.rsps1008.sleeptrace.sleep.sleepParts
@@ -45,18 +47,18 @@ class HealthConnectSync(private val context: Context) {
         if (!available()) return false
         return HealthConnectClient.getOrCreate(context).permissionController.getGrantedPermissions().containsAll(writePermissions)
     }
-    private suspend fun sync(session: SleepSession) {
-        check(available()) { "Health Connect 無法使用" }
-        check(hasWritePermission()) { "尚未授予 Health Connect 睡眠寫入權限" }
+    private fun toHealthRecord(session: SleepSession): SleepSessionRecord {
         val zone = ZoneId.systemDefault().rules
         val start = Instant.ofEpochMilli(session.startMillis)
         val end = Instant.ofEpochMilli(session.endMillis)
         val stages = sleepParts(session).map {
             Stage(startTime = Instant.ofEpochMilli(it.start), endTime = Instant.ofEpochMilli(it.end),
-                stage = if (it.awake) SleepSessionRecord.STAGE_TYPE_AWAKE else SleepSessionRecord.STAGE_TYPE_SLEEPING)
+                stage = when (it.stage) {
+                    SleepStage.AWAKE -> SleepSessionRecord.STAGE_TYPE_AWAKE
+                    SleepStage.SLEEPING -> SleepSessionRecord.STAGE_TYPE_SLEEPING
+                })
         }
-        HealthConnectClient.getOrCreate(context).insertRecords(
-            listOf(SleepSessionRecord(
+        return SleepSessionRecord(
                 startTime = start, startZoneOffset = zone.getOffset(start),
                 endTime = end, endZoneOffset = zone.getOffset(end),
                 title = "眠迹 SleepTrace", notes = "以手機推估；${session.reason}", stages = stages,
@@ -65,8 +67,7 @@ class HealthConnectSync(private val context: Context) {
                     clientRecordVersion = session.revision,
                     device = Device(type = Device.TYPE_PHONE)
                 )
-            ))
-        )
+            )
     }
 
     suspend fun syncPending(): Boolean {
@@ -85,20 +86,26 @@ class HealthConnectSync(private val context: Context) {
         }
         SleepUsageSnapshot(context).applyPending(store)
         val failures = mutableListOf<Throwable>()
-        val complete = AutomaticSyncQueue.drain(store::sessions, store::updateIfCurrent, failures::add, ::sync)
+        val client = HealthConnectClient.getOrCreate(context)
+        val complete = AutomaticSyncQueue.drainBatch(
+            read = { store.sessions(states = setOf(SyncState.PENDING, SyncState.FAILED, SyncState.SYNCING)) },
+            update = store::updateIfCurrent,
+            onFailure = failures::add,
+            writeBatch = { sessions -> client.insertRecords(sessions.map(::toHealthRecord)) }
+        )
         if (complete) return SyncOutcome.SUCCESS
         if (failures.isEmpty() || failures.all(::isTransientSyncError)) return SyncOutcome.RETRY
         return SyncOutcome.FAILURE
     }
 
     private suspend fun retireSuperseded(store: SleepStore): SyncOutcome {
-        store.sessions().filter { it.state == com.rsps1008.sleeptrace.sleep.SyncState.RETIRED }.forEach { session ->
+        store.sessions(states = setOf(SyncState.RETIRED)).forEach { session ->
             try {
                 HealthConnectClient.getOrCreate(context).deleteRecords(
                     SleepSessionRecord::class, emptyList(), listOf(session.id)
                 )
                 store.updateIfCurrent(session, session.copy(
-                    state = com.rsps1008.sleeptrace.sleep.SyncState.SKIPPED,
+                    state = SyncState.SKIPPED,
                     syncError = null,
                     reason = "已由較完整的睡眠紀錄取代，舊的 Health Connect 資料已移除"
                 ))

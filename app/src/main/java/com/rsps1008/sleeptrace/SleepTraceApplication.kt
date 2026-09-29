@@ -2,6 +2,8 @@ package com.rsps1008.sleeptrace
 
 import android.app.Application
 import android.content.Context
+import com.google.android.material.color.DynamicColors
+import com.google.android.material.color.DynamicColorsOptions
 import com.rsps1008.sleeptrace.data.SleepPreferences
 import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.health.HealthConnectSync
@@ -11,6 +13,16 @@ import com.rsps1008.sleeptrace.power.BackgroundAccess
 
 /** Application-scoped dependency graph shared by UI, receivers, services, and workers. */
 class SleepTraceApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        DynamicColors.applyToActivitiesIfAvailable(
+            this,
+            DynamicColorsOptions.Builder()
+                .setThemeOverlay(com.google.android.material.R.style.ThemeOverlay_Material3_DynamicColors_DayNight)
+                .build()
+        )
+    }
+
     val dependencies by lazy { SleepDependencies(this) }
 }
 

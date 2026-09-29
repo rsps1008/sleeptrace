@@ -6,9 +6,8 @@ import com.rsps1008.sleeptrace.data.SleepStore
 /** Applies phone-use deductions once, immediately before an automatic upload. */
 class SleepUsageSnapshot(private val context: Context) {
     fun applyPending(store: SleepStore) {
-        val pending = store.sessions().filter {
-            !it.usageSnapshotApplied && it.state in setOf(SyncState.PENDING, SyncState.FAILED)
-        }
+        val pending = store.sessions(states = setOf(SyncState.PENDING, SyncState.FAILED))
+            .filterNot { it.usageSnapshotApplied }
         if (pending.isEmpty()) return
 
         val available = UsageMonitor.hasAccess(context)

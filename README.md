@@ -31,9 +31,11 @@ App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 And
 
 睡眠分類是 Google Play services 定期提供的推估，不是即時或確定的入睡事件；官方舉例可能約每 10 分鐘回報。原始分類、區段與本機睡眠紀錄都在同一個 SQLite 資料庫中以交易保存；原始事件有時間索引與 14 天保留期，既有 SharedPreferences JSON 首次讀取後會遷移並移除，不再為每筆分類重寫完整 JSON。Sleep API 區段會先裁切到每日偵測時段；手機使用只會在已有 Health Connect 寫入權限、準備上傳待同步候選時合併查詢一次，結果會保存，因此週期分析、時間修正及同步重試不會重複掃描 UsageStats 或重算扣除時間。App 只接受目前時段內、最近 20 分鐘且信心值至少 80 的分類，觸發後持續取樣到時段結束。若時段開始已過 2 小時仍無分類，且螢幕已持續關閉至少 2 小時，會啟動同樣 1 Hz 的低頻動作備援；它只避免整夜資料空窗，並不能證明使用者已靜止或入睡。這些門檻都是未校準的工程規則，可能延後啟動或整晚未觸發；缺少的前段動作資料不會補成安靜，最終仍可使用 Sleep API 區段及手機使用紀錄推估。
 
-資料庫使用 SQLite WAL；歷史 session 的同步狀態、版本與時間修正都以 id 做單筆 upsert，不會因單筆狀態變更清空並重建整張 `sessions` 表。`replaceSessions` 僅保留給舊資料遷移及完整重算。首頁只查詢最新一筆 classification，前景服務只查詢最近 20 分鐘的樣本；`MotionStore` 由 `SleepTraceApplication` 共用，避免服務與背景整理各自持有 SQLite helper。首頁骨架在 Activity 建立時建立一次，資料刷新只更新既有 View 的文字、Badge 與 visibility。
+資料庫使用 SQLite WAL；歷史 session 的同步狀態、版本與時間修正都以 id 做單筆 upsert，不會因單筆狀態變更清空並重建整張 `sessions` 表。`replaceSessions` 僅保留給舊資料遷移及完整重算。`sessions` 依開始時間與同步狀態建索引，支援 limit／offset 及只讀摘要欄位；首頁只讀最新 5 筆（最近睡眠加最多 4 筆歷史），不解析清醒區間 JSON。歷史紀錄用 RecyclerView 分頁載入，選取後才按 ID 讀取該筆詳情與清醒區間。首頁只查詢最新一筆 classification，前景服務只查詢最近 20 分鐘的樣本；`MotionStore` 由 `SleepTraceApplication` 共用，避免服務與背景整理各自持有 SQLite helper。首頁骨架在 Activity 建立時建立一次，資料刷新只更新既有 View 的文字、Badge 與 visibility。
 
 背景服務只監聽 `ACTION_BATTERY_LOW`／`ACTION_BATTERY_OKAY` 及接／斷電事件；精確電量仍在配置刷新時以一次性的 `ACTION_BATTERY_CHANGED` 快照取得，不因每 1% 電量變化持續喚醒。背景整理對 Sleep API segment 使用時間範圍查詢、分類只取最近 48 小時；未完成同步的舊 session 仍會擴大 segment 起點以保留匹配能力。`MotionStore.append` 會在單一交易內先讀出批次涵蓋範圍的既有分鐘，避免逐筆建立 Cursor。首頁的 DataStore、Health Connect 權限與 Android 背景狀態讀取也由 `HomeViewModel` 的 I/O 工作收集後一次更新畫面。
+
+Health Connect 待同步 session 會先驗證、保存 `SYNCING` 狀態，再以多筆 `SleepSessionRecord` 批次寫入；每個請求最多 1,000 筆，較大的佇列切成多批。每批失敗只回復該批為 `FAILED`，保留穩定 client ID／revision 供安全重試。內部 `SleepStage` enum 為後續擴充保留型別空間，但目前只產生／上傳 AWAKE 與 SLEEPING。時間軸顏色取自主題 primary、error 與次要文字色，Android 12 以上可套用系統動態色彩。自動放置以局部靜止分鐘 RMS 的低分位數估計底噪並調整相對門檻；絕對下限與現有時長條件仍保留，這只是尚未跨機型／床墊校準的保守工程啟發式，不能視為精度提升證明。不會因預留擴充而宣稱深眠、淺眠或 REM。
 
 依感測器最小取樣間隔調整實際請求；批次延遲以 FIFO 容量 × 取樣間隔 × 80% 換算成 Android API 要求的微秒值，不另設 App 時間上限。若換算結果超過 API `Int` 可表示範圍，才限制為 `Int.MAX_VALUE`。以上是要求值，Android／硬體可能提前回報或以不同頻率取樣。優先使用帶 FIFO 的 wake-up accelerometer；非 wake-up 或無 FIFO 的感測器在 CPU 休眠時可能漏資料，內部保留診斷狀態，不要求使用者處理。接電時也維持 1 Hz，不會提高取樣頻率。
 
@@ -50,7 +52,7 @@ App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 And
 - 舊版需要人工處理的紀錄會自動轉入同步佇列。完全沒有候選、有效睡眠不足 30 分鐘或舊紀錄缺少已扣除手機使用的時間明細，App 會自動略過，不要求人工裁決。尚未授予使用情況存取權時，App 使用其餘資料推估並保留限制說明。
 - 新候選若跨越多筆破碎歷史紀錄，會保留其中一筆穩定 ID 作為新版；其餘已同步的 ID 先從 Health Connect 移除，成功後才送出新版，避免因保守跳過而長期不更新或留下重複資料。
 - 手機使用區段在本機扣除，並以 Health Connect 的 AWAKE 階段寫入；其他部分為 SLEEPING，不產生深眠／淺眠／REM。
-- 首頁不放感測診斷圖；點開單筆睡眠詳情時，會顯示簡約時段條，紫色為睡眠範圍、紅色為已扣除的手機使用／清醒區間。
+- 首頁不放感測診斷圖；點開單筆睡眠詳情時，會顯示簡約時段條，主題 primary 色為睡眠範圍、error 色為已扣除的手機使用／清醒區間。
 - 睡眠詳情與時間修正對話框由 `SleepDialogHelper` 集中管理；時間修正同一頁同時選擇入睡／醒來時間並即時計算總時長。歷史卡片超過摘要上限時可用「查看全部紀錄」開啟可滾動清單。
 - 保留紀錄 ID 與歷史。睡眠起訖／清醒時間變動時增加 `clientRecordVersion` 並更新同一筆；內容相同不重傳，手動修正不被自動推估覆蓋。同步進行中若資料改版，舊請求不能覆寫新版。
 - 同步暫時失敗時由 WorkManager 自動重試，採 10 分鐘起的指數退避；系統可能延後背景執行。永久性錯誤回傳 failure，不再無限喚醒裝置；程序中斷後會以相同 ID／版本恢復。缺少 Health Connect 授權時保留紀錄，授權後或下次 App 開啟、定期工作時自動繼續。Android 的系統授權不能由 App 自行同意。
@@ -77,6 +79,8 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 2026-09-29 本輪資料庫／UI／同步效能更新已通過 43 個 JVM 測試、Lint（無 issue）、Debug APK 及 Android 測試 APK 建置；未在裝置執行會改動資料或權限的 instrumentation test。已涵蓋單筆 session 更新、最新／近期 classification 查詢、WAL 共用資料庫、固定首頁骨架、DST 跨日計算、零配置動作差值、校時補償及 Worker 暫態／永久錯誤分流的程式實作。真實 Health Connect 寫入／刪除、Google 分類延遲、Doze／OEM 背景行為、FIFO 與整夜耗電仍需在可丟棄模擬器或受控實機另外驗證。
 
 2026-09-29 背景與 UI 查詢優化：完成低電量事件監聽、SleepReconciler 時間範圍查詢、SleepStore 主鍵修正、MotionStore 批次既有資料查詢、HomeViewModel I/O 卸載、時間條圓角裁切、單一時間修正對話框及完整歷史清單入口。`testDebugUnitTest`、`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest` 均通過；未在裝置執行會修改資料／權限的 instrumentation test，真實電量喚醒次數、OEM 背景行為與整夜耗電仍未量測。
+
+2026-09-29 session 歷史與同步擴展性更新：首頁改查最新 5 筆摘要並延後載入清醒明細；完整歷史使用 RecyclerView 分頁；session 加入排序／狀態索引；Health Connect 改批次寫入（最多 1,000 筆／批）；自動放置加入局部底噪相對門檻、邊界鬧鐘加安全回退、時間軸套用主題與動態色彩。43 個 JVM 測試通過、Lint 零 issue、Debug APK 與 Android 測試 APK 建置成功。未執行裝置 instrumentation／實際 Health Connect 寫入或 UI 主題目視驗證；底噪門檻仍未以不同手機與床墊校準，深淺眠分期未實作。
 
 最新版也已將睡眠 session、Sleep API segment 與分類統一到 `sleep_events.db`，首頁資料由 `HomeViewModel` 載入。舊 JSON 的實際升級遷移測試已編譯，但本機連接的裝置都是實機，沒有執行會改動裝置資料的測試。
 

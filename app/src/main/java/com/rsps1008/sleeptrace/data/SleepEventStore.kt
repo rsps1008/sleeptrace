@@ -14,7 +14,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Indexed, transactional storage for raw Sleep API events and local sleep records. */
-class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 3) {
+class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 5) {
     init {
         setWriteAheadLoggingEnabled(true)
     }
@@ -29,10 +29,14 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         db.execSQL("CREATE TABLE samples (time INTEGER PRIMARY KEY, confidence INTEGER NOT NULL, motion INTEGER NOT NULL, light INTEGER NOT NULL)")
         createSessions(db)
         createSegmentIndex(db)
+        createSessionIndex(db)
+        createSessionStateIndex(db)
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createSessions(db)
         if (oldVersion < 3) createSegmentIndex(db)
+        if (oldVersion < 4) createSessionIndex(db)
+        if (oldVersion < 5) createSessionStateIndex(db)
     }
 
     private fun createSessions(db: SQLiteDatabase) = db.execSQL("""
@@ -46,6 +50,14 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
 
     private fun createSegmentIndex(db: SQLiteDatabase) = db.execSQL(
         "CREATE INDEX IF NOT EXISTS segments_end_start_idx ON segments(end, start)"
+    )
+
+    private fun createSessionIndex(db: SQLiteDatabase) = db.execSQL(
+        "CREATE INDEX IF NOT EXISTS sessions_start_idx ON sessions(start DESC)"
+    )
+
+    private fun createSessionStateIndex(db: SQLiteDatabase) = db.execSQL(
+        "CREATE INDEX IF NOT EXISTS sessions_state_idx ON sessions(state)"
     )
 
     fun import(segments: List<SleepSegment>, samples: List<ClassificationSample>) { append(segments, samples) }
@@ -97,15 +109,41 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         sessions.forEach { insertSession(it) }
     }
     fun upsertSession(session: SleepSession) = writableDatabase.transaction { insertSession(session) }
-    fun session(id: String): SleepSession? = readableDatabase.query(
-        "sessions", null, "id = ?", arrayOf(id), null, null, null, "1"
-    ).use { c -> if (c.moveToFirst()) c.readSession() else null }
-    fun sessions(): List<SleepSession> = readableDatabase.query("sessions", null, null, null, null, null, "start DESC").use { c ->
-        buildList {
-            while (c.moveToNext()) add(c.readSession())
+    fun session(id: String, includeAwakeIntervals: Boolean = true): SleepSession? = readableDatabase.query(
+        "sessions", if (includeAwakeIntervals) null else SESSION_SUMMARY_COLUMNS,
+        "id = ?", arrayOf(id), null, null, null, "1"
+    ).use { c -> if (c.moveToFirst()) c.readSession(includeAwakeIntervals) else null }
+    fun sessions(
+        limit: Int? = null,
+        offset: Int = 0,
+        includeAwakeIntervals: Boolean = true,
+        states: Set<SyncState>? = null
+    ): List<SleepSession> {
+        require(limit == null || limit >= 0) { "limit must be non-negative" }
+        require(offset >= 0) { "offset must be non-negative" }
+        val stateList = states?.sortedBy { it.name }
+        val selection = when {
+            stateList == null -> null
+            stateList.isEmpty() -> "0"
+            else -> "state IN (${stateList.joinToString(",") { "?" }})"
+        }
+        val limitClause = when {
+            limit != null && offset > 0 -> "$limit OFFSET $offset"
+            limit != null -> limit.toString()
+            offset > 0 -> "-1 OFFSET $offset"
+            else -> null
+        }
+        val columns = if (includeAwakeIntervals) null else SESSION_SUMMARY_COLUMNS
+        return readableDatabase.query(
+            "sessions", columns, selection, stateList?.map { it.name }?.toTypedArray(),
+            null, null, "start DESC, id DESC", limitClause
+        ).use { c ->
+            buildList {
+                while (c.moveToNext()) add(c.readSession(includeAwakeIntervals))
+            }
         }
     }
-    private fun android.database.Cursor.readSession(): SleepSession = SleepSession(
+    private fun android.database.Cursor.readSession(includeAwakeIntervals: Boolean = true): SleepSession = SleepSession(
         id = getString(getColumnIndexOrThrow("id")),
         startMillis = getLong(getColumnIndexOrThrow("start")),
         endMillis = getLong(getColumnIndexOrThrow("end")),
@@ -116,9 +154,11 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         manuallyEdited = getInt(getColumnIndexOrThrow("manual")) != 0,
         syncError = getString(getColumnIndexOrThrow("error")),
         revision = getLong(getColumnIndexOrThrow("revision")),
-        awakeIntervals = JSONArray(getString(getColumnIndexOrThrow("awakeIntervals"))).let { array ->
-            List(array.length()) { index -> array.getJSONObject(index).let { UsageInterval(it.getLong("start"), it.getLong("end")) } }
-        },
+        awakeIntervals = if (includeAwakeIntervals) {
+            JSONArray(getString(getColumnIndexOrThrow("awakeIntervals"))).let { array ->
+                List(array.length()) { index -> array.getJSONObject(index).let { UsageInterval(it.getLong("start"), it.getLong("end")) } }
+            }
+        } else emptyList(),
         usageSnapshotApplied = getInt(getColumnIndexOrThrow("usageSnapshotApplied")) != 0
     )
     private fun SQLiteDatabase.insertSession(item: SleepSession) {
@@ -131,5 +171,10 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             put("usageSnapshotApplied", if (item.usageSnapshotApplied) 1 else 0)
         }, SQLiteDatabase.CONFLICT_REPLACE)
     }
-    companion object { private const val RETENTION = 14L * 24 * 60 * 60 * 1000 }
+    companion object {
+        private val SESSION_SUMMARY_COLUMNS = arrayOf(
+            "id", "start", "end", "confidence", "awake", "state", "reason", "manual", "error", "revision", "usageSnapshotApplied"
+        )
+        private const val RETENTION = 14L * 24 * 60 * 60 * 1000
+    }
 }

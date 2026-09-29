@@ -12,6 +12,12 @@ import kotlinx.coroutines.sync.withLock
 object AutomaticSyncQueue {
     private val mutex = Mutex()
     private fun eligible(session: SleepSession) = session.state in setOf(SyncState.PENDING, SyncState.FAILED, SyncState.SYNCING)
+    private fun valid(session: SleepSession): Boolean {
+        val knownAwake = normalizedAwake(session.startMillis, session.endMillis, session.awakeIntervals)
+            .sumOf { it.endMillis - it.startMillis }
+        return session.endMillis > session.startMillis &&
+            session.durationMillis >= SleepAnalyzer.MINIMUM_SLEEP_MILLIS && knownAwake == session.awakeMillis
+    }
 
     suspend fun drain(
         read: () -> List<SleepSession>,
@@ -26,8 +32,7 @@ object AutomaticSyncQueue {
         write: suspend (SleepSession) -> Unit
     ): Boolean = mutex.withLock {
         read().filter(::eligible).forEach { session ->
-            val knownAwake = normalizedAwake(session.startMillis, session.endMillis, session.awakeIntervals).sumOf { it.endMillis - it.startMillis }
-            if (session.endMillis <= session.startMillis || session.durationMillis < SleepAnalyzer.MINIMUM_SLEEP_MILLIS || knownAwake != session.awakeMillis) {
+            if (!valid(session)) {
                 update(session, session.copy(state = SyncState.SKIPPED, syncError = null,
                     reason = "App 已自動略過：有效睡眠不足 30 分鐘或舊資料缺少手機使用明細"))
                 return@forEach
@@ -46,4 +51,44 @@ object AutomaticSyncQueue {
         }
         read().none(::eligible)
     }
+
+    /** Prepares all valid rows before one remote write; stable IDs and revisions make retries idempotent. */
+    suspend fun drainBatch(
+        read: () -> List<SleepSession>,
+        update: (SleepSession, SleepSession) -> Boolean,
+        onFailure: (Throwable) -> Unit,
+        writeBatch: suspend (List<SleepSession>) -> Unit
+    ): Boolean = mutex.withLock {
+        val validSessions = read().filter(::eligible).filter { session ->
+            if (valid(session)) true else {
+                update(session, session.copy(
+                    state = SyncState.SKIPPED,
+                    syncError = null,
+                    reason = "App 已自動略過：有效睡眠不足 30 分鐘或舊資料缺少手機使用明細"
+                ))
+                false
+            }
+        }
+
+        for (batch in validSessions.chunked(MAX_BATCH_SIZE)) {
+            val writing = batch.mapNotNull { session ->
+                val candidate = session.copy(state = SyncState.SYNCING, syncError = null)
+                candidate.takeIf { update(session, candidate) }
+            }
+            if (writing.isEmpty()) continue
+            try {
+                writeBatch(writing)
+                writing.forEach { update(it, it.copy(state = SyncState.SYNCED)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                onFailure(error)
+                writing.forEach { update(it, it.copy(state = SyncState.FAILED, syncError = error.message ?: "同步暫時失敗")) }
+                break
+            }
+        }
+        read().none(::eligible)
+    }
+
+    private const val MAX_BATCH_SIZE = 1_000
 }

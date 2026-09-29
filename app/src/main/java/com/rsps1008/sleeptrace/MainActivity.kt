@@ -853,7 +853,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSession(session: SleepSession) {
-        SleepDialogHelper.showSession(this, session, ::formatDuration) { editSession(session) }
+        loadSessionDetails(session.id)
+    }
+
+    private fun loadSessionDetails(id: String) {
+        lifecycleScope.launch {
+            val session = withContext(Dispatchers.IO) { store.session(id) } ?: return@launch
+            SleepDialogHelper.showSession(this@MainActivity, session, ::formatDuration) { editSession(session) }
+        }
     }
 
     private fun editSession(session: SleepSession) {
@@ -870,7 +877,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAllSessions() {
-        SleepDialogHelper.showAllSessions(this, renderedSessions, ::formatDuration, ::showSession)
+        SleepDialogHelper.showAllSessions(
+            context = this,
+            loadPage = { offset, limit -> store.sessions(limit, offset, includeAwakeIntervals = false) },
+            formatDuration = ::formatDuration,
+            onSelected = ::loadSessionDetails
+        )
     }
 
     private fun showMessage(text: String) = MaterialAlertDialogBuilder(this).setMessage(text).setPositiveButton("知道了", null).show()

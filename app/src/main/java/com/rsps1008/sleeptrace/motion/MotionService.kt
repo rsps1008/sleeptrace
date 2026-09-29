@@ -267,7 +267,8 @@ class MotionService : Service(), SensorEventListener2 {
             listOf(value.startMinute, value.endMinute, value.startMinute + SleepClassificationTrigger.FALLBACK_DELAY_MILLIS.toInt() / MINUTE_MS.toInt()).map { minute ->
                 today.plusDays(day).atStartOfDay().plusMinutes(minute.toLong()).atZone(zone).toInstant().toEpochMilli()
             }
-        }.filter { it > now }.min()
+        }.filter { it > now }.minOrNull()
+            ?: today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
         // Inexact idle-aware boundary only; no periodic wake-up and no exact-alarm permission.
         alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, boundaryIntent())
     }

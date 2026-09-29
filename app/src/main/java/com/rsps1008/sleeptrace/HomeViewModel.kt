@@ -42,7 +42,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             HomeSnapshot(
                 configured = configured,
                 schedule = schedule,
-                sessions = store.sessions(),
+                sessions = store.sessions(limit = HOME_SESSION_LIMIT, includeAwakeIntervals = false),
                 latestClassification = store.latestSample(),
                 healthGranted = healthSync.hasWritePermission(),
                 recordingEnabled = motionSettings.enabled,
@@ -51,5 +51,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         mutableState.value = snapshot
+    }
+
+    private companion object {
+        const val HOME_SESSION_LIMIT = 5
     }
 }

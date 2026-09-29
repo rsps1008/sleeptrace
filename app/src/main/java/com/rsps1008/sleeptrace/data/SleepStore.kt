@@ -34,7 +34,20 @@ class SleepStore(context: Context) {
         )
     }.sortedByDescending { it.startMillis }
 
-    fun sessions(): List<SleepSession> { migrateSessions(); return eventStore.sessions() }
+    fun sessions(
+        limit: Int? = null,
+        offset: Int = 0,
+        includeAwakeIntervals: Boolean = true,
+        states: Set<SyncState>? = null
+    ): List<SleepSession> {
+        migrateSessions()
+        return eventStore.sessions(limit, offset, includeAwakeIntervals, states)
+    }
+
+    fun session(id: String, includeAwakeIntervals: Boolean = true): SleepSession? {
+        migrateSessions()
+        return eventStore.session(id, includeAwakeIntervals)
+    }
 
     fun saveSessions(sessions: List<SleepSession>) { migrateSessions(); eventStore.replaceSessions(sessions) }
     fun upsert(session: SleepSession) = synchronized(sessionLock) {

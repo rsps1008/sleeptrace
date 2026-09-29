@@ -7,12 +7,21 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.TimePicker
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepSessionTimelineView
 import java.time.Instant
 import java.time.ZoneId
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Keeps sizeable, stateful dialogs out of MainActivity while preserving the existing callbacks. */
 object SleepDialogHelper {
@@ -134,45 +143,156 @@ object SleepDialogHelper {
 
     fun showAllSessions(
         context: Context,
-        sessions: List<SleepSession>,
+        loadPage: (offset: Int, limit: Int) -> List<SleepSession>,
         formatDuration: (Long) -> String,
-        onSelected: (SleepSession) -> Unit
+        onSelected: (String) -> Unit
     ) {
-        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        val scroll = ScrollView(context).apply { addView(list) }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         val dialog = MaterialAlertDialogBuilder(context)
-            .setTitle("全部睡眠紀錄（${sessions.size} 筆）")
-            .setView(scroll)
+            .setTitle("全部睡眠紀錄")
             .setPositiveButton("關閉", null)
             .create()
-        sessions.forEachIndexed { index, session ->
-            if (index > 0) list.addView(View(context).apply {
-                setBackgroundColor(ContextCompat.getColor(context, R.color.card_stroke))
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 1))
+
+        lateinit var adapter: SessionHistoryAdapter
+        fun loadNextPage() {
+            if (adapter.loading || !adapter.hasMore) return
+            adapter.setLoading()
+            val offset = adapter.sessionCount
+            scope.launch {
+                try {
+                    val page = withContext(Dispatchers.IO) { loadPage(offset, HISTORY_PAGE_SIZE) }
+                    adapter.append(page)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    adapter.setLoadFailed()
+                }
+            }
+        }
+        adapter = SessionHistoryAdapter(context, formatDuration, ::loadNextPage) { id ->
+            dialog.dismiss()
+            onSelected(id)
+        }
+        val list = RecyclerView(context).apply {
+            layoutManager = LinearLayoutManager(context)
+            this.adapter = adapter
+            setHasFixedSize(true)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 440)
+            )
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    val manager = recyclerView.layoutManager as? LinearLayoutManager ?: return
+                    if (manager.findLastVisibleItemPosition() >= adapter.itemCount - PREFETCH_DISTANCE) loadNextPage()
+                }
             })
-            list.addView(LinearLayout(context).apply {
+        }
+        dialog.setView(list)
+        dialog.setOnDismissListener { scope.cancel() }
+        dialog.show()
+        loadNextPage()
+    }
+
+    private class SessionHistoryAdapter(
+        private val context: Context,
+        private val formatDuration: (Long) -> String,
+        private val loadMore: () -> Unit,
+        private val onSelected: (String) -> Unit
+    ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        private val sessions = mutableListOf<SleepSession>()
+        var hasMore = true
+            private set
+        var loading = false
+            private set
+        private var loadFailed = false
+        val sessionCount: Int get() = sessions.size
+
+        override fun getItemCount() = sessions.size + if (hasMore || loadFailed) 1 else 0
+        override fun getItemViewType(position: Int) = if (position < sessions.size) TYPE_SESSION else TYPE_FOOTER
+
+        override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            if (viewType == TYPE_FOOTER) {
+                return FooterHolder(TextView(context).apply {
+                    gravity = android.view.Gravity.CENTER
+                    setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 16))
+                    setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
+                }, loadMore)
+            }
+            val title = TextView(context).apply {
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(context, R.color.text_primary))
+            }
+            val summary = TextView(context).apply {
+                textSize = 13f
+                setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
+                setPadding(0, dp(context, 3), 0, 0)
+            }
+            val row = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 isClickable = true
                 isFocusable = true
                 setPadding(dp(context, 16), dp(context, 12), dp(context, 16), dp(context, 12))
-                addView(TextView(context).apply {
-                    text = session.title()
-                    textSize = 15f
-                    setTextColor(ContextCompat.getColor(context, R.color.text_primary))
-                })
-                addView(TextView(context).apply {
-                    text = "睡眠 ${formatDuration(session.durationMillis)} · 手機使用 ${formatDuration(session.awakeMillis)}"
-                    textSize = 13f
-                    setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
-                    setPadding(0, dp(context, 3), 0, 0)
-                })
-                setOnClickListener {
-                    dialog.dismiss()
-                    onSelected(session)
-                }
-            })
+                addView(title)
+                addView(summary)
+            }
+            return SessionHolder(row, title, summary, onSelected)
         }
-        dialog.show()
+
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+            if (holder is FooterHolder) {
+                holder.bind(if (loading) "載入中…" else if (loadFailed) "讀取失敗，點此重試" else "載入更多紀錄")
+            } else if (holder is SessionHolder) {
+                holder.bind(sessions[position], formatDuration)
+            }
+        }
+
+        fun setLoading() {
+            loading = true
+            loadFailed = false
+            notifyDataSetChanged()
+        }
+
+        fun append(page: List<SleepSession>) {
+            sessions.addAll(page)
+            hasMore = page.size >= HISTORY_PAGE_SIZE
+            loading = false
+            loadFailed = false
+            notifyDataSetChanged()
+        }
+
+        fun setLoadFailed() {
+            loading = false
+            loadFailed = true
+            hasMore = true
+            notifyDataSetChanged()
+        }
+
+        private class SessionHolder(
+            view: View,
+            private val title: TextView,
+            private val summary: TextView,
+            private val onSelected: (String) -> Unit
+        ) : RecyclerView.ViewHolder(view) {
+            fun bind(session: SleepSession, formatDuration: (Long) -> String) {
+                title.text = session.title()
+                summary.text = "睡眠 ${formatDuration(session.durationMillis)} · 手機使用 ${formatDuration(session.awakeMillis)}"
+                itemView.setOnClickListener { onSelected(session.id) }
+            }
+        }
+
+        private class FooterHolder(view: View, private val onRetry: () -> Unit) : RecyclerView.ViewHolder(view) {
+            fun bind(text: String) {
+                (itemView as TextView).text = text
+                itemView.setOnClickListener { onRetry() }
+                itemView.isClickable = text == "讀取失敗，點此重試" || text == "載入更多紀錄"
+                itemView.isFocusable = itemView.isClickable
+            }
+        }
+
+        companion object {
+            private const val TYPE_SESSION = 0
+            private const val TYPE_FOOTER = 1
+        }
     }
 
     private fun label(context: Context, text: String) = TextView(context).apply {
@@ -192,4 +312,6 @@ object SleepDialogHelper {
     private fun dp(context: Context, value: Int) = (value * context.resources.displayMetrics.density).toInt()
 
     private const val MINIMUM_EDIT_MILLIS = 30 * 60 * 1000L
+    private const val HISTORY_PAGE_SIZE = 40
+    private const val PREFETCH_DISTANCE = 6
 }
