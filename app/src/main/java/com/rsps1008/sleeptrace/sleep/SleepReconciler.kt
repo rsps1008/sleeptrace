@@ -15,7 +15,6 @@ class SleepReconciler(private val context: Context) {
         val preferences = SleepPreferences(context)
         if (!preferences.configured() || !MotionSettings(context).enabled) return@withLock
         val store = SleepStore(context)
-        val usageAvailable = UsageMonitor.hasAccess(context)
         val schedule = preferences.schedule()
         val now = System.currentTimeMillis()
         val analysisStart = now - RECENT_ANALYSIS_MILLIS
@@ -26,19 +25,13 @@ class SleepReconciler(private val context: Context) {
         val segments = allSegments.filter { segment ->
             segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
         }
-        val segmentUsage = UsageMonitor.interactionIntervals(context, segments.map { UsageInterval(it.startMillis, it.endMillis) })
         val base = SleepAnalyzer.analyze(
-            segments, samples, segmentUsage, schedule
-        ).map {
-            if (usageAvailable) it else it.copy(reason = "App 依現有資料推估；未授予使用情況存取權，無法排除手機使用")
-        }
+            segments, samples, emptyList(), schedule
+        )
         val motion = MotionStore(context).use { it.read(analysisStart, now) }
-        val motionUsage = if (motion.isEmpty()) emptyList() else UsageMonitor.interactionIntervals(context, motion.first().startMillis, now)
-        val resolved = AutomaticPlacement.resolve(motion, motionUsage)
+        val resolved = AutomaticPlacement.resolve(motion, emptyList())
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
-        val fallback = MotionSleepEstimator.estimate(resolved, motionUsage, schedule, now).map {
-            if (usageAvailable) it else it.copy(reason = it.reason + "；未授予使用情況存取權，無法排除手機使用")
-        }
+        val fallback = MotionSleepEstimator.estimate(resolved, emptyList(), schedule, now)
         store.mergeCalculated(selectBestSessions(calculated, fallback))
     }
     companion object {
@@ -67,6 +60,9 @@ fun mergeSleepSessions(existing: List<SleepSession>, calculated: List<SleepSessi
         // Avoid silently merging multiple already-exported identities into one remote record.
         if (matches.size > 1) return@forEach
         val old = matches.firstOrNull()
+        // Phone-use deduction is frozen immediately before the first upload; a routine raw-event
+        // reconciliation with the same interval must not erase it and trigger another scan.
+        if (old?.usageSnapshotApplied == true && old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis) return@forEach
         if (old != null && old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis &&
             old.awakeMillis == candidate.awakeMillis && old.awakeIntervals == candidate.awakeIntervals) return@forEach
         result.removeAll(matches.toSet())

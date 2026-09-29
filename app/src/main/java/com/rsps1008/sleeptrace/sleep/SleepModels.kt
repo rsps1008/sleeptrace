@@ -32,7 +32,9 @@ data class SleepSession(
     val manuallyEdited: Boolean = false,
     val syncError: String? = null,
     val revision: Long = 1,
-    val awakeIntervals: List<UsageInterval> = emptyList()
+    val awakeIntervals: List<UsageInterval> = emptyList(),
+    /** True once the one-time pre-upload UsageStats snapshot has been persisted. */
+    val usageSnapshotApplied: Boolean = false
 ) {
     val durationMillis: Long get() = (endMillis - startMillis - awakeMillis).coerceAtLeast(0)
     fun title(): String = Instant.ofEpochMilli(startMillis).atZone(ZoneId.systemDefault())

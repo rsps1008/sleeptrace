@@ -9,6 +9,7 @@ import androidx.health.connect.client.records.metadata.Device
 import androidx.health.connect.client.records.metadata.Metadata
 import com.rsps1008.sleeptrace.data.SleepStore
 import com.rsps1008.sleeptrace.sleep.SleepSession
+import com.rsps1008.sleeptrace.sleep.SleepUsageSnapshot
 import com.rsps1008.sleeptrace.sleep.sleepParts
 import java.time.Instant
 import java.time.ZoneId
@@ -49,6 +50,7 @@ class HealthConnectSync(private val context: Context) {
         val store = SleepStore(context)
         // Permission needs a system grant, not approval for each sleep record. Resume after grant/on launch.
         if (!hasWritePermission()) return true
+        SleepUsageSnapshot(context).applyPending(store)
         return AutomaticSyncQueue.drain(store::sessions, store::updateIfCurrent, ::sync)
     }
 }

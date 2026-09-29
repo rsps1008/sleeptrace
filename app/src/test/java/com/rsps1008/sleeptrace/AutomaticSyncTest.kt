@@ -109,4 +109,30 @@ class AutomaticSyncTest {
         assertEquals(record.startMillis, parts.first().start)
         assertEquals(record.endMillis, parts.last().end)
     }
+
+    @Test fun `phone use deduction is persisted once before upload and not recalculated on retry`() {
+        val original = session()
+        val snapped = SleepUsageSnapshot.apply(original, listOf(UsageInterval(2_000, 62_000)), usageAvailable = true)
+
+        assertTrue(snapped.usageSnapshotApplied)
+        assertEquals(60_000L, snapped.awakeMillis)
+        assertEquals(snapped, SleepUsageSnapshot.apply(snapped, listOf(UsageInterval(62_000, 122_000)), usageAvailable = true))
+    }
+
+    @Test fun `missing usage access is recorded once with an explicit limitation`() {
+        val snapped = SleepUsageSnapshot.apply(session(), emptyList(), usageAvailable = false)
+
+        assertTrue(snapped.usageSnapshotApplied)
+        assertTrue(snapped.reason.contains("無法排除手機使用"))
+    }
+
+    @Test fun `reanalysis keeps the stored one-time phone use deduction`() {
+        val snapped = session(SyncState.SYNCED).copy(
+            awakeMillis = 60_000,
+            awakeIntervals = listOf(UsageInterval(2_000, 62_000)),
+            usageSnapshotApplied = true
+        )
+
+        assertEquals(snapped, mergeSleepSessions(listOf(snapped), listOf(session().copy(id = "new"))).single())
+    }
 }

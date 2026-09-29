@@ -30,7 +30,9 @@ class SleepStore(context: Context) {
             revision = item.optLong("revision", 1),
             awakeIntervals = item.optJSONArray("awakeIntervals")?.let { array ->
                 List(array.length()) { index -> array.getJSONObject(index).let { UsageInterval(it.getLong("start"), it.getLong("end")) } }
-            } ?: emptyList()
+            } ?: emptyList(),
+            // Existing records were already calculated with the old pre-reconcile query.
+            usageSnapshotApplied = item.optBoolean("usageSnapshotApplied", true)
         )
     }.sortedByDescending { it.startMillis }
 
@@ -54,7 +56,8 @@ class SleepStore(context: Context) {
         val awake = normalizedAwake(start, end, current.awakeIntervals + usage)
         upsert(current.copy(startMillis = start, endMillis = end, awakeMillis = awake.sumOf { it.endMillis - it.startMillis },
             awakeIntervals = awake, revision = current.revision + 1, state = SyncState.PENDING,
-            manuallyEdited = true, reason = "使用者已修正時間，App 自動同步", syncError = null))
+            manuallyEdited = true, reason = "使用者已修正時間，App 自動同步", syncError = null,
+            usageSnapshotApplied = true))
     }
 
     private fun legacySegments(): List<SleepSegment> = readArray(segmentsKey).map {
@@ -79,6 +82,7 @@ class SleepStore(context: Context) {
         .put("confidence", confidence).put("awake", awakeMillis).put("state", state.name).put("reason", reason)
         .put("manual", manuallyEdited).put("error", syncError ?: "")
         .put("revision", revision).put("awakeIntervals", JSONArray(awakeIntervals.map { JSONObject().put("start", it.startMillis).put("end", it.endMillis) }))
+        .put("usageSnapshotApplied", usageSnapshotApplied)
     private fun readArray(key: String): List<JSONObject> {
         val array = JSONArray(preferences.getString(key, "[]"))
         return List(array.length()) { array.getJSONObject(it) }
