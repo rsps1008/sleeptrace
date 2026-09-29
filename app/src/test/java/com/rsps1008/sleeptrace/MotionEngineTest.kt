@@ -97,6 +97,17 @@ class MotionEngineTest {
         assertEquals(start + 65 * MINUTE_MS, session.endMillis)
     }
 
+    @Test fun `two qualified quiet runs are both retained as segmented sleep`() {
+        val rows = (0..124).map { minute(it, if (it in 60..64) MotionLevel.ACTIVE else MotionLevel.QUIET) }
+        val sessions = MotionSleepEstimator.estimate(rows, emptyList(), schedule, end)
+
+        assertEquals(2, sessions.size)
+        assertEquals(start, sessions[0].startMillis)
+        assertEquals(start + 60 * MINUTE_MS, sessions[0].endMillis)
+        assertEquals(start + 65 * MINUTE_MS, sessions[1].startMillis)
+        assertEquals(start + 125 * MINUTE_MS, sessions[1].endMillis)
+    }
+
     @Test fun `overnight window belongs to preceding date and respects boundaries`() {
         assertEquals(schedule.windowAt(start), schedule.windowAt(start + 7 * 60 * MINUTE_MS))
         assertEquals(start + 8 * 60 * MINUTE_MS, end)

@@ -125,8 +125,8 @@ object MotionSleepEstimator {
     }
 
     fun estimate(minutes: List<MotionMinute>, usage: List<UsageInterval>, schedule: SleepSchedule, now: Long): List<SleepSession> {
-        return minutes.groupBy { schedule.windowAt(it.startMillis) }.mapNotNull { (window, all) ->
-            if (window.end > now) return@mapNotNull null
+        return minutes.groupBy { schedule.windowAt(it.startMillis) }.flatMap { (window, all) ->
+            if (window.end > now) return@flatMap emptyList()
             val usable = all.filter { it.startMillis >= window.start && it.startMillis + MINUTE_MS <= window.end }.sortedBy { it.startMillis }
             var quietStart: Long? = null
             var quietCount = 0
@@ -157,12 +157,13 @@ object MotionSleepEstimator {
                 previousEnd = start + MINUTE_MS
             }
             close(activeStart ?: previousEnd ?: window.start)
-            val longest = runs.maxByOrNull { it.second - it.first } ?: return@mapNotNull null
-            SleepSession(
-                id = "motion-${window.start}", startMillis = longest.first, endMillis = longest.second,
-                confidence = 50, awakeMillis = 0, state = SyncState.PENDING,
-                reason = "加速度計推估：持續安靜至少 20 分鐘，App 自動採用最長區段；非睡眠分期"
-            )
+            runs.map { run ->
+                SleepSession(
+                    id = "motion-${window.start}-${run.first}", startMillis = run.first, endMillis = run.second,
+                    confidence = 50, awakeMillis = 0, state = SyncState.PENDING,
+                    reason = "加速度計推估：持續安靜至少 20 分鐘；分段睡眠會分別保存；非睡眠分期"
+                )
+            }
         }
     }
 }
