@@ -138,9 +138,10 @@
 | 儲存 | 內容 |
 | --- | --- |
 | DataStore `sleeptrace_settings` | 每日開始／結束分鐘、`tracking_enabled`；目前 configured 與 enabled 共用此旗標 |
-| SharedPreferences `sleeptrace_records` | JSON `sessions`、`segments`、`samples`；睡眠紀錄含 ID、版本、狀態、清醒明細及手動修改標記 |
+| SharedPreferences `sleeptrace_records` | JSON `sessions`；首次讀取會交易式遷移舊版 raw `segments`／`samples` |
 | SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、內部狀態、battery_guide_shown／xiaomi_guide_shown 引導旗標（不是授權狀態）；舊 enabled／placement 不再控制新資料 |
 | SQLite `motion.db`／`minutes` | 每分鐘感測統計，以開始時間為主鍵；沒有原始感測波形 |
+| SQLite `sleep_events.db`／`segments`、`samples` | Sleep API 原始區段與分類，以時間鍵去重、交易批次寫入及 14 天清理 |
 
 Sleep API 原始事件及動作摘要在新增／寫入時清理 14 天前資料，不是到期即定時刪除；歷史睡眠紀錄會保留。相關資料已在 `app/src/main/res/xml/backup_rules.xml` 與 `app/src/main/res/xml/data_extraction_rules.xml` 排除備份。
 

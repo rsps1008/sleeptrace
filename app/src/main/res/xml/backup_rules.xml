@@ -10,5 +10,6 @@
     <exclude domain="sharedpref" path="sleeptrace_records.xml" />
     <exclude domain="sharedpref" path="sleeptrace_motion.xml" />
     <exclude domain="database" path="motion.db" />
+    <exclude domain="database" path="sleep_events.db" />
     <exclude domain="file" path="datastore/sleeptrace_settings.preferences_pb" />
 </full-backup-content>

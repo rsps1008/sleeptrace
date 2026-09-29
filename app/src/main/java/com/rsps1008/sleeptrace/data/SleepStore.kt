@@ -18,6 +18,7 @@ class SleepStore(context: Context) {
     private val sessionsKey = "sessions"
     private val segmentsKey = "segments"
     private val samplesKey = "samples"
+    private val eventStore = SleepEventStore(context)
 
     fun sessions(): List<SleepSession> = readArray(sessionsKey).map { item ->
         SleepSession(
@@ -56,22 +57,22 @@ class SleepStore(context: Context) {
             manuallyEdited = true, reason = "使用者已修正時間，App 自動同步", syncError = null))
     }
 
-    fun segments(): List<SleepSegment> = readArray(segmentsKey).map {
+    private fun legacySegments(): List<SleepSegment> = readArray(segmentsKey).map {
         SleepSegment(it.getLong("start"), it.getLong("end"), it.getInt("confidence"), it.optString("source", "Sleep API"))
     }
-    fun appendSegments(events: List<SleepSegment>) {
-        val cutoff = System.currentTimeMillis() - RAW_RETENTION_MILLIS
-        val all = (segments() + events).filter { it.endMillis >= cutoff }.distinctBy { "${it.startMillis}:${it.endMillis}" }
-        writeArray(segmentsKey, all.map { JSONObject().put("start", it.startMillis).put("end", it.endMillis).put("confidence", it.confidence).put("source", it.source) })
-    }
+    fun segments(): List<SleepSegment> { migrateRawEvents(); return eventStore.segments() }
+    fun appendSegments(events: List<SleepSegment>) { migrateRawEvents(); eventStore.append(segments = events) }
 
-    fun samples(): List<ClassificationSample> = readArray(samplesKey).map {
+    private fun legacySamples(): List<ClassificationSample> = readArray(samplesKey).map {
         ClassificationSample(it.getLong("time"), it.getInt("confidence"), it.getInt("motion"), it.getInt("light"))
     }
-    fun appendSamples(events: List<ClassificationSample>) {
-        val cutoff = System.currentTimeMillis() - RAW_RETENTION_MILLIS
-        val all = (samples() + events).filter { it.timeMillis >= cutoff }.distinctBy { it.timeMillis }
-        writeArray(samplesKey, all.map { JSONObject().put("time", it.timeMillis).put("confidence", it.confidence).put("motion", it.motion).put("light", it.light) })
+    fun samples(): List<ClassificationSample> { migrateRawEvents(); return eventStore.samples() }
+    fun appendSamples(events: List<ClassificationSample>) { migrateRawEvents(); eventStore.append(samples = events) }
+
+    private fun migrateRawEvents() = synchronized(rawLock) {
+        if (preferences.getBoolean(rawMigrationKey, false)) return@synchronized
+        eventStore.import(legacySegments(), legacySamples())
+        check(preferences.edit().remove(segmentsKey).remove(samplesKey).putBoolean(rawMigrationKey, true).commit()) { "睡眠事件遷移失敗" }
     }
 
     private fun SleepSession.toJson() = JSONObject().put("id", id).put("start", startMillis).put("end", endMillis)
@@ -89,6 +90,7 @@ class SleepStore(context: Context) {
     }
     companion object {
         private val sessionLock = Any()
-        private const val RAW_RETENTION_MILLIS = 14L * 24 * 60 * 60 * 1000
+        private val rawLock = Any()
+        private const val rawMigrationKey = "raw_events_migrated_v1"
     }
 }
