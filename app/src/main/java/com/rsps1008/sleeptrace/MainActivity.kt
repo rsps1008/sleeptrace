@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
         guideBackgroundAccessIfNeeded()
     }
     private var refreshJob: Job? = null
+    private var lastRendered: HomeSnapshot? = null
     private var startupPermissionCheckDone = false
     private var continueStartupPermissionFlow = false
     private val requestHealthPermissions = registerForActivityResult(
@@ -167,6 +168,21 @@ class MainActivity : AppCompatActivity() {
                 store.sessions() to store.samples().maxByOrNull { it.timeMillis }
             }
             val healthGranted = healthSync.hasWritePermission()
+            val snapshot = HomeSnapshot(
+                configured = configured,
+                schedule = schedule,
+                sessions = sessions,
+                latestClassification = latestClassification,
+                healthGranted = healthGranted,
+                recordingEnabled = motionSettings.enabled,
+                recordingStatus = motionSettings.status,
+                backgroundRestricted = backgroundAccess.restricted,
+                batteryExempt = backgroundAccess.exempt
+            )
+            // WorkManager publishes intermediate state changes frequently. Rebuild only when the
+            // visible model actually changed, so the current Material view tree does not flicker.
+            if (snapshot == lastRendered) return@launch
+            lastRendered = snapshot
             val previousScroll = scroll.scrollY
             content.removeAllViews()
             renderHeader()
@@ -181,6 +197,18 @@ class MainActivity : AppCompatActivity() {
             scroll.post { scroll.scrollTo(0, previousScroll) }
         }
     }
+
+    private data class HomeSnapshot(
+        val configured: Boolean,
+        val schedule: SleepSchedule?,
+        val sessions: List<SleepSession>,
+        val latestClassification: ClassificationSample?,
+        val healthGranted: Boolean,
+        val recordingEnabled: Boolean,
+        val recordingStatus: String,
+        val backgroundRestricted: Boolean,
+        val batteryExempt: Boolean
+    )
 
     private fun renderHeader() {
         val headerLayout = LinearLayout(this).apply {
