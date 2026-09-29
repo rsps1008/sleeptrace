@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -52,6 +53,8 @@ class MotionService : Service(), SensorEventListener2 {
     private var accumulator: MotionAccumulator? = null
     private var schedule: SleepSchedule? = null
     private var triggeredWindowStart: Long? = null
+    private var fallbackWindowStart: Long? = null
+    private var screenOffSince: Long? = null
     private var clockOffset = 0L
     private var lastPersist = 0L
     private val pendingMinutes = mutableListOf<MotionMinute>()
@@ -61,7 +64,14 @@ class MotionService : Service(), SensorEventListener2 {
     private var notice = "準備自動記錄睡眠"
     private val finishChange = Runnable { finishTransition() }
     private val powerReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) { refreshConfiguration() }
+        override fun onReceive(context: Context, intent: Intent) {
+            val now = System.currentTimeMillis()
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> screenOffSince = now
+                Intent.ACTION_SCREEN_ON -> screenOffSince = null
+            }
+            refreshConfiguration()
+        }
     }
 
     override fun onCreate() {
@@ -110,7 +120,10 @@ class MotionService : Service(), SensorEventListener2 {
                 addAction(Intent.ACTION_POWER_DISCONNECTED)
                 addAction(Intent.ACTION_TIME_CHANGED)
                 addAction(Intent.ACTION_TIMEZONE_CHANGED)
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
             }, ContextCompat.RECEIVER_NOT_EXPORTED)
+            if (!getSystemService(PowerManager::class.java).isInteractive) screenOffSince = System.currentTimeMillis()
         }
         refreshConfiguration()
         return START_STICKY
@@ -146,10 +159,18 @@ class MotionService : Service(), SensorEventListener2 {
         val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
         val lowBattery = !charging && level >= 0 && scale > 0 && level.toDouble() / scale <= 0.15
-        if (window == null || now < window.start || now >= window.end) triggeredWindowStart = null
+        if (window == null || now < window.start || now >= window.end) {
+            triggeredWindowStart = null
+            fallbackWindowStart = null
+        }
         if (window != null && triggeredWindowStart != window.start &&
             SleepClassificationTrigger.shouldStart(classifications, window, now)) {
             triggeredWindowStart = window.start
+            fallbackWindowStart = null
+        } else if (window != null && triggeredWindowStart != window.start &&
+            SleepClassificationTrigger.shouldFallback(window, now, screenOffSince)) {
+            triggeredWindowStart = window.start
+            fallbackWindowStart = window.start
         }
         val pauseReason = when {
             sensor == null -> "這支手機沒有可用的加速度計"
@@ -162,6 +183,7 @@ class MotionService : Service(), SensorEventListener2 {
             val wasRecording = accumulator != null
             transition { publish(pauseReason); if (wasRecording) WorkScheduler.reconcileSoon(this) }; return
         }
+        val activeWindow = requireNotNull(window)
         val selected = sensor!!
         val next = SamplingPlan.choose(selected.fifoMaxEventCount, selected.minDelay)
         val offset = now - SystemClock.elapsedRealtime()
@@ -177,7 +199,10 @@ class MotionService : Service(), SensorEventListener2 {
                 plan = next
                 val batching = if (next.latencyUs > 0) "批次上限 ${next.latencyUs / 1_000_000} 秒" else "無硬體 FIFO"
                 val sleepHint = if (!selected.isWakeUpSensor) "；休眠時可能缺資料" else ""
-                publish("Google 已判斷入睡 · ${1_000_000 / next.periodUs} Hz · $batching$sleepHint")
+                val source = if (fallbackWindowStart == activeWindow.start) {
+                    "Google 分類延遲時的低頻備援"
+                } else "Google 已判斷入睡"
+                publish("$source · ${1_000_000 / next.periodUs} Hz · $batching$sleepHint")
             }
         }
     }
@@ -234,7 +259,7 @@ class MotionService : Service(), SensorEventListener2 {
         val zone = ZoneId.systemDefault()
         val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
         val next = (0L..2L).flatMap { day ->
-            listOf(value.startMinute, value.endMinute).map { minute ->
+            listOf(value.startMinute, value.endMinute, value.startMinute + SleepClassificationTrigger.FALLBACK_DELAY_MILLIS.toInt() / MINUTE_MS.toInt()).map { minute ->
                 today.plusDays(day).atStartOfDay().plusMinutes(minute.toLong()).atZone(zone).toInstant().toEpochMilli()
             }
         }.filter { it > now }.min()

@@ -33,6 +33,7 @@ data class SamplingPlan(val periodUs: Int, val latencyUs: Int) {
 object SleepClassificationTrigger {
     const val MIN_CONFIDENCE = 80
     const val MAX_EVENT_AGE_MILLIS = 20 * MINUTE_MS
+    const val FALLBACK_DELAY_MILLIS = 2 * 60 * MINUTE_MS
     private const val FUTURE_TOLERANCE_MILLIS = 2 * MINUTE_MS
 
     /** A recent high-confidence Google classification may start motion capture for this window. */
@@ -43,6 +44,14 @@ object SleepClassificationTrigger {
                 it.timeMillis >= now - MAX_EVENT_AGE_MILLIS &&
                 it.timeMillis <= now + FUTURE_TOLERANCE_MILLIS
         }
+
+    /**
+     * Do not leave a whole scheduled night without a motion backup when Google delivery is late.
+     * Screen-off duration is observable without querying UsageStats; still keep the normal low-battery stop.
+     */
+    fun shouldFallback(window: MotionWindow, now: Long, screenOffSince: Long?): Boolean =
+        now >= window.start + FALLBACK_DELAY_MILLIS &&
+            screenOffSince != null && screenOffSince <= now - FALLBACK_DELAY_MILLIS
 }
 
 data class MotionMinute(

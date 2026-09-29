@@ -32,6 +32,16 @@ class MotionEngineTest {
         assertFalse(SleepClassificationTrigger.shouldStart(listOf(ClassificationSample(start - MINUTE_MS, 100, 0, 0)), window, start + MINUTE_MS))
     }
 
+    @Test fun `long screen off starts low frequency fallback after Google delay`() {
+        val window = schedule.windowAt(start)
+        val delayed = window.start + SleepClassificationTrigger.FALLBACK_DELAY_MILLIS
+
+        assertTrue(SleepClassificationTrigger.shouldFallback(window, delayed, window.start))
+        assertFalse(SleepClassificationTrigger.shouldFallback(window, delayed - 1, window.start))
+        assertFalse(SleepClassificationTrigger.shouldFallback(window, delayed, delayed - MINUTE_MS))
+        assertFalse(SleepClassificationTrigger.shouldFallback(window, delayed, null))
+    }
+
     @Test fun `a delayed batch keeps sample time and complete coverage`() {
         val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
         for (offset in 0L..120_000L step 1_000) engine.add(start + offset, 0.0, 0.0, 9.81)
