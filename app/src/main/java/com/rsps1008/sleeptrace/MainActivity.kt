@@ -899,10 +899,7 @@ class MainActivity : AppCompatActivity() {
                     if (newEnd <= newStart) newEnd += 24 * 60 * 60 * 1000L
                     if (newEnd - newStart < 30 * 60 * 1000L) { showMessage("睡眠時間至少需 30 分鐘"); return@setPositiveButton }
                     lifecycleScope.launch {
-                        withContext(Dispatchers.IO) {
-                            val usage = UsageMonitor.interactionIntervals(this@MainActivity, newStart, newEnd)
-                            store.reviseTimes(session.id, newStart, newEnd, usage)
-                        }
+                        withContext(Dispatchers.IO) { store.reviseTimes(session.id, newStart, newEnd) }
                         WorkScheduler.reconcileSoon(this@MainActivity)
                         refresh()
                     }

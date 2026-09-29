@@ -8,7 +8,6 @@ import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.mergeSleepSessions
 import com.rsps1008.sleeptrace.sleep.UsageInterval
-import com.rsps1008.sleeptrace.sleep.normalizedAwake
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -51,13 +50,13 @@ class SleepStore(context: Context) {
         true
     }
 
-    fun reviseTimes(id: String, start: Long, end: Long, usage: List<UsageInterval>) = synchronized(sessionLock) {
+    fun reviseTimes(id: String, start: Long, end: Long) = synchronized(sessionLock) {
         val current = sessions().firstOrNull { it.id == id } ?: return@synchronized
-        val awake = normalizedAwake(start, end, current.awakeIntervals + usage)
-        upsert(current.copy(startMillis = start, endMillis = end, awakeMillis = awake.sumOf { it.endMillis - it.startMillis },
-            awakeIntervals = awake, revision = current.revision + 1, state = SyncState.PENDING,
+        // Keep the time correction local. The one shared UsageStats snapshot is applied right before upload.
+        upsert(current.copy(startMillis = start, endMillis = end, awakeMillis = 0, awakeIntervals = emptyList(),
+            revision = current.revision + 1, state = SyncState.PENDING,
             manuallyEdited = true, reason = "使用者已修正時間，App 自動同步", syncError = null,
-            usageSnapshotApplied = true))
+            usageSnapshotApplied = false))
     }
 
     private fun legacySegments(): List<SleepSegment> = readArray(segmentsKey).map {
