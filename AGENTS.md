@@ -186,6 +186,8 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 
 2026-09-29 本輪效能、同步、分段睡眠與詳情介面更新：40 個 JVM 測試通過，Lint 無 issue，Debug APK 與測試 APK 建置成功。涵蓋原始 Sleep API 事件 SQLite 保存、排程裁切、上傳前單次手機使用快照、分段動作候選、Google 分類延遲備援、重疊已同步紀錄回收與詳情清醒色塊。未執行會修改授權、時段或資料的 instrumentation test；Health Connect 實際刪除／寫入、Google 分類延遲、Doze／OEM 背景限制、FIFO 與整夜耗電仍未在實機端到端驗證。
 
+2026-09-29 架構整合更新：40 個 JVM 測試通過，Lint 無 issue，Debug APK 與測試 APK 建置成功。首頁資料載入已移到 `HomeViewModel`；睡眠 session、raw segment 與分類統一至 `sleep_events.db`，並在首次讀取時交易式遷移舊版 `sleeptrace_records` JSON。`AutoSyncStorageTest` 已隨新 schema 編譯，但因當時連接的 Mi Note 10 與 Pixel 均為實機，依規則未實跑會寫入／遷移資料的 instrumentation test；實際升級遷移、Health Connect 寫入／刪除和整夜感測仍未端到端驗證。
+
 尚未完成或不能保證的項目：
 
 - 實機整夜耗電、真實 FIFO 行為、長時間 Doze／OEM 背景限制與實際入睡準確度尚未量測。先前討論的耗電百分比是估算，不是實測結果。

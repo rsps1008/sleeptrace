@@ -71,6 +71,8 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 
 2026-09-29 本輪變更已通過 40 個 JVM 測試、Lint（無 issue）、Debug APK 及 Android 測試 APK 建置；未在裝置執行會改動資料或權限的 instrumentation test。真實 Health Connect 寫入／刪除、Google 分類延遲、Doze／OEM 背景行為、FIFO 與整夜耗電仍需在可丟棄模擬器或受控實機另外驗證。
 
+最新版也已將睡眠 session、Sleep API segment 與分類統一到 `sleep_events.db`，首頁資料由 `HomeViewModel` 載入。舊 JSON 的實際升級遷移測試已編譯，但本機連接的裝置都是實機，沒有執行會改動裝置資料的測試。
+
 首頁仍使用既有 Material View，但會比較可見資料快照；WorkManager 發出未改變畫面資料的中間狀態時，不再清空並重建整棵 View 樹。
 
 首頁的資料讀取、權限／背景狀態彙整已由 `HomeViewModel` 管理；Activity 只觀察狀態並繪製 Material View，背景工作狀態改變時不再直接在 Activity 組裝資料。
