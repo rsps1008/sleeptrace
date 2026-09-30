@@ -245,10 +245,16 @@ class SleepStageCalibrationTest {
         assertTrue(recomputed.none { it.stage == SleepStage.DEEP })
     }
 
-    @Test fun `feature storage priority favors v4 then v3 then legacy v1 and v2`() {
-        assertTrue(MotionFeaturePolicy.storagePriority(MotionAccumulator.CURRENT_FEATURE_VERSION) > MotionFeaturePolicy.storagePriority(MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION))
-        assertTrue(MotionFeaturePolicy.storagePriority(MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION) > MotionFeaturePolicy.storagePriority(MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION))
-        assertEquals(MotionFeaturePolicy.storagePriority(MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION), MotionFeaturePolicy.storagePriority(MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION))
+    @Test fun `feature storage priority orders v4 then v3 then v2 then v1`() {
+        val priorities = listOf(
+            MotionAccumulator.CURRENT_FEATURE_VERSION,
+            MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION,
+            MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION,
+            MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION
+        ).map(MotionFeaturePolicy::storagePriority)
+
+        assertEquals(listOf(4, 3, 2, 1), priorities)
+        assertEquals(priorities.size, priorities.toSet().size)
     }
 
     @Test fun `diagnostic roles distinguish stay-only and incompatible features`() {

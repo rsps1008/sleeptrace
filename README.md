@@ -36,7 +36,7 @@ App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 And
 
 分期只在已成立的 SleepSession 範圍內離線重算，結果以合併區間保存。Google Sleep API 用於確認睡眠 session／起點；UsageStats 用於清醒與睡前操作證據；固定秒尺度 motion、當晚相對活動及 temporal smoothing／hysteresis 用於 Light／Deep 工程推估。手機靜止本身不代表入睡，沒有 motion 的部分預設 Light，不會憑空補 Deep；不辨識 REM，未經 PSG 驗證。單筆詳情保留「依手機活動與 Google Sleep API 推估，非醫療睡眠分期」。
 
-動作摘要的 `featureVersion 1` 是舊版依 callback 間隔計算的特徵，`featureVersion 2` 是第一版 epoch-second bucket 正規化特徵；兩者都保留供歷史／相容用途，不會與新版 RMS percentile、rolling median 或 Deep staging 混算，且沒有原始加速度波形可供回算。`featureVersion 3` 表示硬體最小取樣間隔超過 1.2 秒的 cadence 不相容摘要，只保留活動摘要，不參與 Deep staging。`featureVersion 4` 是目前以 SensorEvent timestamp cadence anchor 產生的約 1 秒固定特徵，可供新版 Light／Deep 推估。Resampler 容忍一般 callback jitter；缺少事件不插值。Storage priority 為 v4 > v3 > v1/v2。暫停新的自動記錄不會阻止既有資料完成 staging rule migration；目前 staging algorithm version 為 3。
+動作摘要的 `featureVersion 1` 是舊版依 callback 間隔計算的特徵，`featureVersion 2` 是第一版 epoch-second bucket 正規化特徵；兩者都保留供歷史／相容用途，不會與新版 RMS percentile、rolling median 或 Deep staging 混算，且沒有原始加速度波形可供回算。`featureVersion 3` 表示硬體最小取樣間隔超過 1.2 秒的 cadence 不相容摘要，只保留活動摘要，不參與 Deep staging。`featureVersion 4` 是目前以 SensorEvent timestamp cadence anchor 產生的約 1 秒固定特徵，可供新版 Light／Deep 推估。Resampler 容忍一般 callback jitter；缺少事件不插值。只有 v4 BED／QUIET 可累積 motion-only 安靜睡眠候選；v3 BED／ACTIVE 可作為動作衝突證據，但 v3 QUIET、v1／v2 的任何分鐘都不能建立或延長候選，也不參與衝突分數。Storage priority 為 v4 > v3 > v2 > v1。暫停新的自動記錄不會阻止既有資料完成 staging rule migration；目前 staging algorithm version 為 3。
 
 - **Sensor normalization**：仍要求約 1 Hz，實際 callback 可高於要求值。App 以第一筆 SensorEvent timestamp 作 cadence anchor，後續依固定的硬體支援 cadence 接受最多一筆代表 sample；約 100 ms 的早到／晚到 jitter 會對齊到 cadence slot，不依賴 epoch 整秒邊界。FIFO burst 仍只看 event timestamp；重複／倒序／非有限事件忽略，跨過的 slot 保持缺資料且不插值。一般 cadence 的新資料 `sampleCount` 約 60／分鐘；超過 1.2 秒的硬體最低間隔仍保留 activity／coverage，但以不相容 feature version 排除於新版 Deep percentile。沒有提高 sensor Hz、FGS 時間、wake lock 或每約 5 分鐘 SQLite 保存頻率。
 - **Nightly baseline**：只取 session 內、排程內、覆蓋至少 45 秒、非手機使用／onset guard 且有 BED 證據的有效 motion；至少 10 分鐘。一次排序計算 P25／P35／P50／P65／P70／P75，不永久存入 DB。UNKNOWN 不單獨建立 baseline 或 Deep；Google confidence／motion／ambient light 不直接決定 Deep。
@@ -44,7 +44,7 @@ App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 And
 - **Deep STAY／EXIT**：維持時不再逐分鐘要求 RMS ≤ P35。1～2 分鐘翻身或安靜但稍高 RMS 可以保留；5 分鐘內至少 3 分鐘 ACTIVE 時退出並將該活動橋接段改回 Light。完整 5 分鐘 rolling median > P70 且連續 3 個窗口時退出。手機使用直接 Awake 並 reset，guard、缺口／低覆蓋與 BEDSIDE 直接回到 Light。有效、QUIET、RMS ≤ P75 的 UNKNOWN 最多連續維持 5 分鐘，第 6 分鐘回到 Light；UNKNOWN 不單獨進 Deep。
 - **睡前手機使用**：每個已結束睡眠窗的 UsageStats snapshot 額外保存窗前 30 分鐘證據，同樣維持 `(windowStart, windowEnd)` key。staging 傳入 session 前 30 分鐘至結束的使用區間，Awake 仍只裁切計算 session 內部分。最後一次手機使用後 15 分鐘內不得 Deep；較晚的 Sleep API 起點也不能被早先手機靜置回填。
 - **Safety bounds**：P75−P25 ≤ max(0.0001 m/s², P50×15%) 視為訊號辨識力不足；提高 BED entry 要求並將 Deep 上限降低到 session 非 Awake 時間的 35%，一般上限為 55%。只在超過上限時，依 rolling median 較高的 Deep 段優先收回；這是防止演算法把整晚判 Deep 的安全界線，不強迫任何固定生理比例。
-- **舊資料**：`motion.db` schema 2 增加 `featureVersion`，v1 是舊 callback-dependent、v2 是舊 epoch-second bucket、v3 是 cadence 不相容、v4 是目前 cadence-anchor 約 1 秒特徵。各版本摘要均保留；同一分鐘不同 feature definition 不相加，只有 v4 參與新版 Deep baseline／rolling staging。Storage priority 為 v4 > v3 > v1/v2，版本數字本身不是品質順序。已存摘要沒有原始波形，因此無法把 v1/v2 事後還原成 v4。`sleep_events.db` schema 10 保存 UsageStats `evidenceStart`，舊 snapshot 保留窗口 key，缺少前置證據者在完整窗口下一次整理時補查一次；percentiles 不保存。stage 變更以相同 session ID／clientRecordId 遞增 revision，已同步或正在同步的手動紀錄回到 PENDING，舊同步結果不可覆蓋新版本；手動修正的 start／end 不被自動分析改寫。
+- **舊資料**：`motion.db` schema 2 增加 `featureVersion`，v1 是舊 callback-dependent、v2 是舊 epoch-second bucket、v3 是 cadence 不相容、v4 是目前 cadence-anchor 約 1 秒特徵。各版本摘要均保留；同一分鐘不同 feature definition 不相加，只有 v4 參與新版 Deep baseline／rolling staging。Storage priority 為 v4 > v3 > v2 > v1，版本順位也決定衝突分鐘保留哪種摘要。已存摘要沒有原始波形，因此無法把 v1/v2 事後還原成 v4。`sleep_events.db` schema 10 保存 UsageStats `evidenceStart`，舊 snapshot 保留窗口 key，缺少前置證據者在完整窗口下一次整理時補查一次；percentiles 不保存。stage 變更以相同 session ID／clientRecordId 遞增 revision，已同步或正在同步的手動紀錄回到 PENDING，舊同步結果不可覆蓋新版本；手動修正的 start／end 不被自動分析改寫。
 
 這是工程上的相對穩定程度估算，不是醫療用途、不是生理睡眠分期，也沒有 PSG 驗證；不辨識 REM。手機位於床邊、震動或床墊差異會讓動作推估更有限。時間軸與淺眠／深眠／清醒摘要只出現在單筆詳情，不放到首頁。
 
@@ -67,7 +67,7 @@ Health Connect 待同步 session 會先驗證、保存 `SYNCING` 狀態，再以
 
 - 每分鐘有效覆蓋至少 45 秒才判讀；長間隔、倒序、重複或非有限值樣本不增加覆蓋。
 - 相鄰樣本三軸差值 ≥ 0.15 m/s² 算活動；活動時間比例 ≥ 5% 或變化 RMS ≥ 0.20 m/s²，標示該分鐘有動作。這些是可調的工程起點，未以 PSG 校準。
-- 床上模式連續安靜 20 分鐘後回推該段起點；完整區段至少 30 分鐘，才成為備援候選。手機使用、缺失／低覆蓋資料或持續活動 5 分鐘會切斷區段；短暫翻動不等於清醒。同一時段的多個合格安靜段會分別保存，避免分段睡眠只留下最長一段。
+- 只有 v4 current cadence-anchor 的 BED／QUIET 可以累積 20 分鐘安靜證據；v3 activity-only 的 BED／ACTIVE 可用來結束區段或降低既有候選的參考分數，v3 QUIET 與 v1／v2 資料不建立候選。完整區段至少 30 分鐘，才成為備援候選。手機使用、缺失／低覆蓋資料或持續活動 5 分鐘會切斷區段；短暫翻動不等於清醒。同一時段的多個合格安靜段會分別保存，避免分段睡眠只留下最長一段。
 - 若床上動作有效資料至少 30 分鐘且涵蓋候選一半以上，而其中活動分鐘占比 ≥ 30%，Sleep API 候選分數降低 30 分。重疊來源依調整後的參考分數自動選擇，平手優先 Sleep API；低分不阻擋同步。
 - 舊版需要人工處理的紀錄會自動轉入同步佇列。完全沒有候選、有效睡眠不足 30 分鐘或舊紀錄缺少已扣除手機使用的時間明細，App 會自動略過，不要求人工裁決。尚未授予使用情況存取權時，App 使用其餘資料推估並保留限制說明。
 - 新候選若跨越多筆破碎歷史紀錄，會保留其中一筆穩定 ID 作為新版；其餘已同步的 ID 先從 Health Connect 移除，成功後才送出新版，避免因保守跳過而長期不更新或留下重複資料。
@@ -144,5 +144,7 @@ Health Connect 去重／更新依據：[Client Record ID 與版本](https://deve
 
 
 2026-09-30 第二輪校正驗證：testDebugUnitTest 共 89 項通過、0 failure／error；lintDebug 25 條 Warning、0 Error；assembleDebug、assembleDebugAndroidTest、assembleRelease 全部成功，Release 仍為 unsigned APK。合成 real_night_style fixture 的凍結舊規則產生 3 分鐘 Deep，新規則產生 132 分鐘，僅作工程 regression，不能視為真實生理分期。未在裝置執行 StagingStorageRuntimeTest、實際 Health Connect 寫入、實機整夜耗電或 PSG／穿戴對照。
+
+2026-09-30 motion feature guard／storage priority：MotionSleepEstimator 只以 v4 BED／QUIET 建立或延長安靜候選，v3 BED／ACTIVE 保留衝突證據；v3 QUIET 與 v1/v2 不提供睡眠正向證據。儲存順位明確為 v4 > v3 > v2 > v1。MotionEngineTest、SleepStageCalibrationTest 共 59 項通過，assembleDebugAndroidTest 成功；新增的 MotionStore 順序案例僅編譯，未在實機或模擬器執行。
 
 第二輪演算法版本為 2：AutomaticWorkSignals 將尚未套用的新規則視為 dirty，開啟 App 時會沿用既有 KEEP 工作安排一次最近 48 小時重算。只有本輪完整資料交易完成且 generation 仍相同時才記錄版本已套用；新資料或權限變更仍保留原本 generation 保護。這不增加感測時間或分鐘摘要保存頻率。

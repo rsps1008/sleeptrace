@@ -82,6 +82,27 @@ class MotionEngineTest {
         assertTrue(MotionSleepEstimator.estimate((0..119).map { minute(it, MotionLevel.UNKNOWN) }, emptyList(), schedule, end).isEmpty())
     }
 
+    @Test fun `only current feature quiet minutes can create motion sleep candidates`() {
+        val v3Quiet = (0..119).map { minute(it).copy(featureVersion = MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION) }
+        val v2Quiet = (0..119).map { minute(it).copy(featureVersion = MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION) }
+        val v1Quiet = (0..119).map { minute(it).copy(featureVersion = MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION) }
+
+        assertTrue(MotionSleepEstimator.estimate(v3Quiet, emptyList(), schedule, end).isEmpty())
+        assertTrue(MotionSleepEstimator.estimate(v2Quiet, emptyList(), schedule, end).isEmpty())
+        assertTrue(MotionSleepEstimator.estimate(v1Quiet, emptyList(), schedule, end).isEmpty())
+    }
+
+    @Test fun `incompatible quiet minutes cannot bridge current feature runs`() {
+        val rows = (0..59).map { index ->
+            minute(index).copy(
+                featureVersion = if (index in 20..39) MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION
+                else MotionAccumulator.CURRENT_FEATURE_VERSION
+            )
+        }
+
+        assertTrue(MotionSleepEstimator.estimate(rows, emptyList(), schedule, end).isEmpty())
+    }
+
     @Test fun `motion alone syncs automatically after the completed window`() {
         val rows = (0..119).map { minute(it) }
         assertTrue(MotionSleepEstimator.estimate(rows, emptyList(), schedule, end - 1).isEmpty())
@@ -160,5 +181,18 @@ class MotionEngineTest {
         assertTrue(conflict.confidence < session.confidence)
         assertEquals(SyncState.PENDING, MotionSleepEstimator.annotate(session, (0..119).map { minute(it) }).state)
         assertEquals(session, MotionSleepEstimator.annotate(session, (0..119).map { minute(it, MotionLevel.ACTIVE, Placement.BEDSIDE) }))
+    }
+
+    @Test fun `v3 active minutes remain conflict evidence while v3 quiet is ignored`() {
+        val session = MotionSleepEstimator.estimate((0..119).map { minute(it) }, emptyList(), schedule, end).single()
+        val v3Active = (0..119).map {
+            minute(it, MotionLevel.ACTIVE).copy(featureVersion = MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION)
+        }
+        val v3Quiet = (0..119).map {
+            minute(it).copy(featureVersion = MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION)
+        }
+
+        assertTrue(MotionSleepEstimator.annotate(session, v3Active).confidence < session.confidence)
+        assertEquals(session, MotionSleepEstimator.annotate(session, v3Quiet))
     }
 }

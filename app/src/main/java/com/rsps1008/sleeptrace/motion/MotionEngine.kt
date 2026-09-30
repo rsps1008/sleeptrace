@@ -14,11 +14,20 @@ enum class Placement { BED, BEDSIDE, AUTO, UNKNOWN }
 enum class MotionLevel { QUIET, ACTIVE, UNKNOWN }
 
 object MotionFeaturePolicy {
-    /** Current cadence-anchor features outrank cadence-incompatible, then normalized/callback legacy data. */
+    /** v4 cadence-anchor > v3 activity-only > v2 epoch-second > v1 callback-dependent. */
     fun storagePriority(featureVersion: Int): Int = when (featureVersion) {
-        MotionAccumulator.CURRENT_FEATURE_VERSION -> 3
-        MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION -> 2
-        else -> 1
+        MotionAccumulator.CURRENT_FEATURE_VERSION -> 4
+        MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION -> 3
+        MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION -> 2
+        MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION -> 1
+        else -> 0
+    }
+
+    /** v3 can report movement, but neither its quiet minutes nor v1/v2 can support sleep inference. */
+    fun supportsSleepConflictEvidence(featureVersion: Int, level: MotionLevel): Boolean = when (featureVersion) {
+        MotionAccumulator.CURRENT_FEATURE_VERSION -> level != MotionLevel.UNKNOWN
+        MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION -> level == MotionLevel.ACTIVE
+        else -> false
     }
 }
 
@@ -154,7 +163,11 @@ typealias MotionWindow = SleepWindow
 /** Experimental motion-only fallback. Accepted sessions sync automatically without sleep staging. */
 object MotionSleepEstimator {
     fun annotate(session: SleepSession, minutes: List<MotionMinute>): SleepSession {
-        val bed = minutes.filter { it.placement == Placement.BED && it.startMillis >= session.startMillis && it.startMillis + MINUTE_MS <= session.endMillis && it.level != MotionLevel.UNKNOWN }
+        val bed = minutes.filter {
+            it.placement == Placement.BED &&
+                it.startMillis >= session.startMillis && it.startMillis + MINUTE_MS <= session.endMillis &&
+                MotionFeaturePolicy.supportsSleepConflictEvidence(it.featureVersion, it.level)
+        }
         if (bed.size < 30 || bed.size * MINUTE_MS < (session.endMillis - session.startMillis) / 2) return session
         val active = bed.count { it.level == MotionLevel.ACTIVE }
         val conflicts = active.toDouble() / bed.size >= 0.30
@@ -190,7 +203,9 @@ object MotionSleepEstimator {
                 val start = minute.startMillis
                 if (previousEnd != null && previousEnd != start) close(previousEnd!!)
                 val phoneInUse = usage.any { it.startMillis < start + MINUTE_MS && it.endMillis > start }
-                if (minute.placement != Placement.BED || minute.level == MotionLevel.UNKNOWN || phoneInUse) {
+                if (minute.placement != Placement.BED || minute.level == MotionLevel.UNKNOWN || phoneInUse ||
+                    (!minute.supportsCurrentStaging && !MotionFeaturePolicy.supportsSleepConflictEvidence(minute.featureVersion, minute.level))
+                ) {
                     close(start)
                 } else if (minute.level == MotionLevel.QUIET) {
                     if (quietStart == null) quietStart = start

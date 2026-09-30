@@ -119,6 +119,27 @@ class StagingStorageRuntimeTest {
         }
     }
 
+    @Test fun motionStoreKeepsV2OverV1RegardlessOfWriteOrder() = isolated { context ->
+        MotionStore(context).use { store ->
+            fun put(start: Long, version: Int, covered: Long, samples: Int) = store.append(
+                listOf(MotionMinute(start, covered, 0, .01 * .01 * covered, samples, Placement.AUTO, version)),
+                now = start + MINUTE_MS
+            )
+
+            put(0, MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION, 10_000, 10)
+            put(0, MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION, 20_000, 20)
+            var saved = store.read(0, MINUTE_MS).single()
+            assertEquals(MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION, saved.featureVersion)
+            assertEquals(20_000L, saved.coveredMillis)
+            assertEquals(20, saved.sampleCount)
+            put(0, MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION, 5_000, 5)
+            saved = store.read(0, MINUTE_MS).single()
+            assertEquals(MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION, saved.featureVersion)
+            assertEquals(20_000L, saved.coveredMillis)
+            assertEquals(20, saved.sampleCount)
+        }
+    }
+
     @Test fun v7ToV9UsageSnapshotsKeepWindowKeysAndRefreshMissingLookbackEvidence() {
       for (version in 7..9) isolated { context ->
         context.openOrCreateDatabase("sleep_events.db",Context.MODE_PRIVATE,null).use { db ->
