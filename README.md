@@ -228,5 +228,11 @@ V7 修正 V6 首次建立誤把「當前分鐘必須有新動作」當成額外�
 
 短缺口的 `RECENT_WINDOW_INCOMPLETE`、`WINDOW_CONTAINS_GAP`、`MINOR_GAP_BUDGET_EXCEEDED` 與阻擋區間由同一 entry decision 生成。`window_blocking_intervals` 使用 `start..(end-1)` 的 inclusive `LongRange` 表示半開 `[start,end)` 分鐘；合法缺口離開最近五分鐘後只列 `ALLOWED_MINOR_GAP`，不再列為阻擋。`formal_stage`、`was_backfilled`、`safety_cap_adjusted`、`final_stage` 區分當時決策與後續回填／安全上限，不用最終 stage 反推當時維持資格。
 
+本輪另外補齊三項診斷一致性：active 3-in-5 的 Deep 回寫只標記實際被改動的分鐘，使用獨立的 `retroactively_adjusted`、`retroactive_adjustment_reason=SUSTAINED_ACTIVITY_REWRITE` 與確認分鐘 `retroactive_adjustment_source_ms`；正式退出分鐘仍只保留自己的 `Action.EXIT`。`was_backfilled`、retroactive rewrite 與 `safety_cap_adjusted` 是互不覆蓋的 provenance 通道，同一分鐘可同時表達多個後處理來源。Hard break 的 `transition_reason` 現在只從完整 `maintenanceDecision.reasons` 按固定優先序派生，包含 phone、onset、recording、feature、coupling、coverage 與 sleep-evidence 類原因；不再有第二套 `hardBreakTransition()` 推論。`current_eligibility_reasons` 只表示使當前分鐘不能基本分期的 blocker，ONSET guard 只放在 entry decision，若正式維護路徑遇到 guard 則也放在 maintenance decision。
+
+診斷 CSV 的 header 與 row 共用 `DIAGNOSTIC_CSV_HEADER`／`diagnosticCsvRow()` schema；空字串、`false` 與 `0` 保持不同語意，row 欄位數不符會直接失敗。這些變更只補 provenance／診斷來源，`ALGORITHM_VERSION=7`、`MotionAccumulator.CURRENT_FEATURE_VERSION=5` 與 `real_night_style.csv` 的 estimator-only stage intervals、durations、transition matrix 均保持不變。
+
+本輪驗證：`testDebugUnitTest` 173 項通過（0 failure／error）、`lintDebug` 成功且無 Error、`assembleDebug` 與 `assembleDebugAndroidTest` 成功；`StagingReplayTest` check-only 通過且未改寫 replay docs。沒有可丟棄模擬器／測試裝置可安全執行 instrumentation，因此未執行裝置測試、真實 Health Connect 寫入、實機整夜感測或耗電驗證。
+
 回放 fixture 的 SHA-256 由本次讀取的原始 classpath bytes 計算，再以同一份 bytes 用 UTF-8 解析；沒有手動 hash 常數。`StagingReplayTest` 預設只檢查 `build/reports` 與已提交 `docs/`，不覆寫文件；只有明確設定 `SLEEPTRACE_UPDATE_REPLAY_DOCS=true` 才更新。修正前失敗案例與來源驗證說明見 [`docs/staging-v7-diagnostic-baseline.md`](docs/staging-v7-diagnostic-baseline.md) 與 [`docs/staging-v7-changes.md`](docs/staging-v7-changes.md)。
 

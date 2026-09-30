@@ -222,6 +222,22 @@ class StagingEvidenceTest {
         assertEquals("\"a\"\"b\"", csvEscape("a\"b"))
         assertEquals("", csvEscape("")); assertEquals("0", csvEscape("0"))
     }
+    @Test fun `diagnostic CSV schema keeps header and row aligned with distinct empty and false values`() {
+        val values = diagnosticCsvHeaders.mapIndexed { index, _ ->
+            when (index) {
+                0 -> ""
+                1 -> "false"
+                else -> "value-$index"
+            }
+        }
+        val row = diagnosticCsvRow(values)
+        assertEquals(DIAGNOSTIC_CSV_HEADER.split(',').size, diagnosticCsvHeaders.size)
+        assertEquals(diagnosticCsvHeaders.size, row.split(',').size)
+        assertEquals("", row.substringBefore(','))
+        assertEquals("false", row.substringAfter(',').substringBefore(','))
+        assertTrue(diagnosticCsvRow(listOf("a,b") + List(diagnosticCsvHeaders.size - 1) { "" })
+            .startsWith("\"a,b\","))
+    }
     @Test fun `formal and early one Hz plans remain identical and two Hz is explicit`() {
         assertEquals(SamplingPlan.choose(100), capturePlan(CaptureExperiment.OFF, 100))
         assertEquals(capturePlan(CaptureExperiment.OFF, 100), capturePlan(CaptureExperiment.EARLY_1HZ, 100))

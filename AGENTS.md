@@ -261,6 +261,10 @@ featureVersion 5 的一個明確短缺口僅在完整 60 秒桶的 `60000-covere
 
 本輪 V7 診斷一致性修正仍不升版：`SleepStageEstimator.evaluateFormalDecision()` 是正式狀態更新與診斷共用的每分鐘入口，保存 `priorState`、current eligibility、entry／maintenance decision、action、transition reason 及高活動窗口計數。正式退出與 `canMaintainDeep` 欄位不能分開重算；前一狀態非 Deep 時，maintenance decision 必須標示不適用，不能用最終 stage 反推。短缺口的 `RECENT_WINDOW_INCOMPLETE`、累積預算阻擋與 `windowBlockingIntervals` 由同一 entry 評估生成；合法缺口離開最近五分鐘後只保留 `ALLOWED_MINOR_GAP` 非阻擋資訊。`formalStage`、`wasBackfilled`、`safetyCapAdjusted` 與 `finalStage` 區分當時正式決策和離線後處理，不新增逐分鐘資料庫寫入。回放 fixture hash 必須從實際讀取的原始 resource bytes 計算；`StagingReplayTest` 預設 check-only，僅 `SLEEPTRACE_UPDATE_REPLAY_DOCS=true` 可更新提交文件。
 
+本次 review 追加的 provenance 為獨立欄位：active 3-in-5 回寫只標記真正由 formal Deep 改成 LIGHT／SLEEPING 的歷史分鐘，保存 `retroactivelyAdjusted`、`SUSTAINED_ACTIVITY_REWRITE` 及觸發確認分鐘；觸發分鐘仍由自己的正式 `Action.EXIT` 表示，孤立活動不產生回寫標記。`wasBackfilled`、retroactive activity rewrite、`safetyCapAdjusted` 不互相覆蓋。Hard break 的 `transitionReason` 僅由完整 `maintenanceDecision.reasons` 按 phone → onset → recording boundary → feature boundary → coupling → missing／coverage → no-sleep 固定優先序產生；移除獨立 hard-break 重推論。`currentEligibilityReasons` 只保留令基本分期能力為 false 的原因，ONSET guard 留在 `entryDecision.reasons`，若 prior Deep 且政策觸發維護退出則也留在 `maintenanceDecision.reasons`。CSV 以共用 schema 驗證 header／row 欄位數並新增 retroactive 欄位；`ALGORITHM_VERSION=7`、`MotionAccumulator.CURRENT_FEATURE_VERSION=5` 不變，real_night_style replay 的 intervals／durations／transition matrix 不變。
+
+本輪驗證結果：`testDebugUnitTest` 173 項通過、`lintDebug` 成功且無 Error、`assembleDebug`／`assembleDebugAndroidTest` 成功；`StagingReplayTest` 預設 check-only 通過，沒有覆寫 replay 文件。沒有可丟棄模擬器／測試裝置可安全執行 instrumentation，未執行裝置測試、Health Connect 真實寫入、實機整夜感測或耗電驗證。
+
 以下是目前實作；前面按日期保存的驗證紀錄描述各次歷史版本，不代表目前規則。
 
 四種階段使用同一 `sleepParts()` 時間線：AWAKE 是已知清醒／實際手機使用；LIGHT、DEEP 是有資料能力的工程推估；SLEEPING 是已接受的睡眠 session 內深淺未判定。未成立候選、session 外或排程空白不會補成睡眠。部分 stage 空白、無 motion、無基準、無耦合或低訊號差異不能假裝淺眠。清醒採裁切後聯集，幾秒使用只扣幾秒，首尾清醒保留；矛盾睡眠 stage 重疊回未判定，AWAKE 優先。深 + 淺 + 未判定 = 睡眠，睡眠 + 清醒 = session 跨度，全部先計毫秒。

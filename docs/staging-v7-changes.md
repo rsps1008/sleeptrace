@@ -14,4 +14,10 @@ V7 是 V6 缺陷修正，不是提高 Deep 或降低 SLEEPING 的調參。AUTO �
 
 每分鐘診斷另外保留當時的 `formalStage`、`wasBackfilled`、`safetyCapAdjusted` 與 `finalStage`。因此後續有限回填、活動橋移除或 safety cap 不會被誤報為當時曾 ENTER，最終 stage 也不會反推 `canMaintainDeep`。這些欄位只在記憶體中保存，沒有逐分鐘資料庫寫入。
 
+本輪 review 補上活動橋移除的 provenance：在 active 3-in-5 確認分鐘，只有原本已是 formal `DEEP` 且實際被改成 `LIGHT`／`SLEEPING` 的前面分鐘標記 `retroactivelyAdjusted=true`，理由固定為 `SUSTAINED_ACTIVITY_REWRITE`，並保存觸發確認分鐘的 `retroactiveAdjustmentSourceMillis`。確認分鐘本身不冒充回寫目標，仍只保留自己的 `Action.EXIT`／`exit_active_3_in_5`；孤立活動不標記。`wasBackfilled`、retroactive activity rewrite、`safetyCapAdjusted` 使用獨立欄位，因此後續 safety cap 不會清掉活動來源或理由。
+
+Hard break 的 `transitionReason` 只由同一個正式 `maintenanceDecision.reasons` 集合按固定優先序派生：`PHONE_IN_USE`、`ONSET_GUARD`、`RECORDING_BOUNDARY`、`LEGACY_FEATURE_LIMITATION`、各 `COUPLING_*`／coupling lost、`MISSING_MOTION`／`INSUFFICIENT_COVERAGE`、`NO_SLEEP_EVIDENCE`，最後才是 `exit_unclassified_hard_break`。`currentEligibilityReasons` 不再放 `ONSET_GUARD`；guard 仍可輸出 LIGHT，entry decision 以 guard 阻擋 Deep entry，若維護決策適用並因此退出，guard 也會出現在 maintenance reasons。
+
+診斷匯出新增 `retroactively_adjusted`、`retroactive_adjustment_reason`、`retroactive_adjustment_source_ms`。header 與 row 共用同一 schema，空值、`false`、`0` 分開輸出，欄位數不一致會直接拒絕。這仍是診斷／provenance 修正，沒有提高 `ALGORITHM_VERSION` 或 motion feature version，也沒有改動正式 stage intervals。
+
 `StagingReplayTest` 預設是 check-only，不覆寫 `docs/`；只有明確設定 `SLEEPTRACE_UPDATE_REPLAY_DOCS=true` 才進入文件更新模式。雜湊對象是原始 classpath resource bytes，沒有先正規化換行、空白或排序。`ALGORITHM_VERSION=7`、`MotionAccumulator.CURRENT_FEATURE_VERSION=5` 保持不變。

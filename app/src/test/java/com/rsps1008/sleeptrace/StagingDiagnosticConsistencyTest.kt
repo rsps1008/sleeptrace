@@ -75,6 +75,15 @@ class StagingDiagnosticConsistencyTest {
         if (minute.startMillis == base + 40 * MINUTE_MS) accumulatorMinute(40, missingSeconds) else minute
     }
 
+    private fun active(minute: MotionMinute) = minute.copy(
+        activeMillis = 6_000,
+        squaredDeltaTime = .30 * .30 * MINUTE_MS,
+        maxDelta = .30,
+        movementEvents = 1,
+        longestActiveMillis = 6_000,
+        quietTailMillis = 0
+    )
+
     @Test fun `dense short events formally exit and reject maintenance with the same reason`() {
         val result = analyze(rows().mapIndexed { index, minute ->
             if (index == 40 || index == 41) minute.copy(movementEvents = 5) else minute
@@ -138,6 +147,105 @@ class StagingDiagnosticConsistencyTest {
         assertFalse(exit.maintenanceDecision.allowed)
         assertEquals(0, exit.highMotionWindowsAfter)
         assertTrue(exit.transitionReason == "exit_sustained_rolling_motion")
+    }
+
+    @Test fun `active three in five rewrites only prior Deep minutes and records its confirmation source`() {
+        val result = analyze(rows().mapIndexed { index, minute ->
+            if (index in 40..42) active(minute) else minute
+        })
+        val exit = result.minutes[42]
+
+        assertEquals(SleepStageEstimator.Action.EXIT, exit.action)
+        assertEquals("exit_active_3_in_5", exit.event)
+        assertFalse(exit.retroactivelyAdjusted)
+        assertEquals(SleepStage.LIGHT, exit.formalStage)
+        for (index in 40..41) {
+            val minute = result.minutes[index]
+            assertEquals(SleepStage.DEEP, minute.formalStage)
+            assertEquals(SleepStage.LIGHT, minute.finalStage)
+            assertTrue(minute.retroactivelyAdjusted)
+            assertEquals(SleepStageEstimator.PostProcessReason.SUSTAINED_ACTIVITY_REWRITE,
+                minute.retroactiveAdjustmentReason)
+            assertEquals(base + 42 * MINUTE_MS, minute.retroactiveAdjustmentSourceMillis)
+            assertFalse(minute.action == SleepStageEstimator.Action.EXIT)
+            assertFalse(minute.event?.startsWith("exit_") == true)
+        }
+    }
+
+    @Test fun `isolated activity keeps Deep without retrospective provenance`() {
+        val result = analyze(rows().mapIndexed { index, minute ->
+            if (index == 40) active(minute) else minute
+        })
+        val isolated = result.minutes[40]
+
+        assertEquals(SleepStageEstimator.Action.MAINTAIN, isolated.action)
+        assertEquals(SleepStage.DEEP, isolated.formalStage)
+        assertEquals(SleepStage.DEEP, isolated.finalStage)
+        assertFalse(isolated.retroactivelyAdjusted)
+        assertEquals(null, isolated.retroactiveAdjustmentReason)
+        assertEquals(null, isolated.retroactiveAdjustmentSourceMillis)
+    }
+
+    @Test fun `hard break transition is derived from complete formal reasons with fixed precedence`() {
+        fun at(index: Int, transform: (MotionMinute) -> MotionMinute): SleepStageEstimator.MinuteDiagnostic =
+            analyze(rows().mapIndexed { i, minute -> if (i == index) transform(minute) else minute }).minutes[index]
+
+        val recording = at(40) { it.copy(recordingId = 78L) }
+        assertTrue(SleepStageEstimator.Reason.RECORDING_BOUNDARY in recording.maintenanceDecision.reasons)
+        assertEquals("exit_recording_boundary", recording.transitionReason)
+        assertFalse(recording.transitionReason == "exit_no_sleep_evidence_or_schedule")
+
+        val feature = at(40) { it.copy(featureVersion = MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION) }
+        assertTrue(SleepStageEstimator.Reason.LEGACY_FEATURE_LIMITATION in feature.maintenanceDecision.reasons)
+        assertEquals("exit_feature_boundary", feature.transitionReason)
+
+        val coverage = at(40) { it.copy(coveredMillis = 30_000L, sampleCount = 30) }
+        assertTrue(SleepStageEstimator.Reason.INSUFFICIENT_COVERAGE in coverage.maintenanceDecision.reasons)
+        assertEquals("exit_missing_motion", coverage.transitionReason)
+        assertFalse(coverage.transitionReason == "exit_no_sleep_evidence")
+
+        val phoneAndBoundary = SleepStageEstimator.analyze(
+            session(), rows().mapIndexed { i, minute -> if (i == 40) minute.copy(recordingId = 78L) else minute },
+            emptyList(), listOf(UsageInterval(base + 40 * MINUTE_MS, base + 40 * MINUTE_MS + 5_000L)),
+            listOf(SleepSegment(base, base + 80 * MINUTE_MS, 95)), schedule
+        ).minutes[40]
+        assertTrue(SleepStageEstimator.Reason.PHONE_IN_USE in phoneAndBoundary.maintenanceDecision.reasons)
+        assertTrue(SleepStageEstimator.Reason.RECORDING_BOUNDARY in phoneAndBoundary.maintenanceDecision.reasons)
+        assertEquals("exit_phone_use", phoneAndBoundary.transitionReason)
+    }
+
+    @Test fun `onset guard blocks entry but remains outside current eligibility blockers`() {
+        val result = SleepStageEstimator.analyze(
+            session(), rows(), emptyList(),
+            listOf(UsageInterval(base + 39 * MINUTE_MS, base + 40 * MINUTE_MS)),
+            listOf(SleepSegment(base, base + 80 * MINUTE_MS, 95)), schedule
+        )
+        val guarded = result.minutes[40]
+
+        assertTrue(guarded.currentEligibility)
+        assertTrue(guarded.currentEligibilityReasons.isEmpty())
+        assertFalse(guarded.canEnterDeep)
+        assertTrue(SleepStageEstimator.Reason.ONSET_GUARD in guarded.entryDecision.reasons)
+        assertEquals(SleepStage.LIGHT, guarded.finalStage)
+    }
+
+    @Test fun `backfill activity and safety provenance use independent channels`() {
+        val result = analyze(rows().mapIndexed { index, minute ->
+            if (index in 40..42) active(minute) else minute
+        })
+        val rewritten = result.minutes.first { it.retroactivelyAdjusted }
+        assertTrue(rewritten.retroactivelyAdjusted)
+        assertEquals(SleepStageEstimator.PostProcessReason.SUSTAINED_ACTIVITY_REWRITE,
+            rewritten.retroactiveAdjustmentReason)
+        assertTrue(result.minutes.any { it.wasBackfilled })
+
+        // The fields are deliberately independent: a later safety-cap pass can
+        // set its flag without erasing the activity source and reason.
+        val both = rewritten.copy(safetyCapAdjusted = true, finalStage = SleepStage.SLEEPING)
+        assertTrue(both.retroactivelyAdjusted)
+        assertEquals(SleepStageEstimator.PostProcessReason.SUSTAINED_ACTIVITY_REWRITE,
+            both.retroactiveAdjustmentReason)
+        assertTrue(both.safetyCapAdjusted)
     }
 
     @Test fun `legal real accumulator gap blocks only while it remains in the recent five-minute context`() {

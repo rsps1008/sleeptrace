@@ -35,11 +35,14 @@ object SleepStageEstimator {
         NO_SLEEP_EVIDENCE, PHONE_IN_USE, ONSET_GUARD, MISSING_MOTION, INSUFFICIENT_COVERAGE,
         COUPLING_INSUFFICIENT, COUPLING_EXPIRED, BASELINE_INSUFFICIENT, LOW_SIGNAL_DIFFERENTIATION,
         WINDOW_TOO_SHORT, ACTIVITY_TOO_HIGH, ENTER_DEEP, MAINTAIN_DEEP, EXIT_SUSTAINED_ACTIVITY,
+        EXIT_ACTIVE_3_IN_5, EXIT_DENSE_EVENTS, EXIT_SUSTAINED_ROLLING_MOTION,
         EXIT_COUPLING_LOST, SAFETY_CAP, LEGACY_FEATURE_LIMITATION, WINDOW_CONTAINS_GAP,
         RECORDING_BOUNDARY, COUPLING_INVALIDATED, LEGACY_PLACEMENT_UNKNOWN, ALLOWED_MINOR_GAP,
         RECENT_WINDOW_INCOMPLETE, MINOR_GAP_BUDGET_EXCEEDED
     }
     enum class Action { ENTER, MAINTAIN, EXIT, NONE }
+    /** Independent provenance for a stage changed after its formal minute decision. */
+    enum class PostProcessReason { SUSTAINED_ACTIVITY_REWRITE }
     data class Decision(
         val applicable: Boolean,
         val allowed: Boolean,
@@ -112,6 +115,9 @@ object SleepStageEstimator {
         val formalStage: SleepStage = stage,
         val wasBackfilled: Boolean = false,
         val safetyCapAdjusted: Boolean = false,
+        val retroactivelyAdjusted: Boolean = false,
+        val retroactiveAdjustmentReason: PostProcessReason? = null,
+        val retroactiveAdjustmentSourceMillis: Long? = null,
         val finalStage: SleepStage = stage,
         val highMotionWindowsBefore: Int = 0,
         val highMotionWindowsCandidate: Int = 0,
@@ -141,7 +147,8 @@ object SleepStageEstimator {
     private data class MinuteSignal(
         val start: Long, val end: Long, val motion: MotionMinute?, val coverageMotion: MotionMinute?,
         val inPhoneUse: Boolean, val inOnsetGuard: Boolean, val inSchedule: Boolean,
-        val beforeEvidence: Boolean, val recordingBoundary: Boolean = false
+        val beforeEvidence: Boolean, val recordingBoundary: Boolean = false,
+        val recordingIdBoundary: Boolean = false, val featureBoundary: Boolean = false
     ) {
         private val isFullBucket: Boolean get() = end - start == MINUTE_MS && start % MINUTE_MS == 0L
         /** Null means this row cannot safely use the full-minute gap exception. */
@@ -210,14 +217,15 @@ object SleepStageEstimator {
                 val lastUse = lastMeaningfulPhoneUseBefore(cursor, meaningfulUse)
                 val fullBucketInSession = motionStart >= session.startMillis && motionStart + MINUTE_MS <= session.endMillis
                 val bucketMotion = motionByMinute[motionStart]
+                val previousMotion = motionByMinute[motionStart - MINUTE_MS]
+                val recordingIdBoundary = bucketMotion != null && previousMotion != null && previousMotion.recordingId != bucketMotion.recordingId
+                val featureBoundary = bucketMotion != null && previousMotion != null && previousMotion.featureVersion != bucketMotion.featureVersion
                 add(MinuteSignal(cursor, end, bucketMotion.takeIf { fullBucketInSession }, bucketMotion,
                     phoneUse.any { it.startMillis < end && it.endMillis > cursor },
                     lastUse != null && cursor - lastUse < SLEEP_ONSET_GUARD_MILLIS,
                     schedule.windowAt(cursor) != null,
                     evidenceStart == null || cursor < evidenceStart,
-                    bucketMotion != null && motionByMinute[motionStart - MINUTE_MS]?.let {
-                        it.recordingId != bucketMotion.recordingId || it.featureVersion != bucketMotion.featureVersion
-                    } == true))
+                    recordingIdBoundary || featureBoundary, recordingIdBoundary, featureBoundary))
                 cursor = end
             }
         }
@@ -229,6 +237,9 @@ object SleepStageEstimator {
         val formalStages = MutableList(timeline.size) { SleepStage.SLEEPING }
         val wasBackfilled = BooleanArray(timeline.size)
         val safetyCapAdjusted = BooleanArray(timeline.size)
+        val retroactivelyAdjusted = BooleanArray(timeline.size)
+        val retroactiveAdjustmentReason = arrayOfNulls<PostProcessReason>(timeline.size)
+        val retroactiveAdjustmentSourceMillis = arrayOfNulls<Long>(timeline.size)
         val events = arrayOfNulls<String>(timeline.size)
         val formalDecisions = arrayOfNulls<FormalDecision>(timeline.size)
         var deep = false
@@ -238,6 +249,18 @@ object SleepStageEstimator {
             val decision = evaluateFormalDecision(index, timeline, rolling, baseline, evidenceStart, deep, highMotionWindows, ::canStage)
             formalDecisions[index] = decision
             highMotionWindows = decision.highMotionWindowsAfter
+            val formalStage = if (canStage(minute) && decision.action in setOf(Action.ENTER, Action.MAINTAIN)) {
+                SleepStage.DEEP
+            } else if (canStage(minute)) {
+                SleepStage.LIGHT
+            } else {
+                SleepStage.SLEEPING
+            }
+            // Set the current minute before post-processing so a rewrite range
+            // can include its confirmation minute without making that minute
+            // look retroactively changed.
+            formalStages[index] = formalStage
+            stages[index] = formalStage
             when (decision.action) {
                 Action.EXIT -> {
                     // Sustained activity cannot remain a Deep bridge; isolated turns are retained.
@@ -246,7 +269,13 @@ object SleepStageEstimator {
                         val recent = maxOf(0, index - 4)..index
                         val firstActive = recent.first { timeline[it].motion?.level == MotionLevel.ACTIVE }
                         for (i in firstActive..index) {
-                            stages[i] = if (canStage(timeline[i])) SleepStage.LIGHT else SleepStage.SLEEPING
+                            val rewritten = if (canStage(timeline[i])) SleepStage.LIGHT else SleepStage.SLEEPING
+                            if (stages[i] != rewritten) {
+                                stages[i] = rewritten
+                                retroactivelyAdjusted[i] = true
+                                retroactiveAdjustmentReason[i] = PostProcessReason.SUSTAINED_ACTIVITY_REWRITE
+                                retroactiveAdjustmentSourceMillis[i] = minute.start
+                            }
                         }
                     }
                     events[index] = decision.transitionReason
@@ -267,15 +296,6 @@ object SleepStageEstimator {
                 Action.MAINTAIN -> deep = true
                 Action.NONE -> if (!decision.priorState) deep = false
             }
-            val formalStage = if (canStage(minute) && decision.action in setOf(Action.ENTER, Action.MAINTAIN)) {
-                SleepStage.DEEP
-            } else if (canStage(minute)) {
-                SleepStage.LIGHT
-            } else {
-                SleepStage.SLEEPING
-            }
-            formalStages[index] = formalStage
-            stages[index] = formalStage
         }
         applySafetyBound(timeline, rolling, stages, events, safetyCapAdjusted, baseline,
             session.endMillis - session.startMillis - phoneUse.sumOf { it.endMillis - it.startMillis })
@@ -361,6 +381,9 @@ object SleepStageEstimator {
                 formalStage = formalStage,
                 wasBackfilled = wasBackfilled[i],
                 safetyCapAdjusted = safetyCapAdjusted[i],
+                retroactivelyAdjusted = retroactivelyAdjusted[i],
+                retroactiveAdjustmentReason = retroactiveAdjustmentReason[i],
+                retroactiveAdjustmentSourceMillis = retroactiveAdjustmentSourceMillis[i],
                 finalStage = finalStage,
                 highMotionWindowsBefore = decision.highMotionWindowsBefore,
                 highMotionWindowsCandidate = decision.highMotionWindowsCandidate,
@@ -423,7 +446,6 @@ object SleepStageEstimator {
     private fun currentEligibilityReasons(minute: MinuteSignal, baseline: NightlyBaseline?): List<Reason> = buildList {
         if (minute.beforeEvidence || !minute.inSchedule) add(Reason.NO_SLEEP_EVIDENCE)
         if (minute.inPhoneUse) add(Reason.PHONE_IN_USE)
-        if (minute.inOnsetGuard) add(Reason.ONSET_GUARD)
         if (minute.motion == null) add(Reason.MISSING_MOTION)
         else {
             if (!minute.validMotion || (minute.motion.longestGapMillis ?: 0L) > 0L) add(Reason.INSUFFICIENT_COVERAGE)
@@ -431,7 +453,8 @@ object SleepStageEstimator {
                 (baseline != null && minute.motion.featureVersion != baseline.featureVersion)) add(Reason.LEGACY_FEATURE_LIMITATION)
             if (!minute.couplingSupported) add(couplingReason(minute.motion))
         }
-        if (minute.recordingBoundary) add(Reason.RECORDING_BOUNDARY)
+        if (minute.recordingIdBoundary) add(Reason.RECORDING_BOUNDARY)
+        if (minute.featureBoundary) add(Reason.LEGACY_FEATURE_LIMITATION)
     }.distinct()
 
     private fun baselineReasons(baseline: NightlyBaseline?): List<Reason> = listOfNotNull(
@@ -476,7 +499,7 @@ object SleepStageEstimator {
                 priorState, currentEligibility, currentReasons, baselineReasons,
                 entry.decision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
                 maintenance, if (priorState) Action.EXIT else Action.NONE,
-                if (priorState) hardBreakTransition(minute) else null,
+                if (priorState) transitionReasonFor(maintenance.reasons, hardBreak = true) else null,
                 highMotionWindowsBefore, 0, 0
             )
         }
@@ -490,20 +513,23 @@ object SleepStageEstimator {
                 0
             }
             val maintenanceReasons = buildList {
-                if (short.activeMinutes >= 3) add(Reason.EXIT_SUSTAINED_ACTIVITY)
-                if (recent.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS) add(Reason.EXIT_SUSTAINED_ACTIVITY)
+                if (short.activeMinutes >= 3) {
+                    add(Reason.EXIT_SUSTAINED_ACTIVITY)
+                    add(Reason.EXIT_ACTIVE_3_IN_5)
+                }
+                if (recent.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS) {
+                    add(Reason.EXIT_SUSTAINED_ACTIVITY)
+                    add(Reason.EXIT_DENSE_EVENTS)
+                }
                 if (!minute.couplingSupported) add(Reason.EXIT_COUPLING_LOST)
-                if (highCandidate >= 3) add(Reason.EXIT_SUSTAINED_ACTIVITY)
+                if (highCandidate >= 3) {
+                    add(Reason.EXIT_SUSTAINED_ACTIVITY)
+                    add(Reason.EXIT_SUSTAINED_ROLLING_MOTION)
+                }
             }.distinct()
             val maintenance = Decision(true, maintenanceReasons.isEmpty(), maintenanceReasons)
             val action = if (maintenance.allowed) Action.MAINTAIN else Action.EXIT
-            val transition = if (maintenance.allowed) null else when {
-                short.activeMinutes >= 3 -> "exit_active_3_in_5"
-                recent.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS -> "exit_dense_events"
-                !minute.couplingSupported -> "exit_coupling_lost"
-                highCandidate >= 3 -> "exit_sustained_rolling_motion"
-                else -> "exit_sustained_activity"
-            }
+            val transition = if (maintenance.allowed) null else transitionReasonFor(maintenance.reasons, hardBreak = false)
             return FormalDecision(
                 priorState, currentEligibility, currentReasons, baselineReasons,
                 entry.decision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
@@ -558,8 +584,8 @@ object SleepStageEstimator {
             if (range.any { !timeline[it].couplingSupported }) {
                 block(Reason.COUPLING_INSUFFICIENT, range.filter { !timeline[it].couplingSupported })
             }
-            if (range.any { timeline[it].recordingBoundary }) {
-                block(Reason.RECORDING_BOUNDARY, range.filter { timeline[it].recordingBoundary })
+            if (range.any { timeline[it].recordingIdBoundary }) {
+                block(Reason.RECORDING_BOUNDARY, range.filter { timeline[it].recordingIdBoundary })
             }
             if (range.any { it != index && timeline[it].motion?.featureVersion != baseline?.featureVersion }) {
                 block(Reason.LEGACY_FEATURE_LIMITATION, range.filter { timeline[it].motion?.featureVersion != baseline?.featureVersion })
@@ -614,26 +640,36 @@ object SleepStageEstimator {
         currentReasons: List<Reason>,
         baselineReasons: List<Reason>
     ): List<Reason> = buildList {
-        if (minute.inPhoneUse) add(Reason.PHONE_IN_USE)
+        // Reuse the formal current blockers.  Maintenance contributes only the
+        // explicit coupling-exit marker retained by the existing diagnostics.
+        addAll(currentReasons)
         if (minute.inOnsetGuard) add(Reason.ONSET_GUARD)
-        if (minute.coverageMotion?.placement == Placement.BEDSIDE) add(Reason.EXIT_COUPLING_LOST)
-        if (minute.coverageMotion != null && !minute.coverageMotion.supportsCurrentStaging) add(Reason.LEGACY_FEATURE_LIMITATION)
-        if (!minute.validMotion) add(Reason.INSUFFICIENT_COVERAGE)
-        if (!minute.inSchedule || minute.beforeEvidence) add(Reason.NO_SLEEP_EVIDENCE)
-        if (!minute.couplingSupported) add(Reason.EXIT_COUPLING_LOST)
-        addAll(currentReasons.filter { it !in setOf(Reason.ONSET_GUARD, Reason.PHONE_IN_USE) })
+        if (minute.motion != null && !minute.couplingSupported) add(Reason.EXIT_COUPLING_LOST)
         addAll(baselineReasons)
         if (isEmpty() && baseline == null) add(Reason.BASELINE_INSUFFICIENT)
     }.distinct()
 
-    private fun hardBreakTransition(minute: MinuteSignal): String = when {
-        minute.inPhoneUse -> "exit_phone_use"
-        minute.inOnsetGuard -> "exit_onset_guard"
-        minute.coverageMotion?.placement == Placement.BEDSIDE -> "exit_bedside"
-        minute.coverageMotion != null && !minute.coverageMotion.supportsCurrentStaging -> "exit_legacy_or_incompatible_feature"
-        !minute.validMotion -> "exit_missing_motion"
-        !minute.couplingSupported -> "exit_coupling_lost"
-        else -> "exit_no_sleep_evidence_or_schedule"
+    /** Fixed precedence over formal decision reasons; never re-inspects a minute. */
+    private fun transitionReasonFor(reasons: List<Reason>, hardBreak: Boolean): String? {
+        val transition = when {
+            Reason.PHONE_IN_USE in reasons -> "exit_phone_use"
+            Reason.ONSET_GUARD in reasons -> "exit_onset_guard"
+            Reason.RECORDING_BOUNDARY in reasons -> "exit_recording_boundary"
+            Reason.LEGACY_FEATURE_LIMITATION in reasons -> "exit_feature_boundary"
+            reasons.any { it in setOf(
+                Reason.COUPLING_EXPIRED, Reason.COUPLING_INVALIDATED,
+                Reason.COUPLING_INSUFFICIENT, Reason.EXIT_COUPLING_LOST,
+                Reason.LEGACY_PLACEMENT_UNKNOWN
+            ) } -> "exit_coupling_lost"
+            reasons.any { it in setOf(Reason.MISSING_MOTION, Reason.INSUFFICIENT_COVERAGE) } -> "exit_missing_motion"
+            Reason.NO_SLEEP_EVIDENCE in reasons -> "exit_no_sleep_evidence"
+            Reason.EXIT_ACTIVE_3_IN_5 in reasons -> "exit_active_3_in_5"
+            Reason.EXIT_DENSE_EVENTS in reasons -> "exit_dense_events"
+            Reason.EXIT_SUSTAINED_ROLLING_MOTION in reasons -> "exit_sustained_rolling_motion"
+            Reason.EXIT_SUSTAINED_ACTIVITY in reasons -> "exit_sustained_activity"
+            else -> null
+        }
+        return transition ?: if (hardBreak) "exit_unclassified_hard_break" else null
     }
 
     private fun stagingRole(minute: MinuteSignal): String {
