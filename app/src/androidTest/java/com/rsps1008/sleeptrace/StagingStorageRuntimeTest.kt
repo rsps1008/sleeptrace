@@ -190,15 +190,15 @@ class StagingStorageRuntimeTest {
         assertEquals(1,store.sessions().size)
     }
 
-    @Test fun algorithmVersionThreeMigratesPreviouslyReconciledVersionTwo() = isolated { context ->
+    @Test fun algorithmVersionFourMigratesPreviouslyReconciledVersionThree() = isolated { context ->
         val prefs = context.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
         prefs.edit().putLong("reconcile_generation", 5L).putLong("reconciled_generation", 5L)
-            .putInt("reconciled_staging_version", 2).commit()
-        assertEquals(3, SleepStageEstimator.ALGORITHM_VERSION)
+            .putInt("reconciled_staging_version", 3).commit()
+        assertEquals(4, SleepStageEstimator.ALGORITHM_VERSION)
         assertTrue(AutomaticWorkSignals.isDirty(context))
         val migrationGeneration = AutomaticWorkSignals.generation(context)
         AutomaticWorkSignals.markReconciled(context, migrationGeneration)
         assertFalse(AutomaticWorkSignals.isDirty(context))
-        assertEquals(3, prefs.getInt("reconciled_staging_version", 0))
+        assertEquals(4, prefs.getInt("reconciled_staging_version", 0))
     }
 }

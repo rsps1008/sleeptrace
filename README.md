@@ -145,6 +145,6 @@ Health Connect 去重／更新依據：[Client Record ID 與版本](https://deve
 
 2026-09-30 第二輪校正驗證：testDebugUnitTest 共 89 項通過、0 failure／error；lintDebug 25 條 Warning、0 Error；assembleDebug、assembleDebugAndroidTest、assembleRelease 全部成功，Release 仍為 unsigned APK。合成 real_night_style fixture 的凍結舊規則產生 3 分鐘 Deep，新規則產生 132 分鐘，僅作工程 regression，不能視為真實生理分期。未在裝置執行 StagingStorageRuntimeTest、實際 Health Connect 寫入、實機整夜耗電或 PSG／穿戴對照。
 
-2026-09-30 motion feature guard／storage priority：MotionSleepEstimator 只以 v4 BED／QUIET 建立或延長安靜候選，v3 BED／ACTIVE 保留衝突證據；v3 QUIET 與 v1/v2 不提供睡眠正向證據。儲存順位明確為 v4 > v3 > v2 > v1。MotionEngineTest、SleepStageCalibrationTest 共 59 項通過，assembleDebugAndroidTest 成功；新增的 MotionStore 順序案例僅編譯，未在實機或模擬器執行。
+2026-09-30 motion feature guard／storage priority／reconcile migration：MotionSleepEstimator 只以 v4 BED／QUIET 建立或延長安靜候選，v3 BED／ACTIVE 保留衝突證據；v3 QUIET 與 v1/v2 不提供睡眠正向證據。儲存順位明確為 v4 > v3 > v2 > v1。候選生成規則改變使 reconciliation rule version 升至 4，將觸發已標記版本 3 的裝置整理近期資料。完整 `testDebugUnitTest` 113 項通過，lintDebug 25 warnings／0 errors，Debug、AndroidTest APK 與 Release 建置成功；隔離 SQLite 寫入與規則遷移 instrumentation 僅編譯，未在裝置執行，因目前只有實體裝置且測試限用可丟棄模擬器。
 
-第二輪演算法版本為 2：AutomaticWorkSignals 將尚未套用的新規則視為 dirty，開啟 App 時會沿用既有 KEEP 工作安排一次最近 48 小時重算。只有本輪完整資料交易完成且 generation 仍相同時才記錄版本已套用；新資料或權限變更仍保留原本 generation 保護。這不增加感測時間或分鐘摘要保存頻率。
+reconciliation rule version 目前為 4，沿用 `SleepStageEstimator.ALGORITHM_VERSION` 作為已保存規則版本。`AutomaticWorkSignals` 在保存版本低於目前版本時視為 dirty，讓升級後沿用既有 KEEP 工作重算最近 48 小時；只有 reconcile 的資料交易完成且 generation 仍相同時才記錄新版本。第二輪分期版本曾從 2 升至 3；後續動作候選 feature-version 規則改變候選邊界，因此再升至 4。這不增加感測時間或分鐘摘要保存頻率。

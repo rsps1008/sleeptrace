@@ -80,7 +80,7 @@ class SleepReconciler(private val context: Context) {
                 schedule = schedule
             )
             val old = existingRecent.firstOrNull { it.id == session.id || (it.startMillis < session.endMillis && it.endMillis > session.startMillis) }
-            session.copy(stageIntervals = preserveExistingStagesWithoutV2Evidence(estimate, old?.stageIntervals, session))
+            session.copy(stageIntervals = preserveExistingStagesWithoutCurrentEvidence(estimate, old?.stageIntervals, session))
         }
         store.mergeCalculated(staged, analysisStart, now)
         store.sessionsInRange(analysisStart, now)
@@ -95,7 +95,7 @@ class SleepReconciler(private val context: Context) {
                     sleepSegments = segments,
                     schedule = schedule
                 )
-                store.updateStageIntervals(session, preserveExistingStagesWithoutV2Evidence(estimate, session.stageIntervals, session))
+                store.updateStageIntervals(session, preserveExistingStagesWithoutCurrentEvidence(estimate, session.stageIntervals, session))
             }
         store.markReconciled(capturedGeneration)
     }
@@ -108,7 +108,7 @@ class SleepReconciler(private val context: Context) {
     }
 }
 
-internal fun preserveExistingStagesWithoutV2Evidence(
+internal fun preserveExistingStagesWithoutCurrentEvidence(
     result: SleepStageEstimator.StagingResult,
     existing: List<SleepStageInterval>?,
     session: SleepSession

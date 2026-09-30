@@ -164,9 +164,9 @@ class SleepStageCalibrationTest {
         assertNull(staged.baseline)
         assertEquals(0L, deepMinutes(staged))
         val existing = listOf(SleepStageInterval(base, base + 120 * MINUTE_MS, SleepStage.LIGHT))
-        assertEquals(existing, preserveExistingStagesWithoutV2Evidence(staged, existing, session()))
+        assertEquals(existing, preserveExistingStagesWithoutCurrentEvidence(staged, existing, session()))
         val synced = session().copy(state = SyncState.SYNCED, revision = 7, stageIntervals = existing)
-        val candidate = synced.copy(stageIntervals = preserveExistingStagesWithoutV2Evidence(staged, synced.stageIntervals, synced))
+        val candidate = synced.copy(stageIntervals = preserveExistingStagesWithoutCurrentEvidence(staged, synced.stageIntervals, synced))
         val merged = com.rsps1008.sleeptrace.sleep.mergeSleepSessions(listOf(synced), listOf(candidate)).single()
         assertEquals(7L, merged.revision)
         assertEquals(SyncState.SYNCED, merged.state)
@@ -225,23 +225,23 @@ class SleepStageCalibrationTest {
         assertTrue(staged.sensorCoverageRatio in 0.0..1.0)
     }
 
-    @Test fun `preservation clips legacy stages and does not preserve with v2 evidence`() {
+    @Test fun `preservation clips legacy stages and recomputes with current evidence`() {
         val old = listOf(SleepStageInterval(base, base + 120 * MINUTE_MS, SleepStage.DEEP))
         val manual = session().copy(startMillis = base + 20 * MINUTE_MS, endMillis = base + 80 * MINUTE_MS)
         val noFeature = SleepStageEstimator.analyze(manual, emptyList(), emptyList(),
             listOf(UsageInterval(base + 40 * MINUTE_MS, base + 45 * MINUTE_MS)),
             listOf(SleepSegment(manual.startMillis, manual.endMillis, 60)), schedule)
-        val clipped = preserveExistingStagesWithoutV2Evidence(noFeature, old, manual)
+        val clipped = preserveExistingStagesWithoutCurrentEvidence(noFeature, old, manual)
         assertEquals(manual.startMillis, clipped.first().startMillis)
         assertEquals(manual.endMillis, clipped.last().endMillis)
         assertTrue(clipped.all { it.startMillis >= manual.startMillis && it.endMillis <= manual.endMillis })
         assertTrue(clipped.any { it.stage == SleepStage.AWAKE })
 
-        val eightV2 = (0 until 8).map { row(it) }
-        val withInsufficientBaseline = result(eightV2)
+        val eightCurrent = (0 until 8).map { row(it) }
+        val withInsufficientBaseline = result(eightCurrent)
         assertNull(withInsufficientBaseline.baseline)
         assertEquals(8, withInsufficientBaseline.currentFeatureValidMinutes)
-        val recomputed = preserveExistingStagesWithoutV2Evidence(withInsufficientBaseline, old, session())
+        val recomputed = preserveExistingStagesWithoutCurrentEvidence(withInsufficientBaseline, old, session())
         assertTrue(recomputed.none { it.stage == SleepStage.DEEP })
     }
 

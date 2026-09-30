@@ -9,7 +9,8 @@ import com.rsps1008.sleeptrace.motion.Placement
 
 /** Offline engineering estimates inside an accepted session; never a clinical sleep stage. */
 object SleepStageEstimator {
-    const val ALGORITHM_VERSION = 3
+    // This version also gates automatic reconciliation-rule migrations.
+    const val ALGORITHM_VERSION = 4
     const val SLEEP_ONSET_GUARD_MILLIS = 15 * MINUTE_MS
     const val MINIMUM_BASELINE_MINUTES = 10
     const val DEEP_WINDOW_MINUTES = 15
