@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
+import android.app.DatePickerDialog
 import android.net.Uri
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -24,6 +25,7 @@ import androidx.activity.viewModels
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
@@ -51,6 +53,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.LocalDate
 
 class MainActivity : AppCompatActivity() {
     private lateinit var content: LinearLayout
@@ -86,6 +89,36 @@ class MainActivity : AppCompatActivity() {
         guideBackgroundAccessIfNeeded()
     }
     private val homeViewModel: HomeViewModel by viewModels()
+    private var exportDate: LocalDate? = null
+    private val createMotionCsv = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        val date = exportDate ?: return@registerForActivityResult
+        if (uri == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val zone = ZoneId.systemDefault()
+                    val start = date.atStartOfDay(zone).toInstant().toEpochMilli()
+                    val end = date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+                    val rows = dependencies.motionStore.read(start, end)
+                    contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
+                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement\r\n")
+                        val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(zone)
+                        rows.forEach { minute ->
+                            writer.append(formatter.format(Instant.ofEpochMilli(minute.startMillis))).append(',')
+                                .append((minute.coveredMillis / 1000.0).csvNumber()).append(',')
+                                .append((minute.activeMillis / 1000.0).csvNumber()).append(',')
+                                .append(minute.rms.csvNumber()).append(',')
+                                .append(minute.sampleCount.toString()).append(',')
+                                .append(minute.placement.name).append("\r\n")
+                        }
+                    } ?: error("無法建立匯出檔案")
+                    rows.size
+                }
+            }
+            result.onSuccess { count -> Toast.makeText(this@MainActivity, "已匯出 $count 分鐘資料", Toast.LENGTH_LONG).show() }
+                .onFailure { Toast.makeText(this@MainActivity, "匯出失敗：${it.message ?: "寫入檔案失敗"}", Toast.LENGTH_LONG).show() }
+        }
+    }
     private var startupPermissionCheckDone = false
     private var continueStartupPermissionFlow = false
     private lateinit var homeViews: HomeViews
@@ -361,6 +394,25 @@ class MainActivity : AppCompatActivity() {
             addView(historyAllButton)
         })
         configuredRoot.addView(historyCard)
+
+        configuredRoot.addView(createSectionTitle("動作資料匯出"))
+        val exportCard = createCard()
+        exportCard.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            addView(TextView(this@MainActivity).apply {
+                text = "匯出指定日期的每分鐘覆蓋時間、活動時間、變化 RMS、樣本數與放置模式 CSV。動作摘要保留 14 天；原始感測波形未保存。"
+                textSize = 13f
+                setTextColor(color(R.color.text_secondary))
+                setLineSpacing(0f, 1.2f)
+            })
+            addView(MaterialButton(this@MainActivity).apply {
+                text = "匯出每分鐘動作資料"
+                isAllCaps = false
+                setOnClickListener { chooseMotionExportDate() }
+            })
+        })
+        configuredRoot.addView(exportCard)
 
         configuredRoot.addView(createSectionTitle("自動偵測排程"))
         val scheduleTime = TextView(this).apply {
@@ -813,6 +865,17 @@ class MainActivity : AppCompatActivity() {
         }
         showMessage(getString(R.string.background_settings_unavailable))
     }
+
+    private fun chooseMotionExportDate() {
+        val yesterday = LocalDate.now().minusDays(1)
+        DatePickerDialog(this, { _, year, month, day ->
+            val date = LocalDate.of(year, month + 1, day)
+            exportDate = date
+            createMotionCsv.launch("sleeptrace_motion_${date}.csv")
+        }, yesterday.year, yesterday.monthValue - 1, yesterday.dayOfMonth).show()
+    }
+
+    private fun Double.csvNumber(): String = if (isFinite()) String.format(java.util.Locale.US, "%.6f", this) else ""
 
     private fun createSectionTitle(title: String): TextView = TextView(this).apply {
         text = title

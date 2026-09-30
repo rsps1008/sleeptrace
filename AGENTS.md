@@ -58,6 +58,7 @@
 - 不使用持續 CPU wake lock，不啟用陀螺儀、麥克風、定位或相機。`play-services-location` 是為了活動／Sleep API，不能據此聲稱有 GPS 定位功能。
 - `MotionService` 以 HandlerThread 收感測事件、以事件的單調時間轉成資料時間，不能用批次送達時間取代樣本時間。
 - 每分鐘保存覆蓋時間、活動時間、三軸變化 RMS 所需統計、樣本數及放置模式，不保存原始波形。約每 5 分鐘用 SQLite 交易寫入。
+- 首頁可選日期並透過 Android 文件建立器匯出 `motion.db` 分鐘摘要 CSV，欄位含本地時間、覆蓋秒數、活動秒數、RMS（m/s²）、樣本數及放置模式；逾 14 天可能已清理，未落盤資料不會由匯出補回。
 - 暫停、切換模式或正常停止先要求 sensor flush，最多等待 2 秒，再保存已收到資料。直接殺死程序可能遺失最後約 5 分鐘未存摘要及未送達批次，不能將缺口補成安靜。
 - 每分鐘有效覆蓋至少 45 秒才分類。相鄰三軸差值 ≥ 0.15 m/s² 算活動；活動時間比例 ≥ 5% 或差值 RMS ≥ 0.20 m/s²，該分鐘標示活動。門檻尚未校準。
 - 睡眠窗內的前景服務使用 `START_STICKY`；開機／套件更新接收器只會在目前處於睡眠窗時嘗試恢復。App 恢復前景也只會在睡眠窗內補啟動，無需感測器按鈕。強制停止、未授予鬧鐘特殊存取及 OEM 背景限制仍可能阻止恢復；不能承諾永不漏記。啟動失敗不會把整體記錄開關自動關閉。
@@ -219,6 +220,8 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 2026-09-29 本輪同步可靠性更新：Health Connect 永久 batch failure 改逐筆 fallback，只隔離單筆失敗紀錄；`FAILED_PERMANENT` 不再擴大 reconcile 舊資料範圍；UsageStats snapshot 改用 `(windowStart, windowEnd)` 複合鍵並按每晚權限狀態分析；時間修正、手動重試與權限恢復納入 work generation。完整 `testDebugUnitTest` 59 項通過，`lintDebug`、Debug APK、Android 測試 APK、Release APK 建置成功；未執行會修改裝置資料／權限的 instrumentation test，Health Connect 真實寫入與 SQLite 舊版升級尚未做裝置端驗證。
 
 2026-09-30 非醫療 Light／Deep 推估：新增 `SleepStageEstimator`，僅重算已成立 session 內的合併階段區間；motion-only 靜止候選須由 Sleep API segment 或 confidence ≥ 80 classification 確認起點，手機使用標記 Awake 並重置 continuity，15 分鐘 guard 後以當晚 P35、≥10／15 分鐘低活動窗及短翻身平滑判 Deep。新資料寫入 Health Connect AWAKE／LIGHT／DEEP，舊資料保留 SLEEPING fallback；`sleep_events.db` 升至 schema 9 保存 stageIntervals，詳情新增摘要與三色時間軸，取樣仍為 1 Hz。70 個 JVM 測試通過，lintDebug 有 24 條 Warning、無 Error，assembleDebug 成功。未執行裝置資料庫 migration instrumentation、真實 Health Connect 寫入、PSG／穿戴對照或整夜耗電驗證。
+
+2026-09-30 動作摘要匯出：首頁新增日期選擇及 Android 文件建立器 CSV 匯出，包含本地分鐘時間、覆蓋／活動秒數、合併三軸變化 RMS、樣本數及放置模式。`testDebugUnitTest` 70 項通過；尚未在實機核對指定夜晚的實際資料列。
 
 ## 9. 後續修改原則
 

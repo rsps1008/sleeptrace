@@ -50,6 +50,8 @@ Health Connect 待同步 session 會先驗證、保存 `SYNCING` 狀態，再以
 
 每分鐘累積三軸變化的 RMS、活動持續時間、有效覆蓋時間及樣本數。每約 5 分鐘以 SQLite 交易保存摘要；節流依 HandlerThread 實際處理的 `elapsedRealtime()` 計算，且包含裝置深度休眠時間，因此硬體 FIFO 一次釋放跨多分鐘的樣本時，不會在同一批事件中連續開啟多次交易。停止、暫停或切換模式時會先要求 flush，最多等待 2 秒，再保存已收到資料。系統直接殺死程序可能遺失最後約 5 分鐘尚未儲存的摘要及未送達批次，這些缺口不補成安靜。保留 14 天以上的動作摘要會在新增資料時至多每日清理一次，不保存原始波形，並排除系統備份。
 
+首頁「動作資料匯出」可選擇本機日期，透過 Android 文件建立器匯出該日 CSV：每分鐘本地時間、有效覆蓋秒數、活動秒數、三軸變化 RMS（m/s²）、樣本數與放置模式。資料直接讀取 `motion.db`，不需要網路或額外儲存權限；摘要逾 14 天可能已清理，直接殺掉程序時最後尚未落盤的約 5 分鐘也可能缺失。CSV 不含原始加速度計波形。
+
 ### 試驗規則
 
 - 每分鐘有效覆蓋至少 45 秒才判讀；長間隔、倒序、重複或非有限值樣本不增加覆蓋。
@@ -84,6 +86,8 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 `SleepScheduleTest` 涵蓋平日／週末時段與跨午夜邊界；`SleepUsageSnapshotTest` 檢查手機使用區間、理由文字、每窗權限狀態及窗口結束時間鍵；`AutomaticSyncTest` 覆蓋永久錯誤不會自動重試、批次永久失敗逐筆隔離，以及暫態錯誤保持整批可重試。`MotionEngineTest` 涵蓋 Google 分類觸發門檻、1 Hz／FIFO 設定、批次時間、資料缺口、手機使用、床邊放置、跨午夜、候選分段、動作衝突及同步 ID 保留。`MotionRuntimeTest` **僅供可丟棄的模擬器**：會改測試 App 時段、授權並模擬分類與電池狀態，檢查等待分類、觸發取樣、摘要保存、低電量暫停與供電恢復。不要對日常使用的實機執行該測試。
 
 2026-09-29 本輪資料庫／UI／同步效能更新已通過 43 個 JVM 測試、Lint（無 issue）、Debug APK 及 Android 測試 APK 建置；未在裝置執行會改動資料或權限的 instrumentation test。已涵蓋單筆 session 更新、最新／近期 classification 查詢、WAL 共用資料庫、固定首頁骨架、DST 跨日計算、零配置動作差值、校時補償及 Worker 暫態／永久錯誤分流的程式實作。真實 Health Connect 寫入／刪除、Google 分類延遲、Doze／OEM 背景行為、FIFO 與整夜耗電仍需在可丟棄模擬器或受控實機另外驗證。
+
+2026-09-30 動作摘要匯出：首頁新增日期選擇及 Android 文件建立器 CSV 匯出，輸出本地分鐘時間、覆蓋秒數、活動秒數、合併三軸變化 RMS、樣本數與放置模式；`testDebugUnitTest` 70 項通過。未在實機確認昨晚資料是否完整，也未保存或匯出逐軸原始波形。
 
 2026-09-29 P0／P1／P2 省電與排程更新：完整睡眠窗結束後才擷取每晚 UsageStats snapshot，共用於 AutomaticPlacement、SleepAnalyzer 與 Health Connect；未完成窗口不凍結半窗 snapshot、不產生或同步候選；App 偵測 UsageStats 權限由無到有時排入整理更新舊 snapshot；Sleep API 分類改為睡眠窗前 15 分鐘至結束，窗外只訂閱 segment；同步永久失敗不再被 recovery 重送；睡眠窗邊界避免無變化重設；立即整理採 KEEP，每日 recovery 有 BatteryNotLow；資料 retention 每日最多清理一次；Release R8 啟用；新增平日／週末排程。FGS 任何情況都只於睡眠窗執行；未授予鬧鐘特殊存取時使用非精準鬧鐘並提示背景啟動可能漏記，無全天 FGS fallback。53 個 JVM 測試通過；Debug lint 30 條 Warning、無 Error／Fatal；Debug APK、Android 測試 APK 與啟用 R8 的 unsigned Release APK 建置成功。未在實機驗證鬧鐘權限、背景啟動、Health Connect 或整夜耗電。
 
