@@ -58,7 +58,7 @@
 - 不使用持續 CPU wake lock，不啟用陀螺儀、麥克風、定位或相機。`play-services-location` 是為了活動／Sleep API，不能據此聲稱有 GPS 定位功能。
 - `MotionService` 以 HandlerThread 收感測事件、以事件的單調時間轉成資料時間，不能用批次送達時間取代樣本時間。
 - 每分鐘保存覆蓋時間、活動時間、三軸變化 RMS 所需統計、樣本數及放置模式，不保存原始波形。約每 5 分鐘用 SQLite 交易寫入。
-- 首頁可選日期並透過 Android 文件建立器匯出 `motion.db` 分鐘摘要 CSV，欄位含本地時間、覆蓋秒數、活動秒數、RMS（m/s²）、樣本數及放置模式；逾 14 天可能已清理，未落盤資料不會由匯出補回。
+- 首頁可選日期並透過 Android 文件建立器匯出 `motion.db` 分鐘摘要 CSV，含本地時間、覆蓋秒數、活動秒數、RMS、樣本數、feature version、resolved placement、motion level、nightly percentiles、stage/事件、baseline 資訊、版本／放置計數、Deep enter/exit 次數及 `staging_motion_role`。`valid_motion_minute_percent` 表示有效 current-feature 分鐘比例，`sensor_coverage_percent` 依 coveredMillis 估算感測覆蓋；partial minute 與 Awake 相交按時間比例近似。逾 14 天可能已清理，未落盤資料不會由匯出補回。
 - 暫停、切換模式或正常停止先要求 sensor flush，最多等待 2 秒，再保存已收到資料。直接殺死程序可能遺失最後約 5 分鐘未存摘要及未送達批次，不能將缺口補成安靜。
 - 每分鐘有效覆蓋至少 45 秒才分類。相鄰三軸差值 ≥ 0.15 m/s² 算活動；活動時間比例 ≥ 5% 或差值 RMS ≥ 0.20 m/s²，該分鐘標示活動。門檻尚未校準。
 - 睡眠窗內的前景服務使用 `START_STICKY`；開機／套件更新接收器只會在目前處於睡眠窗時嘗試恢復。App 恢復前景也只會在睡眠窗內補啟動，無需感測器按鈕。強制停止、未授予鬧鐘特殊存取及 OEM 背景限制仍可能阻止恢復；不能承諾永不漏記。啟動失敗不會把整體記錄開關自動關閉。
@@ -234,7 +234,7 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 
 ## 2026-09-30 第二輪非醫療分期校正（目前規則）
 
-當前分期規則以 README 的第二輪校正段落為準；上方歷史驗證基線中的 P35／10-of-15 是第一輪規則。新增固定事件時間秒桶 sample：每 1,000 ms 保留第一筆代表 acceleration，只有相鄰秒桶計算 delta；sampleCount 為代表樣本數，FIFO 不使用送達時間，舊特徵不可事後重建。staging baseline 取有效 BED、非 phone use／guard／排程外的 session 分鐘；計算 P25／P35／P50／P65／P70／P75 一次。ENTER 採 inclusive 15 分鐘、valid≥12、QUIET≥80%、ACTIVE≤1、BED≥10、rolling median≤P50；sleep evidence 起點與 session 起點中較晚者後至少 20 分鐘，最多回填 7 個有效 BED 穩定分鐘。STAY 不使用單分鐘 P35；EXIT 為 phone use／guard／缺口／BEDSIDE、5 分鐘內 ACTIVE≥3、完整 5 分鐘 median>P70 持續 3 窗口，或低活動 UNKNOWN 連續超過 5 分鐘。窄分布提高 BED 至 12 並使用 35% Deep 上限，一般安全上限 55%；不強迫固定生理比例。睡前 30 分鐘使用證據只作用於 guard，Awake 仍裁切 session 內。新版診斷 CSV 包含 resolved placement、featureVersion、nightly percentiles、rolling median、computed／stored stage、enter／exit 原因、motion coverage 與 first motion delay；一般 UI 保留既有非醫療文案。
+當前分期規則以 README 的第二輪校正段落為準；上方歷史驗證基線中的 P35／10-of-15 是第一輪規則。事件 timestamp cadence anchor 每 1,000 ms 接受特徵 sample，容忍 jitter，不插值缺失 slot；硬體 cadence ≤1,200ms 標 v2，較慢 cadence 標 v3，v1/v2/v3 不能跨邊界比較。motion store priority 為 v2 > v3 > v1，僅相同版本與 placement 才合併。staging baseline 取有效 BED、非 phone use／guard／排程外的 session 分鐘；計算 P25／P35／P50／P65／P70／P75 一次。ENTER 採 inclusive 15 分鐘、允許 12～15 valid、QUIET≥80%、ACTIVE≤1、BED≥10、rolling median≤P50；missing/coverage 不足只減少 valid count，phone use／guard／before-evidence／排程外／BEDSIDE／feature boundary 為 hard block，目前分鐘仍必須 valid v2 BED／QUIET。sleep evidence 起點與 session 起點中較晚者後至少 20 分鐘，最多回填 7 個穩定有效 BED 分鐘且缺口會停止回填。STAY 不使用單分鐘 P35；EXIT 為 phone use／guard／缺口／BEDSIDE、5 分鐘內 ACTIVE≥3、完整 5 分鐘 median>P70 持續 3 窗口，或低活動 UNKNOWN 連續超過 5 分鐘。窄分布提高 BED 至 12 並使用 35% Deep 上限，一般安全上限 55%；不強迫固定生理比例。睡前 30 分鐘使用證據只作用於 guard，Awake 仍裁切 session 內。診斷分開 valid-minute 與 sensor-second coverage，並記錄 v1/v2/v3 數量、baseline 與 staging role；一般 UI 保留既有非醫療文案。
 
 新增測試：SleepStageCalibrationTest（callback 1／10／50 Hz、FIFO、缺秒、inclusive window、stay／exit、睡前手機操作、平板案例、UNKNOWN grace、BEDSIDE／缺口、flat signal safety bound、Health Connect 常數與 client ID/version、合成 nightly fixture）；SleepUsageSnapshotTest 補上舊快照前置證據刷新。StagingStorageRuntimeTest 檢查 motion schema 1→2、usage schema 7／8／9→10，以及手動分期 revision／stale update，僅在可丟棄模擬器使用隔離 DB 執行。真實健康 CSV 不加入版本控制。
 
@@ -242,3 +242,5 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 2026-09-30 第二輪校正驗證：testDebugUnitTest 共 89 項通過、0 failure／error；lintDebug 25 條 Warning、0 Error；assembleDebug、assembleDebugAndroidTest、assembleRelease 全部成功，Release 仍為 unsigned APK。合成 real_night_style fixture 的凍結舊規則產生 3 分鐘 Deep，新規則產生 132 分鐘，僅作工程 regression，不能視為真實生理分期。未在裝置執行 StagingStorageRuntimeTest、實際 Health Connect 寫入、實機整夜耗電或 PSG／穿戴對照。
 
 第二輪演算法版本為 2：AutomaticWorkSignals 將尚未套用的新規則視為 dirty，開啟 App 時會沿用既有 KEEP 工作安排一次最近 48 小時重算。只有本輪完整資料交易完成且 generation 仍相同時才記錄版本已套用；新資料或權限變更仍保留原本 generation 保護。這不增加感測時間或分鐘摘要保存頻率。
+
+2026-09-30 第二輪 correctness／diagnostic 修正：Deep ENTER 將 12～15 valid minute 作為窗口條件，missing／coverage 不足只扣 valid count；v1/v3 feature boundary 仍 hard block，current minute 要求有效 v2 BED／QUIET，backfill 遇 gap 停止。集中 storage priority v2 > v3 > v1；CSV 新增 full／stay_only／activity_only／excluded role、v2/v1/v3 分鐘數、baseline eligible/current valid counts、valid minute coverage 與依 coveredMillis 估算的 sensor coverage。current cadence 上限收緊至 1,200 ms。舊 stage 只有零 current valid feature 時保留，並 clip 到 session、填補缺段與 overlay 新 Awake；有 v2 evidence 則採新結果。Safety cap 新增多 run ranking 與 weakest boundary partial trim regression。109 個 JVM tests 通過；lint 25 warnings、0 errors；Debug、AndroidTest APK、Release build 成功。ADB 只有兩台實體裝置，因此沒有執行僅允許 disposable emulator 的 StagingStorageRuntimeTest；未做實機睡眠校正。

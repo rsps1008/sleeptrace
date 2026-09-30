@@ -124,7 +124,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }.toMap()
                     contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
-                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,session_motion_coverage_percent,first_motion_delay_minutes,staging_motion_usable,staging_motion_exclusion_reason,baseline_feature_version,baseline_sample_count,baseline_reason\r\n")
+                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,valid_motion_minute_percent,sensor_coverage_percent,first_motion_delay_minutes,staging_motion_usable,staging_motion_role,staging_motion_exclusion_reason,baseline_feature_version,baseline_sample_count,baseline_eligible_minutes,current_feature_valid_minutes,baseline_reason,v1_minutes,v2_minutes,v3_minutes,bed_minutes,unknown_minutes,deep_enter_events,deep_exit_events\r\n")
                         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(zone)
                         rows.forEach { minute ->
                             writer.append(formatter.format(Instant.ofEpochMilli(minute.startMillis))).append(',')
@@ -151,12 +151,23 @@ class MainActivity : AppCompatActivity() {
                                 feature?.rollingMedianRms?.csvNumber().orEmpty(), feature?.stage?.name.orEmpty(),
                                 storedStage?.name.orEmpty(), feature?.event.orEmpty(),
                                 result?.motionCoverageRatio?.times(100)?.csvNumber().orEmpty(),
+                                result?.sensorCoverageRatio?.times(100)?.csvNumber().orEmpty(),
                                 result?.firstMotionDelayMillis?.div(60_000.0)?.csvNumber().orEmpty(),
                                 feature?.stagingMotionUsable?.toString().orEmpty(),
+                                feature?.stagingMotionRole.orEmpty(),
                                 feature?.stagingMotionExclusionReason.orEmpty(),
                                 result?.baselineFeatureVersion?.toString().orEmpty(),
                                 result?.baselineSampleCount?.toString().orEmpty(),
-                                result?.baselineReason.orEmpty()
+                                result?.baselineEligibleMinutes?.toString().orEmpty(),
+                                result?.currentFeatureValidMinutes?.toString().orEmpty(),
+                                result?.baselineReason.orEmpty(),
+                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.featureVersion == 1 }.toString(),
+                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION }.toString(),
+                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.featureVersion == MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION }.toString(),
+                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.placement == Placement.BED }.toString(),
+                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.placement == Placement.UNKNOWN }.toString(),
+                                result?.minutes?.count { it.event == "enter_stable_window" }?.toString().orEmpty(),
+                                result?.minutes?.count { it.event?.startsWith("exit_") == true }?.toString().orEmpty()
                             )
                             writer.append(',').append(extra.joinToString(",")).append("\r\n")
                         }

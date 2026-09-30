@@ -13,6 +13,15 @@ const val MINUTE_MS = 60_000L
 enum class Placement { BED, BEDSIDE, AUTO, UNKNOWN }
 enum class MotionLevel { QUIET, ACTIVE, UNKNOWN }
 
+object MotionFeaturePolicy {
+    /** CURRENT compatible features outrank cadence-incompatible, which outrank legacy data. */
+    fun storagePriority(featureVersion: Int): Int = when (featureVersion) {
+        MotionAccumulator.CURRENT_FEATURE_VERSION -> 3
+        MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION -> 2
+        else -> 1
+    }
+}
+
 data class SamplingPlan(val periodUs: Int, val latencyUs: Int) {
     companion object {
         fun choose(fifoCount: Int, minDelayUs: Int = 0): SamplingPlan {
@@ -74,11 +83,11 @@ class MotionAccumulator(plan: SamplingPlan, private val placement: Placement) {
         const val FEATURE_SAMPLE_PERIOD_MS = 1_000L
         const val CURRENT_FEATURE_VERSION = 2
         const val CADENCE_INCOMPATIBLE_FEATURE_VERSION = 3
-        private const val MIN_STAGING_CADENCE_MS = 1_500L
+        const val MAX_CURRENT_STAGING_CADENCE_MS = 1_200L
         private const val JITTER_TOLERANCE_MS = 100L
     }
     private val featurePeriodMs = maxOf(FEATURE_SAMPLE_PERIOD_MS, plan.periodUs / 1000L)
-    private val featureVersion = if (featurePeriodMs <= MIN_STAGING_CADENCE_MS) CURRENT_FEATURE_VERSION else CADENCE_INCOMPATIBLE_FEATURE_VERSION
+    private val featureVersion = if (featurePeriodMs <= MAX_CURRENT_STAGING_CADENCE_MS) CURRENT_FEATURE_VERSION else CADENCE_INCOMPATIBLE_FEATURE_VERSION
     private data class Bucket(var covered: Long = 0, var active: Long = 0, var squared: Double = 0.0, var count: Int = 0)
     private val buckets = sortedMapOf<Long, Bucket>()
     private var lastRawTime = Long.MIN_VALUE

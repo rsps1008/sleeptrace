@@ -68,6 +68,39 @@ class StagingStorageRuntimeTest {
         }
     }
 
+    @Test fun motionStoreUsesSemanticPriorityAndNeverAddsDifferentFeatures() = isolated { context ->
+        MotionStore(context).use { store ->
+            fun put(start: Long, version: Int, covered: Long, active: Long, squared: Double, samples: Int) =
+                store.append(listOf(MotionMinute(start, covered, active, squared, samples, Placement.AUTO, version)), now = start + MINUTE_MS)
+            put(0, 3, 20_000, 1_000, 4.0, 20)
+            put(0, 2, 30_000, 2_000, 9.0, 30)
+            var saved = store.read(0, MINUTE_MS).single()
+            assertEquals(2, saved.featureVersion)
+            assertEquals(30_000L, saved.coveredMillis)
+            assertEquals(2_000L, saved.activeMillis)
+            assertEquals(9.0, saved.squaredDeltaTime, 0.0)
+            assertEquals(30, saved.sampleCount)
+            put(0, 3, 10_000, 4_000, 16.0, 10)
+            saved = store.read(0, MINUTE_MS).single()
+            assertEquals(2, saved.featureVersion)
+            assertEquals(30_000L, saved.coveredMillis)
+            put(MINUTE_MS, 2, 30_000, 2_000, 9.0, 30)
+            put(MINUTE_MS, 1, 10_000, 4_000, 16.0, 10)
+            saved = store.read(MINUTE_MS, 2 * MINUTE_MS).single()
+            assertEquals(2, saved.featureVersion)
+            assertEquals(30_000L, saved.coveredMillis)
+            put(2 * MINUTE_MS, 1, 10_000, 2_000, 4.0, 10)
+            put(2 * MINUTE_MS, 2, 20_000, 3_000, 9.0, 20)
+            put(2 * MINUTE_MS, 2, 5_000, 1_000, 1.0, 5)
+            saved = store.read(2 * MINUTE_MS, 3 * MINUTE_MS).single()
+            assertEquals(2, saved.featureVersion)
+            assertEquals(25_000L, saved.coveredMillis)
+            assertEquals(4_000L, saved.activeMillis)
+            assertEquals(10.0, saved.squaredDeltaTime, 0.0)
+            assertEquals(25, saved.sampleCount)
+        }
+    }
+
     @Test fun v7ToV9UsageSnapshotsKeepWindowKeysAndRefreshMissingLookbackEvidence() {
       for (version in 7..9) isolated { context ->
         context.openOrCreateDatabase("sleep_events.db",Context.MODE_PRIVATE,null).use { db ->

@@ -97,7 +97,15 @@ class SleepStageCalibrationTest {
         }
     }
 
-    @Test fun `sensor cadence above one point five seconds is retained but not Deep eligible`() {
+    @Test fun `current feature cadence ends at twelve hundred milliseconds`() {
+        for ((period, expected) in listOf(1_000L to 2, 1_100L to 2, 1_200L to 2, 1_300L to 3, 2_000L to 3)) {
+            val engine = MotionAccumulator(SamplingPlan.choose(100, (period * 1_000).toInt()), Placement.BED)
+            for (ms in 0L..60_000L step period) engine.add(base + ms, 0.01, 0.0, 9.81)
+            assertTrue("period=$period", engine.drain(base + 60_000).all { it.featureVersion == expected })
+        }
+    }
+
+    @Test fun `sensor cadence above one point two seconds is retained but not Deep eligible`() {
         val engine = MotionAccumulator(SamplingPlan.choose(100, 2_000_000), Placement.BED)
         for (ms in 0L..180_000L step 2_000L) engine.add(base + ms, 0.01, 0.0, 9.81)
         val rows = engine.drain(base + 180_000)
@@ -105,6 +113,20 @@ class SleepStageCalibrationTest {
         assertTrue(rows.all { it.featureVersion == MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION })
         assertNull(result(rows, 3).baseline)
         assertEquals(0L, deepMinutes(result(rows, 3)))
+    }
+
+    @Test fun `eight hours of deterministic timestamp jitter does not accumulate cadence drift`() {
+        val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.AUTO)
+        for (second in 0..28_800) {
+            val jitter = when (second % 5) { 0 -> 20L; 1 -> -30L; 2 -> 15L; 3 -> -10L; else -> 5L }
+            engine.add(base + second * 1_000L + jitter, 0.01, 0.0, 9.81)
+        }
+        val output = engine.drain(base + 28_800 * 1_000L)
+        assertTrue(output.size >= 480)
+        assertTrue(output.all { it.sampleCount in 58..62 })
+        assertTrue(kotlin.math.abs(output.sumOf { it.coveredMillis } - 28_800_000L) < 20_000L)
+        val hourly = output.chunked(60).map { hour -> hour.sumOf { it.coveredMillis } }
+        assertTrue(hourly.all { it in 3_590_000L..3_610_000L })
     }
 
     @Test fun `v1 values never influence v2 nightly baseline`() {
@@ -127,13 +149,105 @@ class SleepStageCalibrationTest {
         assertNull(staged.baseline)
         assertEquals(0L, deepMinutes(staged))
         val existing = listOf(SleepStageInterval(base, base + 120 * MINUTE_MS, SleepStage.LIGHT))
-        assertEquals(existing, preserveExistingStagesWithoutV2Evidence(staged, existing))
+        assertEquals(existing, preserveExistingStagesWithoutV2Evidence(staged, existing, session()))
         val synced = session().copy(state = SyncState.SYNCED, revision = 7, stageIntervals = existing)
-        val candidate = synced.copy(stageIntervals = preserveExistingStagesWithoutV2Evidence(staged, synced.stageIntervals))
+        val candidate = synced.copy(stageIntervals = preserveExistingStagesWithoutV2Evidence(staged, synced.stageIntervals, synced))
         val merged = com.rsps1008.sleeptrace.sleep.mergeSleepSessions(listOf(synced), listOf(candidate)).single()
         assertEquals(7L, merged.revision)
         assertEquals(SyncState.SYNCED, merged.state)
         assertEquals(existing, merged.stageIntervals)
+    }
+
+    @Test fun `deep enter accepts fourteen valid and one insufficient coverage minute`() {
+        val signal = rows().map { if (((it.startMillis - base) / MINUTE_MS).toInt() == 30) it.copy(coveredMillis = 44_000) else it }
+        val staged = result(signal, usage = listOf(UsageInterval(base, base + 5 * MINUTE_MS)), evidenceStart = 14)
+        assertTrue(staged.minutes.slice(20..34).any { it.event == "enter_stable_window" })
+        assertEquals(SleepStage.DEEP, stage(staged, 34))
+    }
+
+    @Test fun `deep enter permits twelve valid minutes and rejects eleven`() {
+        val gaps12 = setOf(20, 22, 24)
+        val twelve = result(rows().filterNot { ((it.startMillis - base) / MINUTE_MS).toInt() in gaps12 },
+            usage = listOf(UsageInterval(base, base + 5 * MINUTE_MS)), evidenceStart = 14)
+        assertEquals("enter_stable_window", twelve.minutes[34].event)
+        assertEquals(SleepStage.DEEP, stage(twelve, 34))
+        val gaps11 = setOf(20, 22, 24, 26)
+        val eleven = result(rows().filterNot { ((it.startMillis - base) / MINUTE_MS).toInt() in gaps11 },
+            usage = listOf(UsageInterval(base, base + 5 * MINUTE_MS)), evidenceStart = 14)
+        assertNotEquals("enter_stable_window", eleven.minutes[34].event)
+        assertEquals("enter_stable_window", eleven.minutes[35].event)
+    }
+
+    @Test fun `feature definition boundary blocks deep entry despite twelve other valid minutes`() {
+        for (version in listOf(1, MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION)) {
+            val mixed = rows().map { if (((it.startMillis - base) / MINUTE_MS).toInt() == 25) it.copy(featureVersion = version) else it }
+            val staged = result(mixed, usage = listOf(UsageInterval(base, base + 5 * MINUTE_MS)), evidenceStart = 14)
+            assertNotEquals("enter_stable_window", staged.minutes[34].event)
+            assertEquals(SleepStage.LIGHT, stage(staged, 25))
+        }
+    }
+
+    @Test fun `deep confirmation backfill stops at a missing minute`() {
+        val signal = rows().filterNot { ((it.startMillis - base) / MINUTE_MS).toInt() == 30 }
+            .map { minute -> if (((minute.startMillis - base) / MINUTE_MS).toInt() in 18..19)
+                minute.copy(activeMillis = 6_000, squaredDeltaTime = .3 * .3 * MINUTE_MS) else minute }
+        val staged = result(signal)
+        assertEquals("enter_stable_window", staged.minutes[33].event)
+        assertEquals(SleepStage.LIGHT, stage(staged, 30))
+        assertEquals(SleepStage.DEEP, stage(staged, 31))
+    }
+
+    @Test fun `minute validity and actual sensor coverage are reported separately`() {
+        val raw = rows(100).map { it.copy(coveredMillis = 45_000) }
+        val awake = listOf(UsageInterval(base + 20 * MINUTE_MS, base + 40 * MINUTE_MS))
+        val staged = result(raw, 100, awake)
+        assertEquals(100.0, staged.motionCoverageRatio * 100, .01)
+        assertEquals(75.0, staged.sensorCoverageRatio * 100, .1)
+        assertTrue(staged.sensorCoverageRatio in 0.0..1.0)
+    }
+
+    @Test fun `preservation clips legacy stages and does not preserve with v2 evidence`() {
+        val old = listOf(SleepStageInterval(base, base + 120 * MINUTE_MS, SleepStage.DEEP))
+        val manual = session().copy(startMillis = base + 20 * MINUTE_MS, endMillis = base + 80 * MINUTE_MS)
+        val noFeature = SleepStageEstimator.analyze(manual, emptyList(), emptyList(),
+            listOf(UsageInterval(base + 40 * MINUTE_MS, base + 45 * MINUTE_MS)),
+            listOf(SleepSegment(manual.startMillis, manual.endMillis, 60)), schedule)
+        val clipped = preserveExistingStagesWithoutV2Evidence(noFeature, old, manual)
+        assertEquals(manual.startMillis, clipped.first().startMillis)
+        assertEquals(manual.endMillis, clipped.last().endMillis)
+        assertTrue(clipped.all { it.startMillis >= manual.startMillis && it.endMillis <= manual.endMillis })
+        assertTrue(clipped.any { it.stage == SleepStage.AWAKE })
+
+        val eightV2 = (0 until 8).map { row(it) }
+        val withInsufficientBaseline = result(eightV2)
+        assertNull(withInsufficientBaseline.baseline)
+        assertEquals(8, withInsufficientBaseline.currentFeatureValidMinutes)
+        val recomputed = preserveExistingStagesWithoutV2Evidence(withInsufficientBaseline, old, session())
+        assertTrue(recomputed.none { it.stage == SleepStage.DEEP })
+    }
+
+    @Test fun `feature storage priority favors current over cadence and legacy`() {
+        assertTrue(MotionFeaturePolicy.storagePriority(2) > MotionFeaturePolicy.storagePriority(3))
+        assertTrue(MotionFeaturePolicy.storagePriority(3) > MotionFeaturePolicy.storagePriority(1))
+    }
+
+    @Test fun `diagnostic roles distinguish stay-only and incompatible features`() {
+        val rows = rows().map { minute ->
+            when (((minute.startMillis - base) / MINUTE_MS).toInt()) {
+                40 -> minute.copy(placement = Placement.UNKNOWN)
+                41 -> minute.copy(featureVersion = MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION)
+                else -> minute
+            }
+        }
+        val staged = result(rows)
+        val stay = staged.minutes[40]
+        assertEquals("stay_only", stay.stagingMotionRole)
+        assertTrue(stay.stagingMotionUsable)
+        assertNull(stay.stagingMotionExclusionReason)
+        val incompatible = staged.minutes[41]
+        assertEquals("activity_only", incompatible.stagingMotionRole)
+        assertFalse(incompatible.stagingMotionUsable)
+        assertEquals("cadence_incompatible_feature", incompatible.stagingMotionExclusionReason)
     }
 
     @Test fun `recording disabled still reconciles stored history and empty install can complete migration`() {
@@ -262,6 +376,26 @@ class SleepStageCalibrationTest {
         assertTrue(staged.baseline!!.narrowDistribution)
         assertTrue(staged.minutes.any { it.event == "safety_cap_low_differentiation" })
         assertEquals(SleepStage.LIGHT, stage(staged, 30))
+        assertEquals(SleepStage.DEEP, stage(staged, 150))
+    }
+
+    @Test fun `safety cap ranks three runs and partially trims the weakest remaining boundary`() {
+        val signal = (0 until 380).map { i ->
+            when {
+                i >= 280 -> row(i, .00204, Placement.BEDSIDE)
+                i in 45..49 || i in 110..114 -> row(i, .00202, active = 6_000)
+                i in 0..44 -> row(i, .00202)
+                i in 50..109 -> row(i, .002015)
+                i in 115..184 -> row(i, .00201)
+                else -> row(i, .00204, active = 6_000)
+            }
+        }
+        val staged = result(signal, 380)
+        assertTrue(staged.baseline!!.narrowDistribution)
+        assertTrue(staged.minutes.any { it.event == "safety_cap_low_differentiation" })
+        val capped = staged.minutes.filter { it.event == "safety_cap_low_differentiation" }.map { ((it.startMillis - base) / MINUTE_MS).toInt() }
+        assertTrue("capped=$capped", capped.any { it < 45 })
+        assertTrue(staged.minutes.any { it.startMillis < base + 45 * MINUTE_MS && it.stage == SleepStage.DEEP })
         assertEquals(SleepStage.DEEP, stage(staged, 150))
     }
 

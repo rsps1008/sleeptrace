@@ -80,7 +80,7 @@ class SleepReconciler(private val context: Context) {
                 schedule = schedule
             )
             val old = existingRecent.firstOrNull { it.id == session.id || (it.startMillis < session.endMillis && it.endMillis > session.startMillis) }
-            session.copy(stageIntervals = preserveExistingStagesWithoutV2Evidence(estimate, old?.stageIntervals))
+            session.copy(stageIntervals = preserveExistingStagesWithoutV2Evidence(estimate, old?.stageIntervals, session))
         }
         store.mergeCalculated(staged, analysisStart, now)
         store.sessionsInRange(analysisStart, now)
@@ -95,7 +95,7 @@ class SleepReconciler(private val context: Context) {
                     sleepSegments = segments,
                     schedule = schedule
                 )
-                store.updateStageIntervals(session, preserveExistingStagesWithoutV2Evidence(estimate, session.stageIntervals))
+                store.updateStageIntervals(session, preserveExistingStagesWithoutV2Evidence(estimate, session.stageIntervals, session))
             }
         store.markReconciled(capturedGeneration)
     }
@@ -110,8 +110,35 @@ class SleepReconciler(private val context: Context) {
 
 internal fun preserveExistingStagesWithoutV2Evidence(
     result: SleepStageEstimator.StagingResult,
-    existing: List<SleepStageInterval>?
-): List<SleepStageInterval> = if (result.baseline == null && !existing.isNullOrEmpty()) existing else result.intervals
+    existing: List<SleepStageInterval>?,
+    session: SleepSession
+): List<SleepStageInterval> {
+    if (result.currentFeatureValidMinutes > 0 || existing.isNullOrEmpty() || session.endMillis <= session.startMillis) {
+        return result.intervals
+    }
+    val clipped = existing.mapNotNull { old ->
+        val start = maxOf(session.startMillis, old.startMillis)
+        val end = minOf(session.endMillis, old.endMillis)
+        if (end <= start) null else SleepStageInterval(start, end,
+            if (old.stage == SleepStage.AWAKE) SleepStage.LIGHT else old.stage)
+    }.sortedBy { it.startMillis }
+    val boundaries = (listOf(session.startMillis, session.endMillis) +
+        clipped.flatMap { listOf(it.startMillis, it.endMillis) } +
+        result.intervals.filter { it.stage == SleepStage.AWAKE }.flatMap { listOf(it.startMillis, it.endMillis) })
+        .distinct().sorted()
+    val output = mutableListOf<SleepStageInterval>()
+    boundaries.zipWithNext().forEach { (start, end) ->
+        if (end <= start) return@forEach
+        val awake = result.intervals.any { it.stage == SleepStage.AWAKE && it.startMillis < end && it.endMillis > start }
+        val oldStage = clipped.firstOrNull { it.startMillis <= start && it.endMillis >= end }?.stage ?: SleepStage.LIGHT
+        val stage = if (awake) SleepStage.AWAKE else oldStage
+        val previous = output.lastOrNull()
+        if (previous != null && previous.endMillis == start && previous.stage == stage)
+            output[output.lastIndex] = previous.copy(endMillis = end)
+        else output += SleepStageInterval(start, end, stage)
+    }
+    return output
+}
 
 internal const val PRE_SESSION_USAGE_LOOKBACK = 30 * com.rsps1008.sleeptrace.motion.MINUTE_MS
 
