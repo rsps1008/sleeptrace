@@ -327,7 +327,14 @@ object SleepStageEstimator {
             return buildList {
                 addAll(decision.currentEligibilityReasons)
                 addAll(decision.baselineReasons)
-                addAll(decision.windowBlockingReasons)
+                // Window blockers and informational minor-gap evidence belong
+                // to the entry evaluation.  Keep them in their dedicated
+                // diagnostic columns, but expose them as formal reasons only
+                // when entry is the state machine's applicable branch.
+                if (decision.entryDecision.applicable) {
+                    addAll(decision.windowBlockingReasons)
+                    addAll(decision.nonBlockingReasons)
+                }
                 if (decision.maintenanceDecision.applicable && !decision.maintenanceDecision.allowed) {
                     addAll(decision.maintenanceDecision.reasons)
                 }
@@ -337,7 +344,6 @@ object SleepStageEstimator {
                     else -> Unit
                 }
                 if (safetyCapAdjusted[i]) add(Reason.SAFETY_CAP)
-                addAll(decision.nonBlockingReasons)
             }.distinct()
         }
         val diagnostic = timeline.indices.map { i ->

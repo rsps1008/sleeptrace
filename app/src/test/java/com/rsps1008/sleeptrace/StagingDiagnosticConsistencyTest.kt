@@ -131,6 +131,26 @@ class StagingDiagnosticConsistencyTest {
         assertTrue(isolated.maintenanceDecision.allowed)
         assertTrue(isolated.canMaintainDeep)
         assertEquals(SleepStage.DEEP, stageAt(result, 35))
+        assertEquals(SleepStage.DEEP, isolated.finalStage)
+        assertTrue(SleepStageEstimator.Reason.ACTIVITY_TOO_HIGH in isolated.windowBlockingReasons)
+        assertFalse(SleepStageEstimator.Reason.ACTIVITY_TOO_HIGH in isolated.reasons)
+        assertEquals(SleepStageEstimator.Reason.MAINTAIN_DEEP, isolated.primaryReason)
+    }
+
+    @Test fun `hypothetical entry blockers remain separate from formal maintenance reasons`() {
+        val result = analyze(rows().mapIndexed { index, minute ->
+            if (index == 35) active(minute) else minute
+        })
+        val maintained = result.minutes[35]
+
+        assertTrue(maintained.priorState)
+        assertFalse(maintained.entryDecision.applicable)
+        assertTrue(SleepStageEstimator.Reason.ACTIVITY_TOO_HIGH in maintained.entryDecision.reasons)
+        assertTrue(SleepStageEstimator.Reason.ACTIVITY_TOO_HIGH in maintained.windowBlockingReasons)
+        assertTrue(maintained.maintenanceDecision.applicable)
+        assertTrue(maintained.maintenanceDecision.allowed)
+        assertEquals(listOf(SleepStageEstimator.Reason.MAINTAIN_DEEP), maintained.reasons)
+        assertEquals(SleepStageEstimator.Reason.MAINTAIN_DEEP, maintained.primaryReason)
     }
 
     @Test fun `formal decision applicability follows the prior Deep state`() {
