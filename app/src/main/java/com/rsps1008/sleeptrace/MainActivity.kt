@@ -111,7 +111,7 @@ class MainActivity : AppCompatActivity() {
                     val usage = schedule.windowsBetween(contextStart, contextEnd).flatMap {
                         store.usageSnapshot(it.startMillis, it.endMillis)?.intervals.orEmpty()
                     }
-                    val resolved = AutomaticPlacement.resolve(dependencies.motionStore.read(contextStart, contextEnd), usage)
+                    val resolved = AutomaticPlacement.resolve(dependencies.motionStore.read(contextStart, contextEnd), usage, schedule)
                     val placementByMinute = resolved.associateBy { it.startMillis }
                     val samples = store.recentSamples(contextStart)
                     val segments = store.segments(contextStart, contextEnd)
@@ -122,7 +122,7 @@ class MainActivity : AppCompatActivity() {
                         result.minutes.map { minute ->
                             (Math.floorDiv(minute.startMillis, MINUTE_MS) * MINUTE_MS) to Triple(session, result, minute)
                         }
-                    }.toMap()
+                    }.groupBy({ it.first }, { it.second })
                     data class SessionExportStats(
                         val legacyFeatureMinutes: Int,
                         val currentFeatureMinutes: Int,
@@ -132,6 +132,14 @@ class MainActivity : AppCompatActivity() {
                         val deepEnterEvents: Int,
                         val deepExitEvents: Int
                     )
+                    val captures = dependencies.motionStore.captures(contextStart, contextEnd)
+                    val rawByMinute = rows.associateBy { it.startMillis }
+                    val exportRows = (rows.map { it.startMillis } + diagnosticByMinute.keys.filter { it >= start && it < end })
+                        .distinct().sorted().flatMap { key ->
+                            val motion = rawByMinute[key] ?: com.rsps1008.sleeptrace.motion.MotionMinute(key, 0, 0, 0.0, 0, Placement.UNKNOWN, 0)
+                            val matches = diagnosticByMinute[key].orEmpty()
+                            if (matches.isEmpty()) listOf(motion to null) else matches.map { motion to it }
+                        }
                     val exportStats = sessions.associateWith { session ->
                         val sessionRows = resolved.filter {
                             it.startMillis >= session.startMillis && it.startMillis < session.endMillis
@@ -153,26 +161,31 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
                     contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
-                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,valid_motion_minute_percent,sensor_coverage_percent,first_motion_delay_minutes,staging_motion_usable,staging_motion_role,staging_motion_exclusion_reason,baseline_feature_version,baseline_sample_count,baseline_eligible_minutes,current_feature_valid_minutes,baseline_reason,legacy_feature_minutes,current_feature_minutes,cadence_incompatible_minutes,bed_minutes,unknown_minutes,deep_enter_events,deep_exit_events\r\n")
+                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,valid_motion_minute_percent,sensor_coverage_percent,first_motion_delay_minutes,staging_motion_usable,staging_motion_role,staging_motion_exclusion_reason,baseline_feature_version,baseline_sample_count,baseline_eligible_minutes,current_feature_valid_minutes,baseline_reason,legacy_feature_minutes,current_feature_minutes,cadence_incompatible_minutes,bed_minutes,unknown_minutes,deep_enter_events,deep_exit_events,stage_algorithm_version,stored_stage_algorithm_version,stored_stage_feature_version,minute_end_epoch_ms,missing_ms,longest_gap_ms,max_delta_m_s2,movement_events,longest_active_ms,quiet_tail_ms,posture_delta_m_s2,recording_id,coupling_state,coupling_age_ms,coupling_invalidation,can_stage,can_enter_deep,can_maintain_deep,reason_codes,primary_reason,phone_use_overlap_ms,onset_guard,sleep_evidence,first_valid_motion_delay_ms,span_motion_coverage,stageable_sleep_coverage,session_span_ms,sleep_ms,deep_ms,light_ms,undetermined_ms,awake_ms,undetermined_reasons_ms,night_longest_gap_ms,exact_computed_parts,exact_stored_parts,capture_trigger,scheduled_window_start_ms,sensor_registered_at_ms,first_event_ms,requested_period_us,fifo_latency_us,fifo_count,wake_up,raw_events,rejected_events,mean_event_interval_ms,max_event_interval_ms\r\n")
                         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(zone)
-                        rows.forEach { minute ->
+                        exportRows.forEach { (minute, diagnostic) ->
+                            val measured = minute.featureVersion != 0
                             writer.append(formatter.format(Instant.ofEpochMilli(minute.startMillis))).append(',')
-                                .append((minute.coveredMillis / 1000.0).csvNumber()).append(',')
-                                .append((minute.activeMillis / 1000.0).csvNumber()).append(',')
-                                .append(minute.rms.csvNumber()).append(',')
-                                .append(minute.sampleCount.toString()).append(',')
-                                .append(minute.placement.name)
-                            val diagnostic = diagnosticByMinute[minute.startMillis]
+                                .append(if (measured) (minute.coveredMillis / 1000.0).csvNumber() else "").append(',')
+                                .append(if (measured) (minute.activeMillis / 1000.0).csvNumber() else "").append(',')
+                                .append(if (measured) minute.rms.csvNumber() else "").append(',')
+                                .append(if (measured) minute.sampleCount.toString() else "").append(',')
+                                .append(if (measured) minute.placement.name else "")
                             val session = diagnostic?.first
                             val result = diagnostic?.second
                             val feature = diagnostic?.third
                             val stats = session?.let(exportStats::get)
                             val baseline = result?.baseline
-                            val storedStage = session?.stageIntervals?.firstOrNull {
-                                it.startMillis < minute.startMillis + MINUTE_MS && it.endMillis > minute.startMillis
-                            }?.stage
+                            val storedParts = session?.let { com.rsps1008.sleeptrace.sleep.sleepParts(it) }
+                            val storedStage = storedParts?.filter { it.start < minute.startMillis + MINUTE_MS && it.end > minute.startMillis }
+                                ?.map { it.stage }?.distinct()?.singleOrNull()
+                            val capture = captures.firstOrNull { it.id == minute.recordingId }
+                            val totals = result?.durations
+                            fun preciseParts(parts: List<com.rsps1008.sleeptrace.sleep.SleepPart>?) = parts.orEmpty()
+                                .filter { it.start < minute.startMillis + MINUTE_MS && it.end > minute.startMillis }
+                                .joinToString(";") { "${maxOf(it.start, minute.startMillis)}:${minOf(it.end, minute.startMillis + MINUTE_MS)}:${it.stage}" }
                             val extra = listOf(
-                                minute.featureVersion.toString(),
+                                if (measured) minute.featureVersion.toString() else "",
                                 if (minute.featureVersion >= 2) minute.sampleCount.toString() else "",
                                 placementByMinute[minute.startMillis]?.placement?.name.orEmpty(), minute.level.name,
                                 session?.id.orEmpty(), baseline?.p25?.csvNumber().orEmpty(), baseline?.p35?.csvNumber().orEmpty(),
@@ -197,12 +210,33 @@ class MainActivity : AppCompatActivity() {
                                 stats?.bedMinutes?.toString().orEmpty(),
                                 stats?.unknownMinutes?.toString().orEmpty(),
                                 stats?.deepEnterEvents?.toString().orEmpty(),
-                                stats?.deepExitEvents?.toString().orEmpty()
+                                stats?.deepExitEvents?.toString().orEmpty(),
+                                feature?.stageAlgorithmVersion?.toString().orEmpty(), session?.stageAlgorithmVersion?.toString().orEmpty(),
+                                session?.stageFeatureVersion?.toString().orEmpty(), feature?.endMillis?.toString().orEmpty(),
+                                if (measured) (MINUTE_MS - minute.coveredMillis).toString() else "",
+                                minute.longestGapMillis?.toString().orEmpty(), minute.maxDelta?.csvNumber().orEmpty(),
+                                minute.movementEvents?.toString().orEmpty(), minute.longestActiveMillis?.toString().orEmpty(),
+                                minute.quietTailMillis?.toString().orEmpty(), minute.postureDelta?.csvNumber().orEmpty(), minute.recordingId?.toString().orEmpty(),
+                                feature?.couplingState?.name.orEmpty(), feature?.couplingAgeMillis?.toString().orEmpty(), feature?.couplingInvalidation.orEmpty(),
+                                feature?.canStage?.toString().orEmpty(), feature?.canEnterDeep?.toString().orEmpty(), feature?.canMaintainDeep?.toString().orEmpty(),
+                                feature?.reasons?.joinToString(";") { it.name }.orEmpty(), feature?.primaryReason?.name.orEmpty(),
+                                feature?.phoneUseMillis?.toString().orEmpty(), feature?.inOnsetGuard?.toString().orEmpty(), feature?.hasSleepEvidence?.toString().orEmpty(),
+                                result?.firstValidMotionDelayMillis?.toString().orEmpty(), result?.sensorCoverageRatio?.csvNumber().orEmpty(),
+                                result?.stageableCoverageRatio?.csvNumber().orEmpty(), totals?.span?.toString().orEmpty(), totals?.sleep?.toString().orEmpty(),
+                                totals?.deep?.toString().orEmpty(), totals?.light?.toString().orEmpty(), totals?.sleeping?.toString().orEmpty(), totals?.awake?.toString().orEmpty(),
+                                result?.undeterminedReasonsMillis?.entries?.joinToString(";") { "${it.key}:${it.value}" }.orEmpty(),
+                                result?.longestGapMillis?.toString().orEmpty(),
+                                preciseParts(session?.let { com.rsps1008.sleeptrace.sleep.sleepParts(it.copy(stageIntervals = result?.intervals.orEmpty())) }),
+                                preciseParts(storedParts), capture?.trigger.orEmpty(), capture?.windowStart?.toString().orEmpty(),
+                                capture?.registeredAt?.toString().orEmpty(), capture?.firstEvent?.toString().orEmpty(), capture?.periodUs?.toString().orEmpty(),
+                                capture?.latencyUs?.toString().orEmpty(), capture?.fifoCount?.toString().orEmpty(), capture?.wakeUp?.toString().orEmpty(),
+                                capture?.rawEvents?.toString().orEmpty(), capture?.rejectedEvents?.toString().orEmpty(),
+                                capture?.meanIntervalMillis?.csvNumber().orEmpty(), capture?.maxIntervalMillis?.toString().orEmpty()
                             )
-                            writer.append(',').append(extra.joinToString(",")).append("\r\n")
+                            writer.append(',').append(extra.joinToString(",") { com.rsps1008.sleeptrace.sleep.csvEscape(it) }).append("\r\n")
                         }
                     } ?: error("無法建立匯出檔案")
-                    rows.size
+                    exportRows.size
                 }
             }
             result.onSuccess { count -> Toast.makeText(this@MainActivity, "已匯出 $count 分鐘資料", Toast.LENGTH_LONG).show() }

@@ -14,17 +14,17 @@ class AutomaticPlacementTest {
             if (it in moving) 0.05 * 0.05 * MINUTE_MS else 0.0, 300, Placement.AUTO)
     }
 
-    @Test fun `prolonged stillness suggests bedside but cannot create sleep alone`() {
+    @Test fun `prolonged stillness stays insufficient and cannot create sleep alone`() {
         val resolved = AutomaticPlacement.resolve(rows(), emptyList())
-        assertTrue(resolved.all { it.placement == Placement.BEDSIDE })
+        assertTrue(resolved.all { it.placement == Placement.UNKNOWN && it.coupling?.state == CouplingState.INSUFFICIENT })
         assertTrue(MotionSleepEstimator.estimate(resolved, emptyList(), SleepSchedule(0, 60), start + 60 * MINUTE_MS).isEmpty())
     }
 
     @Test fun `separated brief movements provide bed evidence without manual settings`() {
         val resolved = AutomaticPlacement.resolve(rows(setOf(5, 15, 25, 35, 45, 55)), emptyList())
-        assertTrue(resolved.all { it.placement == Placement.BED })
+        assertTrue(resolved.take(25).none { it.placement == Placement.BED }); assertTrue(resolved.drop(25).all { it.placement == Placement.BED })
         val sleep = MotionSleepEstimator.estimate(resolved, emptyList(), SleepSchedule(0, 60), start + 60 * MINUTE_MS)
-        assertEquals(60 * MINUTE_MS, sleep.single().durationMillis)
+        assertEquals(35 * MINUTE_MS, sleep.single().durationMillis)
         assertEquals(SyncState.PENDING, sleep.single().state)
     }
 
@@ -48,8 +48,10 @@ class AutomaticPlacementTest {
 
     @Test fun `placement changes are reevaluated instead of applying one label to all night`() {
         val resolved = AutomaticPlacement.resolve(rows(setOf(5, 15, 25), 120), emptyList())
-        assertEquals(Placement.BED, resolved[10].placement)
-        assertEquals(Placement.BEDSIDE, resolved[100].placement)
+        assertEquals(Placement.UNKNOWN, resolved[10].placement)
+        assertEquals(Placement.BED, resolved[55].placement)
+        assertEquals(Placement.UNKNOWN, resolved[100].placement)
+        assertEquals("COUPLING_EXPIRED", resolved[100].coupling?.reason)
     }
 
     @Test fun `legacy minute placement remains readable but cannot spread into new records`() {

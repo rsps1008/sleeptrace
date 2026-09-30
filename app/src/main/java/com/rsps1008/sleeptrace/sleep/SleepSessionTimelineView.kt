@@ -18,7 +18,7 @@ class SleepSessionTimelineView(context: Context, private val session: SleepSessi
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = MaterialColors.getColor(this@SleepSessionTimelineView, android.R.attr.textColorSecondary, Color.GRAY)
-        textSize = 12 * density
+        textSize = 10 * density
     }
     private val primaryColor = MaterialColors.getColor(this, androidx.appcompat.R.attr.colorPrimary, Color.GRAY)
     private val lightColor = ColorUtils.setAlphaComponent(primaryColor, 150)
@@ -33,7 +33,7 @@ class SleepSessionTimelineView(context: Context, private val session: SleepSessi
     private val clip = Path()
 
     init {
-        contentDescription = "清醒、淺眠與深眠推估時間軸；依手機活動與 Google Sleep API 推估，非醫療睡眠分期"
+        contentDescription = "清醒、推估淺眠、推估深眠、深淺未判定時間軸；依手機活動與 Google Sleep API 推估，非醫療睡眠分期"
         minimumHeight = (70 * density).toInt()
     }
 
@@ -62,20 +62,22 @@ class SleepSessionTimelineView(context: Context, private val session: SleepSessi
             val start = left + (part.start - session.startMillis).toFloat() / span * track.width()
             val end = left + (part.end - session.startMillis).toFloat() / span * track.width()
             canvas.drawRect(max(left, start), top, min(right, end), bottom, paint)
+            if (part.stage == SleepStage.SLEEPING) {
+                paint.color = primaryColor; paint.strokeWidth = density
+                var x = max(left, start)
+                while (x < min(right, end)) {
+                    canvas.drawLine(x, bottom, minOf(x + 8 * density, end), top, paint)
+                    x += 8 * density
+                }
+            }
         }
         canvas.restore()
         canvas.drawText("入睡", left, 12 * density, labelPaint)
         val endLabel = "醒來"
         canvas.drawText(endLabel, right - labelPaint.measureText(endLabel), 12 * density, labelPaint)
         val legendY = bottom + 22 * density
-        val legend = if (session.stageIntervals.isNotEmpty()) listOf(
-            "清醒" to awakeColor,
-            "淺眠" to lightColor,
-            "深眠" to deepColor
-        ) else listOf(
-            "清醒" to awakeColor,
-            "未分期" to trackColor
-        )
+        val legend = listOf("清醒" to awakeColor, "淺眠" to lightColor,
+            "深眠" to deepColor, "未判定／斜線" to trackColor)
         val sectionWidth = track.width() / legend.size
         legend.forEachIndexed { index, (label, color) ->
             val markerX = left + sectionWidth * index

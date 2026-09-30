@@ -78,7 +78,7 @@ class SleepReconciler(private val context: Context) {
             segments, samples, usageResult.intervals, schedule, completedWindows, usageResult::availableFor
         )
         val motion = dependencies.motionStore.read(analysisStart, now)
-        val resolved = AutomaticPlacement.resolve(motion, usageResult.intervals)
+        val resolved = AutomaticPlacement.resolve(motion, usageResult.intervals, schedule)
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
         val fallback = MotionSleepEstimator.estimate(
             resolved, usageResult.intervals, schedule, now,
@@ -96,10 +96,15 @@ class SleepReconciler(private val context: Context) {
                 schedule = schedule
             )
             val old = existingRecent.firstOrNull { it.id == session.id || (it.startMillis < session.endMillis && it.endMillis > session.startMillis) }
-            session.copy(stageIntervals = preserveExistingStagesWithoutCurrentEvidence(estimate, old?.stageIntervals, session))
+            session.copy(stageIntervals = preserveExistingStagesWithoutCurrentEvidence(estimate, old?.stageIntervals, session),
+                stageAlgorithmVersion = if (estimate.currentFeatureValidMinutes > 0 || old?.stageIntervals.isNullOrEmpty()) SleepStageEstimator.ALGORITHM_VERSION else old?.stageAlgorithmVersion,
+                stageFeatureVersion = if (estimate.currentFeatureValidMinutes > 0) estimate.baselineFeatureVersion else old?.stageFeatureVersion)
         }
         val invalidatedAutomaticSessionIds = if (ruleMigrationPending) {
-            automaticSessionIdsEligibleForRuleRevocation(existingRecent, completedWindows)
+            automaticSessionIdsEligibleForRuleRevocation(existingRecent, completedWindows.filter { window ->
+                segments.any { it.startMillis < window.end && it.endMillis > window.start } ||
+                    samples.any { it.timeMillis >= window.start && it.timeMillis < window.end }
+            })
         } else emptySet()
         store.mergeCalculated(
             staged, analysisStart, now,
@@ -118,7 +123,9 @@ class SleepReconciler(private val context: Context) {
                     sleepSegments = segments,
                     schedule = schedule
                 )
-                store.updateStageIntervals(session, preserveExistingStagesWithoutCurrentEvidence(estimate, session.stageIntervals, session))
+                store.updateStageIntervals(session, preserveExistingStagesWithoutCurrentEvidence(estimate, session.stageIntervals, session),
+                    if (estimate.currentFeatureValidMinutes > 0 || session.stageIntervals.isEmpty()) SleepStageEstimator.ALGORITHM_VERSION else session.stageAlgorithmVersion,
+                    if (estimate.currentFeatureValidMinutes > 0) estimate.baselineFeatureVersion else session.stageFeatureVersion)
             }
         store.markReconciled(capturedGeneration)
     }
@@ -143,7 +150,7 @@ internal fun preserveExistingStagesWithoutCurrentEvidence(
         val start = maxOf(session.startMillis, old.startMillis)
         val end = minOf(session.endMillis, old.endMillis)
         if (end <= start) null else SleepStageInterval(start, end,
-            if (old.stage == SleepStage.AWAKE) SleepStage.LIGHT else old.stage)
+            old.stage)
     }.sortedBy { it.startMillis }
     val boundaries = (listOf(session.startMillis, session.endMillis) +
         clipped.flatMap { listOf(it.startMillis, it.endMillis) } +
@@ -153,7 +160,7 @@ internal fun preserveExistingStagesWithoutCurrentEvidence(
     boundaries.zipWithNext().forEach { (start, end) ->
         if (end <= start) return@forEach
         val awake = result.intervals.any { it.stage == SleepStage.AWAKE && it.startMillis < end && it.endMillis > start }
-        val oldStage = clipped.firstOrNull { it.startMillis <= start && it.endMillis >= end }?.stage ?: SleepStage.LIGHT
+        val oldStage = clipped.firstOrNull { it.startMillis <= start && it.endMillis >= end }?.stage ?: SleepStage.SLEEPING
         val stage = if (awake) SleepStage.AWAKE else oldStage
         val previous = output.lastOrNull()
         if (previous != null && previous.endMillis == start && previous.stage == stage)
@@ -243,7 +250,11 @@ fun mergeSleepSessions(
             old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis) return@forEach
         if (old != null && old.startMillis == candidate.startMillis && old.endMillis == candidate.endMillis &&
             old.awakeMillis == candidate.awakeMillis && old.awakeIntervals == candidate.awakeIntervals &&
-            old.stageIntervals == candidate.stageIntervals) return@forEach
+            old.stageIntervals == candidate.stageIntervals) {
+            result[result.indexOf(old)] = old.copy(stageAlgorithmVersion = candidate.stageAlgorithmVersion,
+                stageFeatureVersion = candidate.stageFeatureVersion)
+            return@forEach
+        }
         result.removeAll(matches.toSet())
         result += if (old == null) candidate else candidate.copy(id = old.id, revision = old.revision + 1, state = SyncState.PENDING, syncError = null)
     }

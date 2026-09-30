@@ -16,7 +16,8 @@ enum class MotionLevel { QUIET, ACTIVE, UNKNOWN }
 object MotionFeaturePolicy {
     /** v4 cadence-anchor > v3 activity-only > v2 epoch-second > v1 callback-dependent. */
     fun storagePriority(featureVersion: Int): Int = when (featureVersion) {
-        MotionAccumulator.CURRENT_FEATURE_VERSION -> 4
+        MotionAccumulator.CURRENT_FEATURE_VERSION -> 5
+        MotionAccumulator.CADENCE_ANCHOR_FEATURE_VERSION -> 4
         MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION -> 3
         MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION -> 2
         MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION -> 1
@@ -25,7 +26,7 @@ object MotionFeaturePolicy {
 
     /** v3 can report movement, but neither its quiet minutes nor v1/v2 can support sleep inference. */
     fun supportsSleepConflictEvidence(featureVersion: Int, level: MotionLevel): Boolean = when (featureVersion) {
-        MotionAccumulator.CURRENT_FEATURE_VERSION -> level != MotionLevel.UNKNOWN
+        MotionAccumulator.CURRENT_FEATURE_VERSION, MotionAccumulator.CADENCE_ANCHOR_FEATURE_VERSION -> level != MotionLevel.UNKNOWN
         MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION -> level == MotionLevel.ACTIVE
         else -> false
     }
@@ -75,9 +76,15 @@ object SleepClassificationTrigger {
 data class MotionMinute(
     val startMillis: Long, val coveredMillis: Long, val activeMillis: Long,
     val squaredDeltaTime: Double, val sampleCount: Int, val placement: Placement,
-    val featureVersion: Int = MotionAccumulator.CURRENT_FEATURE_VERSION
+    val featureVersion: Int = MotionAccumulator.CURRENT_FEATURE_VERSION,
+    // Nullable fields mean not measured by legacy summaries, never zero-filled.
+    val maxDelta: Double? = null, val movementEvents: Int? = null,
+    val longestActiveMillis: Long? = null, val quietTailMillis: Long? = null,
+    val longestGapMillis: Long? = null, val postureDelta: Double? = null,
+    val recordingId: Long? = null, val observedStart: Long? = null, val observedEnd: Long? = null,
+    val coupling: CouplingEvidence? = null
 ) {
-    val supportsCurrentStaging: Boolean get() = featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION
+    val supportsCurrentStaging: Boolean get() = featureVersion in setOf(MotionAccumulator.CURRENT_FEATURE_VERSION, MotionAccumulator.CADENCE_ANCHOR_FEATURE_VERSION)
     val rms: Double get() = if (coveredMillis == 0L) 0.0 else sqrt(squaredDeltaTime / coveredMillis)
     val level: MotionLevel get() = when {
         coveredMillis < 45_000 -> MotionLevel.UNKNOWN
@@ -87,20 +94,32 @@ data class MotionMinute(
 }
 
 /** Works on event timestamps, never delivery time: FIFO bursts must not look like motion bursts. */
-class MotionAccumulator(plan: SamplingPlan, private val placement: Placement) {
+class MotionAccumulator(plan: SamplingPlan, private val placement: Placement, private val recordingEpochId: Long? = null) {
     companion object {
         const val FEATURE_SAMPLE_PERIOD_MS = 1_000L
         const val LEGACY_CALLBACK_FEATURE_VERSION = 1
         const val LEGACY_FIXED_FEATURE_VERSION = 2
         const val CADENCE_INCOMPATIBLE_FEATURE_VERSION = 3
-        const val CURRENT_FEATURE_VERSION = 4
+        const val CADENCE_ANCHOR_FEATURE_VERSION = 4
+        const val CURRENT_FEATURE_VERSION = 5
         const val MAX_CURRENT_STAGING_CADENCE_MS = 1_200L
         private const val JITTER_TOLERANCE_MS = 100L
     }
     private val featurePeriodMs = maxOf(FEATURE_SAMPLE_PERIOD_MS, plan.periodUs / 1000L)
     private val featureVersion = if (featurePeriodMs <= MAX_CURRENT_STAGING_CADENCE_MS) CURRENT_FEATURE_VERSION else CADENCE_INCOMPATIBLE_FEATURE_VERSION
-    private data class Bucket(var covered: Long = 0, var active: Long = 0, var squared: Double = 0.0, var count: Int = 0)
+    private data class Bucket(var covered: Long = 0, var active: Long = 0, var squared: Double = 0.0, var count: Int = 0,
+        var peak: Double = 0.0, var events: Int = 0, var longestActive: Long = 0, var quietTail: Long = 0,
+        var gap: Long = 0, var posture: Double? = null, var first: Long? = null, var end: Long? = null,
+        var vectorCount: Int = 0, var sumX: Double = 0.0, var sumY: Double = 0.0, var sumZ: Double = 0.0,
+        var reference: Triple<Double, Double, Double>? = null)
     private val buckets = sortedMapOf<Long, Bucket>()
+    private var recordingId: Long? = null
+    private var activeRun = 0L
+    private var quietRun = 0L
+    var rejectedEvents: Long = 0; private set
+    var rawEventCount: Long = 0; private set
+    var intervalSumMillis: Long = 0; private set
+    var intervalMaxMillis: Long = 0; private set
     private var lastRawTime = Long.MIN_VALUE
     private var anchorTime = Long.MIN_VALUE
     private var nextFeatureTime = Long.MIN_VALUE
@@ -110,8 +129,14 @@ class MotionAccumulator(plan: SamplingPlan, private val placement: Placement) {
     private var lastZ = 0.0
 
     fun add(timeMillis: Long, x: Double, y: Double, z: Double): Boolean {
-        if (timeMillis <= lastRawTime || !x.isFinite() || !y.isFinite() || !z.isFinite()) return false
+        if (timeMillis <= lastRawTime || !x.isFinite() || !y.isFinite() || !z.isFinite()) { rejectedEvents++; return false }
+        if (lastRawTime != Long.MIN_VALUE) {
+            val interval = timeMillis - lastRawTime
+            intervalSumMillis += interval; intervalMaxMillis = maxOf(intervalMaxMillis, interval)
+        }
+        rawEventCount++
         lastRawTime = timeMillis
+        if (recordingId == null) recordingId = recordingEpochId ?: timeMillis
         if (anchorTime == Long.MIN_VALUE) {
             anchorTime = timeMillis
             nextFeatureTime = timeMillis
@@ -121,7 +146,18 @@ class MotionAccumulator(plan: SamplingPlan, private val placement: Placement) {
             (timeMillis - nextFeatureTime) / featurePeriodMs else 0L
         val dt = if (lastFeatureTime == Long.MIN_VALUE) 0L else timeMillis - lastFeatureTime
         if (lastFeatureTime != Long.MIN_VALUE && dt < featurePeriodMs - minOf(100L, JITTER_TOLERANCE_MS)) return false
-        buckets.getOrPut(Math.floorDiv(timeMillis, MINUTE_MS) * MINUTE_MS) { Bucket() }.count++
+        val sampleBucket = buckets.getOrPut(Math.floorDiv(timeMillis, MINUTE_MS) * MINUTE_MS) { Bucket() }
+        sampleBucket.count++
+        sampleBucket.vectorCount++; sampleBucket.sumX += x; sampleBucket.sumY += y; sampleBucket.sumZ += z
+        if (sampleBucket.vectorCount == 10) {
+            val mean = Triple(sampleBucket.sumX / 10, sampleBucket.sumY / 10, sampleBucket.sumZ / 10)
+            sampleBucket.reference?.let { ref ->
+                val dx = mean.first - ref.first; val dy = mean.second - ref.second; val dz = mean.third - ref.third
+                sampleBucket.posture = maxOf(sampleBucket.posture ?: 0.0, sqrt(dx * dx + dy * dy + dz * dz))
+            }
+            if (sampleBucket.reference == null) sampleBucket.reference = mean
+            sampleBucket.vectorCount = 0; sampleBucket.sumX = 0.0; sampleBucket.sumY = 0.0; sampleBucket.sumZ = 0.0
+        }
         if (lastFeatureTime != Long.MIN_VALUE) {
             if (skippedSlots == 0L && dt in (featurePeriodMs - JITTER_TOLERANCE_MS)..(featurePeriodMs + JITTER_TOLERANCE_MS)) {
                 val deltaX = x - lastX
@@ -134,9 +170,32 @@ class MotionAccumulator(plan: SamplingPlan, private val placement: Placement) {
                     val end = minOf(timeMillis, key + MINUTE_MS)
                     val part = buckets.getOrPut(key) { Bucket() }
                     val duration = end - cursor
+                    val active = deltaSquared >= 0.15 * 0.15
+                    if (active && activeRun == 0L) part.events++
+                    activeRun = if (active) activeRun + duration else 0L
+                    quietRun = if (active) 0L else quietRun + duration
+                    part.longestActive = maxOf(part.longestActive, activeRun)
+                    part.quietTail = quietRun
+                    part.peak = maxOf(part.peak, sqrt(deltaSquared))
+                    part.first = part.first ?: cursor
+                    part.end = end
                     part.covered += duration
                     if (deltaSquared >= 0.15 * 0.15) part.active += duration
                     part.squared += deltaSquared * duration
+                    cursor = end
+                }
+            } else {
+                activeRun = 0; quietRun = 0
+                var cursor = lastFeatureTime
+                // Record gaps, never fill them with stillness. Bound memory for a long outage.
+                while (cursor < timeMillis) {
+                    val key = Math.floorDiv(cursor, MINUTE_MS) * MINUTE_MS
+                    val end = minOf(timeMillis, key + MINUTE_MS)
+                    if (buckets.size >= 1440 && key !in buckets) break
+                    val bucket = buckets.getOrPut(key) { Bucket() }
+                    bucket.gap = maxOf(bucket.gap, dt)
+                    bucket.reference = null; bucket.vectorCount = 0
+                    bucket.sumX = 0.0; bucket.sumY = 0.0; bucket.sumZ = 0.0
                     cursor = end
                 }
             }
@@ -153,7 +212,10 @@ class MotionAccumulator(plan: SamplingPlan, private val placement: Placement) {
         val keys = buckets.keys.filter { includePartial || it + MINUTE_MS <= throughMillis }
         return keys.map { key ->
             val value = buckets.remove(key)!!
-            MotionMinute(key, value.covered, value.active, value.squared, value.count, placement, featureVersion)
+            MotionMinute(key, value.covered, value.active, value.squared, value.count, placement, featureVersion,
+                value.peak.takeIf { value.covered > 0 }, value.events.takeIf { value.covered > 0 },
+                value.longestActive.takeIf { value.covered > 0 }, value.quietTail.takeIf { value.covered > 0 }, value.gap, value.posture,
+                recordingId, value.first, value.end)
         }
     }
 }

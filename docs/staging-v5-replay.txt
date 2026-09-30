@@ -1,0 +1,5 @@
+SYNTHETIC fixture, not an actual recorded night or physiological accuracy evidence.
+HEAD dc92433 algorithm 4: deep_ms=7920000, light_ms=11820000, undetermined_ms=0, awake_ms=0, transitions=8, fragments_under_5min=1
+algorithm 5: deep_ms=6240000, light_ms=2520000, undetermined_ms=10980000, awake_ms=0, transitions=11, fragments_under_5min=1
+old_valid_motion_ratio=0.8966565349544073, new_valid_motion_ratio=0.8966565349544073, new_span_motion_coverage=0.8975683890577507, new_stageable_sleep_coverage=0.44376899696048633
+new_undetermined_primary_reason_ms={MISSING_MOTION=1980000, INSUFFICIENT_COVERAGE=60000, COUPLING_INSUFFICIENT=8940000}

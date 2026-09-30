@@ -18,7 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Indexed, transactional storage for raw Sleep API events and local sleep records. */
-class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 10) {
+class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 11) {
     private val maintenancePrefs = context.applicationContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
         setWriteAheadLoggingEnabled(true)
@@ -41,6 +41,10 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createSessions(db)
+        if (oldVersion in 2 until 11) {
+            db.execSQL("ALTER TABLE sessions ADD COLUMN stageAlgorithmVersion INTEGER")
+            db.execSQL("ALTER TABLE sessions ADD COLUMN stageFeatureVersion INTEGER")
+        }
         if (oldVersion < 3) createSegmentIndex(db)
         if (oldVersion < 4) createSessionIndex(db)
         if (oldVersion < 5) createSessionStateIndex(db)
@@ -62,7 +66,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             confidence INTEGER NOT NULL, awake INTEGER NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL,
             manual INTEGER NOT NULL, error TEXT, revision INTEGER NOT NULL,
             awakeIntervals TEXT NOT NULL, usageSnapshotApplied INTEGER NOT NULL,
-            stageIntervals TEXT NOT NULL DEFAULT '[]'
+            stageIntervals TEXT NOT NULL DEFAULT '[]', stageAlgorithmVersion INTEGER, stageFeatureVersion INTEGER
         )
     """.trimIndent())
 
@@ -270,6 +274,8 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             }
         } else emptyList(),
         usageSnapshotApplied = getInt(getColumnIndexOrThrow("usageSnapshotApplied")) != 0,
+        stageAlgorithmVersion = getColumnIndexOrThrow("stageAlgorithmVersion").let { if (isNull(it)) null else getInt(it) },
+        stageFeatureVersion = getColumnIndexOrThrow("stageFeatureVersion").let { if (isNull(it)) null else getInt(it) },
         stageIntervals = if (includeAwakeIntervals) {
             JSONArray(getString(getColumnIndexOrThrow("stageIntervals"))).let { array ->
                 List(array.length()) { index -> array.getJSONObject(index).let {
@@ -284,6 +290,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
             put("confidence", item.confidence); put("awake", item.awakeMillis); put("state", item.state.name)
             put("reason", item.reason); put("manual", if (item.manuallyEdited) 1 else 0); put("error", item.syncError)
             put("revision", item.revision)
+            put("stageAlgorithmVersion", item.stageAlgorithmVersion); put("stageFeatureVersion", item.stageFeatureVersion)
             put("awakeIntervals", JSONArray(item.awakeIntervals.map { JSONObject().put("start", it.startMillis).put("end", it.endMillis) }).toString())
             put("usageSnapshotApplied", if (item.usageSnapshotApplied) 1 else 0)
             put("stageIntervals", JSONArray(item.stageIntervals.map {
@@ -293,7 +300,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
     }
     companion object {
         private val SESSION_SUMMARY_COLUMNS = arrayOf(
-            "id", "start", "end", "confidence", "awake", "state", "reason", "manual", "error", "revision", "usageSnapshotApplied"
+            "id", "start", "end", "confidence", "awake", "state", "reason", "manual", "error", "revision", "usageSnapshotApplied", "stageAlgorithmVersion", "stageFeatureVersion"
         )
         private const val RETENTION = 14L * 24 * 60 * 60 * 1000
         private const val CLEANUP_INTERVAL = 24L * 60 * 60 * 1000

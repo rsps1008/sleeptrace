@@ -44,6 +44,47 @@ class StagingStorageRuntimeTest {
         }
     }
 
+    @Test fun v2MotionAndV10SessionsUpgradeWithoutInventingFeaturesOrErasingStages() = isolated { context ->
+        context.openOrCreateDatabase("motion.db", Context.MODE_PRIVATE, null).use { db ->
+            db.execSQL("CREATE TABLE minutes (start INTEGER PRIMARY KEY, covered INTEGER NOT NULL, active INTEGER NOT NULL, squared REAL NOT NULL, samples INTEGER NOT NULL, placement TEXT NOT NULL, featureVersion INTEGER NOT NULL DEFAULT 1)")
+            db.execSQL("INSERT INTO minutes VALUES (0,60000,0,1.5,60,'BED',4)")
+            db.version = 2
+        }
+        MotionStore(context).use { store ->
+            val old = store.read(0, MINUTE_MS).single()
+            assertEquals(4, old.featureVersion); assertNull(old.movementEvents); assertNull(old.maxDelta)
+            assertNull(old.longestGapMillis); assertNull(old.recordingId)
+            val engine = MotionAccumulator(SamplingPlan.choose(0), Placement.AUTO)
+            for (i in 0..60) engine.add(MINUTE_MS + i * 1000, .01, 0.0, 9.81)
+            val fresh = engine.drain(2 * MINUTE_MS)
+            store.append(fresh, now = 2 * MINUTE_MS)
+            assertEquals(fresh, store.read(MINUTE_MS, 2 * MINUTE_MS))
+            store.append(fresh, now = 2 * MINUTE_MS)
+            assertEquals(fresh, store.read(MINUTE_MS, 2 * MINUTE_MS))
+        }
+        // Recreate the preceding version's complete schema, keeping existing session identity.
+        SleepEventStore(context).use { store ->
+            store.upsertSession(SleepSession(id="old",startMillis=0,endMillis=60*MINUTE_MS,confidence=60,
+                awakeMillis=0,state=SyncState.SYNCED,reason="legacy",revision=7,
+                stageIntervals=listOf(SleepStageInterval(0,60*MINUTE_MS,SleepStage.DEEP))))
+        }
+        context.openOrCreateDatabase("sleep_events.db", Context.MODE_PRIVATE, null).use { db ->
+            db.execSQL("ALTER TABLE sessions RENAME TO sessions_v11_test")
+            db.execSQL("CREATE TABLE sessions (id TEXT PRIMARY KEY NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL, confidence INTEGER NOT NULL, awake INTEGER NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL, manual INTEGER NOT NULL, error TEXT, revision INTEGER NOT NULL, awakeIntervals TEXT NOT NULL, usageSnapshotApplied INTEGER NOT NULL, stageIntervals TEXT NOT NULL DEFAULT '[]')")
+            db.execSQL("INSERT INTO sessions SELECT id,start,end,confidence,awake,state,reason,manual,error,revision,awakeIntervals,usageSnapshotApplied,stageIntervals FROM sessions_v11_test")
+            db.execSQL("DROP TABLE sessions_v11_test")
+            db.version = 10
+        }
+        SleepEventStore(context).use { store ->
+            val old = requireNotNull(store.session("old"))
+            assertEquals(7L, old.revision); assertEquals(SyncState.SYNCED, old.state)
+            assertNull(old.stageAlgorithmVersion); assertNull(old.stageFeatureVersion)
+            assertEquals(SleepStage.DEEP, old.stageIntervals.single().stage)
+            val next = old.copy(stageAlgorithmVersion=5,stageFeatureVersion=4)
+            store.upsertSession(next); assertEquals(next,store.session("old"))
+        }
+    }
+
     @Test fun oldMotionFeaturesKeepTheirVersionAndNeverMixWithResampledContributions() = isolated { context ->
         context.openOrCreateDatabase("motion.db", Context.MODE_PRIVATE, null).use { db ->
             db.execSQL("CREATE TABLE minutes (start INTEGER PRIMARY KEY, covered INTEGER NOT NULL, active INTEGER NOT NULL, squared REAL NOT NULL, samples INTEGER NOT NULL, placement TEXT NOT NULL)")

@@ -114,23 +114,16 @@ object SleepDialogHelper {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(context, 24), 0, dp(context, 24), 0)
             addView(TextView(context).apply {
-                val parts = sleepParts(session)
-                val staged = session.stageIntervals.isNotEmpty()
-                val lightMillis = parts.filter { it.stage == SleepStage.LIGHT }.sumOf { it.end - it.start }
-                val deepMillis = parts.filter { it.stage == SleepStage.DEEP }.sumOf { it.end - it.start }
-                val awakeMillis = parts.filter { it.stage == SleepStage.AWAKE }.sumOf { it.end - it.start }
-                text = if (staged) {
-                    "總睡眠：${formatDuration(lightMillis + deepMillis)}\n" +
-                        "淺眠：約 ${formatDuration(lightMillis)}　深眠：約 ${formatDuration(deepMillis)}\n" +
-                        "清醒：約 ${formatDuration(awakeMillis)}\n" +
-                        "依手機活動與 Google Sleep API 推估，非醫療睡眠分期\n" +
-                        "參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}"
-                } else {
-                    "推估睡眠：${formatDuration(session.durationMillis)}\n" +
-                        "夜間手機使用：${formatDuration(session.awakeMillis)}\n" +
-                        "參考分數：${session.confidence}/100（非準確率）\n\n${session.reason}"
-                } +
-                    (session.syncError?.let { "\n\n同步錯誤：$it" } ?: "")
+                val totals = com.rsps1008.sleeptrace.sleep.stageDurations(session)
+                text = buildString {
+                    append(context.getString(R.string.sleep_detail_total, formatDuration(totals.sleep)))
+                    if (totals.light + totals.deep == 0L) append(context.getString(R.string.sleep_detail_unknown, formatDuration(totals.sleeping)))
+                    else append(context.getString(R.string.sleep_detail_stages, formatDuration(totals.light), formatDuration(totals.deep), formatDuration(totals.sleeping)))
+                    append(context.getString(R.string.sleep_detail_footer, formatDuration(totals.awake),
+                        formatDuration(totals.light + totals.deep), session.stageAlgorithmVersion?.toString()
+                            ?: context.getString(R.string.sleep_legacy_version), session.confidence, session.reason))
+                    session.syncError?.let { append(context.getString(R.string.sleep_detail_sync_error, it)) }
+                }
                 setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
                 textSize = 14f
             })

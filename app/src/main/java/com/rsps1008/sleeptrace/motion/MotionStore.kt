@@ -9,6 +9,10 @@ import androidx.core.database.sqlite.transaction
 import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
 
 class MotionSettings(context: Context) {
+    private val debug = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    var experiment: CaptureExperiment
+        get() = if (!debug) CaptureExperiment.OFF else runCatching { CaptureExperiment.valueOf(prefs.getString("capture_experiment", "OFF")!!) }.getOrDefault(CaptureExperiment.OFF)
+        set(value) { if (debug) prefs.edit { putString("capture_experiment", value.name) } }
     private val prefs = context.getSharedPreferences("sleeptrace_motion", Context.MODE_PRIVATE)
     var enabled: Boolean
         // Old motion opt-in and placement settings no longer control automatic recording.
@@ -23,7 +27,7 @@ class MotionSettings(context: Context) {
 }
 
 /** Stores minute features only; no raw accelerometer stream. Inserts are batched in one transaction. */
-class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 2) {
+class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 3) {
     private val appContext = context.applicationContext
     private val maintenancePrefs = appContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
@@ -36,11 +40,35 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("CREATE TABLE minutes (start INTEGER PRIMARY KEY, covered INTEGER NOT NULL, active INTEGER NOT NULL, squared REAL NOT NULL, samples INTEGER NOT NULL, placement TEXT NOT NULL, featureVersion INTEGER NOT NULL DEFAULT 1)")
+        createCaptureTable(db)
+        db.execSQL("CREATE TABLE minutes (start INTEGER PRIMARY KEY, covered INTEGER NOT NULL, active INTEGER NOT NULL, squared REAL NOT NULL, samples INTEGER NOT NULL, placement TEXT NOT NULL, featureVersion INTEGER NOT NULL DEFAULT 1, maxDelta REAL, movementEvents INTEGER, longestActiveMillis INTEGER, quietTailMillis INTEGER, longestGapMillis INTEGER, postureDelta REAL, recordingId INTEGER, observedStart INTEGER, observedEnd INTEGER)")
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) db.execSQL("ALTER TABLE minutes ADD COLUMN featureVersion INTEGER NOT NULL DEFAULT 1")
+        if (oldVersion < 3) {
+            FEATURE_COLUMNS.forEach { (name, type) -> db.execSQL("ALTER TABLE minutes ADD COLUMN $name $type") }
+            createCaptureTable(db)
+        }
     }
+
+    private fun createCaptureTable(db: SQLiteDatabase) = db.execSQL("CREATE TABLE IF NOT EXISTS capture_runs (id INTEGER PRIMARY KEY, windowStart INTEGER NOT NULL, registeredAt INTEGER NOT NULL, trigger TEXT NOT NULL, periodUs INTEGER NOT NULL, latencyUs INTEGER NOT NULL, fifoCount INTEGER NOT NULL, wakeUp INTEGER NOT NULL, firstEvent INTEGER, rawEvents INTEGER NOT NULL, rejectedEvents INTEGER NOT NULL, meanInterval REAL, maxInterval INTEGER)")
+
+    fun saveCapture(run: CaptureDiagnostics) {
+        writableDatabase.insertWithOnConflict("capture_runs", null, ContentValues().apply {
+            put("id", run.id); put("windowStart", run.windowStart); put("registeredAt", run.registeredAt)
+            put("trigger", run.trigger); put("periodUs", run.periodUs); put("latencyUs", run.latencyUs)
+            put("fifoCount", run.fifoCount); put("wakeUp", if (run.wakeUp) 1 else 0); put("firstEvent", run.firstEvent)
+            put("rawEvents", run.rawEvents); put("rejectedEvents", run.rejectedEvents)
+            put("meanInterval", run.meanIntervalMillis); put("maxInterval", run.maxIntervalMillis)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+    fun captures(start: Long, end: Long): List<CaptureDiagnostics> = readableDatabase.query("capture_runs", null,
+        "registeredAt < ? AND registeredAt >= ?", arrayOf(end.toString(), (start - 24 * 60 * MINUTE_MS).toString()),
+        null, null, "registeredAt ASC").use { c -> buildList {
+            while (c.moveToNext()) add(CaptureDiagnostics(c.getLong(0), c.getLong(1), c.getLong(2), c.getString(3),
+                c.getInt(4), c.getInt(5), c.getInt(6), c.getInt(7) != 0, c.nullLong("firstEvent"),
+                c.getLong(9), c.getLong(10), c.nullDouble("meanInterval"), c.nullLong("maxInterval")))
+        } }
 
     @Synchronized
     fun append(minutes: List<MotionMinute>, now: Long = System.currentTimeMillis()) {
@@ -68,6 +96,8 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
                 val compatible = existing?.takeIf {
                     it.placement == item.placement && it.featureVersion == item.featureVersion
                 }
+                // A repeated/overlapping v5 contribution is not additive. Never double-count a retry.
+                if (compatible?.observedEnd != null && item.observedStart != null && item.observedStart < compatible.observedEnd) return@forEach
                 val row = ContentValues().apply {
                     put("start", item.startMillis)
                     put("covered", minOf(MINUTE_MS, item.coveredMillis + (compatible?.coveredMillis ?: 0)))
@@ -76,28 +106,44 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
                     put("samples", item.sampleCount + (compatible?.sampleCount ?: 0))
                     put("placement", item.placement.name)
                     put("featureVersion", item.featureVersion)
+                    fun maxNullable(a: Long?, b: Long?) = if (a == null) b else if (b == null) a else maxOf(a, b)
+                    put("maxDelta", listOfNotNull(item.maxDelta, compatible?.maxDelta).maxOrNull())
+                    put("movementEvents", item.movementEvents?.let { it + (compatible?.movementEvents ?: 0) })
+                    put("longestActiveMillis", maxNullable(item.longestActiveMillis, compatible?.longestActiveMillis))
+                    put("quietTailMillis", item.quietTailMillis)
+                    val restart = compatible != null && compatible.recordingId != item.recordingId
+                    put("longestGapMillis", if (restart) MINUTE_MS else maxNullable(item.longestGapMillis, compatible?.longestGapMillis))
+                    put("postureDelta", listOfNotNull(item.postureDelta, compatible?.postureDelta).maxOrNull())
+                    put("recordingId", if (restart) 0L else item.recordingId)
+                    put("observedStart", compatible?.observedStart ?: item.observedStart)
+                    put("observedEnd", item.observedEnd)
                 }
                 db.insertWithOnConflict("minutes", null, row, SQLiteDatabase.CONFLICT_REPLACE)
-                existingByStart[item.startMillis] = MotionMinute(
-                    item.startMillis,
-                    row.getAsLong("covered"),
-                    row.getAsLong("active"),
-                    row.getAsDouble("squared"),
-                    row.getAsInteger("samples"),
-                    item.placement, item.featureVersion
-                )
+                existingByStart[item.startMillis] = item.copy(
+                    coveredMillis = row.getAsLong("covered"), activeMillis = row.getAsLong("active"),
+                    squaredDeltaTime = row.getAsDouble("squared"), sampleCount = row.getAsInteger("samples"),
+                    maxDelta = row.getAsDouble("maxDelta"), movementEvents = row.getAsInteger("movementEvents"),
+                    longestActiveMillis = row.getAsLong("longestActiveMillis"), quietTailMillis = row.getAsLong("quietTailMillis"),
+                    longestGapMillis = row.getAsLong("longestGapMillis"), postureDelta = row.getAsDouble("postureDelta"),
+                    recordingId = row.getAsLong("recordingId"), observedStart = row.getAsLong("observedStart"), observedEnd = row.getAsLong("observedEnd"))
             }
             if (shouldCleanup) {
                 db.delete("minutes", "start < ?", arrayOf((now - RETENTION).toString()))
+                db.delete("capture_runs", "registeredAt < ?", arrayOf((now - RETENTION).toString()))
             }
         }
         if (shouldCleanup) maintenancePrefs.edit { putLong(CLEANUP_KEY, now) }
         AutomaticWorkSignals.markDirty(appContext)
     }
 
+    private fun android.database.Cursor.nullLong(name: String): Long? = getColumnIndexOrThrow(name).let { if (isNull(it)) null else getLong(it) }
+    private fun android.database.Cursor.nullDouble(name: String): Double? = getColumnIndexOrThrow(name).let { if (isNull(it)) null else getDouble(it) }
     private fun android.database.Cursor.readMinute() = MotionMinute(
         getLong(0), getLong(1), getLong(2), getDouble(3), getInt(4), Placement.valueOf(getString(5)),
-        getInt(getColumnIndexOrThrow("featureVersion"))
+        getInt(getColumnIndexOrThrow("featureVersion")),
+        nullDouble("maxDelta"), nullLong("movementEvents")?.toInt(), nullLong("longestActiveMillis"),
+        nullLong("quietTailMillis"), nullLong("longestGapMillis"), nullDouble("postureDelta"),
+        nullLong("recordingId"), nullLong("observedStart"), nullLong("observedEnd")
     )
 
     fun read(start: Long, end: Long): List<MotionMinute> = readableDatabase.query(
@@ -109,6 +155,9 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
     }
 
     private companion object {
+        val FEATURE_COLUMNS = listOf("maxDelta" to "REAL", "movementEvents" to "INTEGER", "longestActiveMillis" to "INTEGER",
+            "quietTailMillis" to "INTEGER", "longestGapMillis" to "INTEGER", "postureDelta" to "REAL",
+            "recordingId" to "INTEGER", "observedStart" to "INTEGER", "observedEnd" to "INTEGER")
         const val CLEANUP_KEY = "motion_last_cleanup"
         const val CLEANUP_INTERVAL = 24L * 60 * 60 * 1000
         const val RETENTION = 14L * 24 * 60 * MINUTE_MS

@@ -49,6 +49,8 @@ class MotionService : Service(), SensorEventListener2 {
     private var sensor: Sensor? = null
     private var plan: SamplingPlan? = null
     private var accumulator: MotionAccumulator? = null
+    private var capture: CaptureDiagnostics? = null
+    private var configuredExperiment = CaptureExperiment.OFF
     private var schedule: SleepSchedule? = null
     private var triggeredWindowStart: Long? = null
     private var fallbackWindowStart: Long? = null
@@ -75,7 +77,8 @@ class MotionService : Service(), SensorEventListener2 {
                     screenOffSince = null
                     return
                 }
-                Intent.ACTION_TIME_CHANGED -> clockOffset = System.currentTimeMillis() - SystemClock.elapsedRealtime()
+                // Preserve the old event mapping through flush; configure will start a new recording epoch.
+                Intent.ACTION_TIME_CHANGED -> Unit
             }
             refreshConfiguration()
         }
@@ -171,6 +174,12 @@ class MotionService : Service(), SensorEventListener2 {
             transition { stopSelf() }; return
         }
         SleepWindowScheduler.schedule(this, newSchedule)
+        val experiment = settings.experiment
+        val modeChanged = configuredExperiment != experiment
+        if (modeChanged) {
+            configuredExperiment = experiment
+            triggeredWindowStart = null; fallbackWindowStart = null
+        }
         val now = System.currentTimeMillis()
         val window = newSchedule?.windowAt(now)
         val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -181,6 +190,9 @@ class MotionService : Service(), SensorEventListener2 {
         if (window == null) {
             triggeredWindowStart = null
             fallbackWindowStart = null
+        }
+        if (window != null && settings.experiment != CaptureExperiment.OFF) {
+            triggeredWindowStart = window.start; fallbackWindowStart = null
         }
         if (window != null && triggeredWindowStart != window.start &&
             SleepClassificationTrigger.shouldStart(classifications, window, now)) {
@@ -213,18 +225,28 @@ class MotionService : Service(), SensorEventListener2 {
         }
         val activeWindow = requireNotNull(window)
         val selected = sensor!!
-        val next = SamplingPlan.choose(selected.fifoMaxEventCount, selected.minDelay)
+        val next = capturePlan(experiment, selected.fifoMaxEventCount, selected.minDelay)
         val offset = now - SystemClock.elapsedRealtime()
-        if (plan == next && kotlin.math.abs(clockOffset - offset) < 2_000 && pendingChange == null) return
+        if (!modeChanged && plan == next && kotlin.math.abs(clockOffset - offset) < 2_000 && pendingChange == null) return
         transition {
             clockOffset = System.currentTimeMillis() - SystemClock.elapsedRealtime()
-            accumulator = MotionAccumulator(next, Placement.AUTO)
+            val captureId = SystemClock.elapsedRealtimeNanos()
+            accumulator = MotionAccumulator(next, Placement.AUTO, captureId)
             val registered = runCatching { sensors.registerListener(this, selected, next.periodUs, next.latencyUs, handler) }.getOrDefault(false)
             if (!registered) {
                 accumulator = null
                 publish("加速度計註冊失敗，請重新啟動動作偵測")
             } else {
                 plan = next
+                val registeredAt = System.currentTimeMillis()
+                lastPersistElapsedRealtime = SystemClock.elapsedRealtime()
+                capture = CaptureDiagnostics(captureId, activeWindow.start, registeredAt,
+                    when {
+                        settings.experiment != CaptureExperiment.OFF -> settings.experiment.name
+                        fallbackWindowStart == activeWindow.start -> "SCREEN_OFF_2H_BACKUP"
+                        else -> "GOOGLE_CLASSIFICATION"
+                    }, next.periodUs, next.latencyUs, selected.fifoMaxEventCount, selected.isWakeUpSensor)
+                capture?.let { runCatching { store.saveCapture(it) } }
                 val batching = if (next.latencyUs > 0) "批次上限 ${next.latencyUs / 1_000_000} 秒" else "無硬體 FIFO"
                 val sleepHint = if (!selected.isWakeUpSensor) "；休眠時可能缺資料" else ""
                 val source = if (fallbackWindowStart == activeWindow.start) {
@@ -249,8 +271,8 @@ class MotionService : Service(), SensorEventListener2 {
         handler.removeCallbacks(finishChange)
         sensors.unregisterListener(this)
         accumulator?.let { pendingMinutes += it.drain(Long.MAX_VALUE, includePartial = true) }
-        accumulator = null; plan = null
-        persist()
+        persist(force = true)
+        accumulator = null; plan = null; capture = null
         if (!destroyed) action()
     }
 
@@ -262,6 +284,7 @@ class MotionService : Service(), SensorEventListener2 {
             if (pendingChange == null && !stopped) configure(schedule)
             return
         }
+        if (capture?.firstEvent == null) capture = capture?.copy(firstEvent = time)
         if (!engine.add(time, event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble())) return
         pendingMinutes += engine.drain(time)
         // Sensor timestamps can jump across a whole FIFO batch. Throttle by elapsed wall time,
@@ -271,7 +294,13 @@ class MotionService : Service(), SensorEventListener2 {
     override fun onFlushCompleted(sensor: Sensor?) { finishTransition() }
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
-    private fun persist() {
+    private fun persist(force: Boolean = false) {
+        if (!force && pendingMinutes.isEmpty()) return
+        accumulator?.let { engine -> capture = capture?.copy(rawEvents = engine.rawEventCount,
+            rejectedEvents = engine.rejectedEvents,
+            meanIntervalMillis = if (engine.rawEventCount > 1) engine.intervalSumMillis.toDouble() / (engine.rawEventCount - 1) else null,
+            maxIntervalMillis = if (engine.rawEventCount > 1) engine.intervalMaxMillis else null) }
+        capture?.let { runCatching { store.saveCapture(it) } }
         if (pendingMinutes.isEmpty()) return
         try { store.append(pendingMinutes.toList()); pendingMinutes.clear() }
         catch (_: RuntimeException) {
@@ -306,9 +335,10 @@ class MotionService : Service(), SensorEventListener2 {
             destroyed = true
             sensors.unregisterListener(this)
             accumulator?.let { pendingMinutes += it.drain(Long.MAX_VALUE, true) }
-            accumulator = null; pendingChange = null
+            pendingChange = null
             handler.removeCallbacks(finishChange)
-            persist()
+            persist(force = true)
+            accumulator = null; capture = null
             settings.status = when {
                 !settings.enabled -> "動作偵測已關閉"
                 windowEndedNormally -> "睡眠窗外，已停止背景服務並等待下一個排程"

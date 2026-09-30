@@ -73,11 +73,17 @@ class SleepStore(context: Context) {
         return eventStore.sessionsForReconciliation(startMillis, endMillis, emptySet())
     }
 
-    fun updateStageIntervals(expected: SleepSession, stageIntervals: List<SleepStageInterval>): Boolean = synchronized(sessionLock) {
+    fun updateStageIntervals(expected: SleepSession, stageIntervals: List<SleepStageInterval>, algorithmVersion: Int? = expected.stageAlgorithmVersion,
+        featureVersion: Int? = expected.stageFeatureVersion): Boolean = synchronized(sessionLock) {
         migrateSessions()
-        if (expected.stageIntervals == stageIntervals) return@synchronized false
+        if (expected.stageIntervals == stageIntervals) {
+            if (eventStore.session(expected.id) != expected) return@synchronized false
+            if (expected.stageAlgorithmVersion == algorithmVersion && expected.stageFeatureVersion == featureVersion) return@synchronized false
+            eventStore.upsertSession(expected.copy(stageAlgorithmVersion = algorithmVersion, stageFeatureVersion = featureVersion))
+            return@synchronized true
+        }
         val replacement = expected.copy(
-            stageIntervals = stageIntervals,
+            stageIntervals = stageIntervals, stageAlgorithmVersion = algorithmVersion, stageFeatureVersion = featureVersion,
             revision = expected.revision + 1,
             state = if (expected.state in setOf(SyncState.SYNCED, SyncState.SYNCING)) SyncState.PENDING else expected.state,
             syncError = if (expected.state in setOf(SyncState.SYNCED, SyncState.SYNCING)) null else expected.syncError

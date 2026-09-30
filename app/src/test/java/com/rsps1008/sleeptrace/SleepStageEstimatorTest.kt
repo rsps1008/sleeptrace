@@ -82,7 +82,7 @@ class SleepStageEstimatorTest {
         val session = session(base, 60)
         val rows = (0 until 60).map { index ->
             val rms = (index + 1) * 0.001
-            MotionMinute(base + index * MINUTE_MS, 60_000, 0, rms * rms * 60_000, 60, Placement.BED)
+            MotionMinute(base + index * MINUTE_MS, 60_000, 0, rms * rms * 60_000, 60, Placement.BED, featureVersion = 4)
         }
         val stages = estimate(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
 
@@ -106,7 +106,8 @@ class SleepStageEstimatorTest {
     @Test fun `night phone use is Awake and resets the Deep guard and continuity`() {
         val use = UsageInterval(base + 120 * MINUTE_MS, base + 123 * MINUTE_MS)
         val session = session(base, 190, awake = listOf(use))
-        val stages = estimate(session, motion(base, 190), emptyList(), listOf(use), listOf(SleepSegment(base, session.endMillis, 95)))
+        val signal = motion(base, 190).mapIndexed { i, m -> m.copy(squaredDeltaTime = (if (i < 170) .01 else .04).let { it * it * 60_000 }) }
+        val stages = estimate(session, signal, emptyList(), listOf(use), listOf(SleepSegment(base, session.endMillis, 95)))
         val parts = sleepParts(session.copy(stageIntervals = stages))
 
         assertTrue(stages.any { it.stage == SleepStage.AWAKE && it.startMillis == use.startMillis && it.endMillis == use.endMillis })
@@ -120,7 +121,7 @@ class SleepStageEstimatorTest {
         val rows = motion(base, 70).filterNot { it.startMillis == base + 40 * MINUTE_MS }
         val stages = estimate(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
 
-        assertEquals(SleepStage.LIGHT, stageAt(stages, base + 40 * MINUTE_MS))
+        assertEquals(SleepStage.SLEEPING, stageAt(stages, base + 40 * MINUTE_MS))
         assertFalse(stages.any { it.stage == SleepStage.DEEP && it.startMillis < base + 41 * MINUTE_MS && it.endMillis > base + 40 * MINUTE_MS })
     }
 
@@ -133,12 +134,12 @@ class SleepStageEstimatorTest {
         }
     }
 
-    @Test fun `Sleep API session without motion falls back to Light`() {
+    @Test fun `Sleep API session without motion is undetermined rather than Light`() {
         val session = session(base, 60)
         val stages = estimate(session, emptyList(), emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
 
         assertTrue(stages.isNotEmpty())
-        assertTrue(stages.all { it.stage == SleepStage.LIGHT })
+        assertTrue(stages.all { it.stage == SleepStage.SLEEPING })
         assertFalse(stages.any { it.stage == SleepStage.DEEP })
     }
 
@@ -193,7 +194,7 @@ class SleepStageEstimatorTest {
         placement: Placement = Placement.BED
     ) = (0 until count).map { index ->
         val time = start + index * MINUTE_MS
-        MotionMinute(time, 60_000, 0, 0.01 * 0.01 * 60_000, 60, placement)
+        MotionMinute(time, 60_000, 0, (if (index < count * .70) .01 else .04).let { it * it * 60_000 }, 60, placement, featureVersion = 4)
     }
 
     private fun active(minute: MotionMinute) = minute.copy(

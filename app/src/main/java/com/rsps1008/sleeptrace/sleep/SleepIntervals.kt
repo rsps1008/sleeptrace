@@ -16,7 +16,7 @@ fun normalizedAwake(start: Long, end: Long, input: List<UsageInterval>): List<Us
     return result
 }
 
-/** SLEEPING is retained for old records whose stage was not estimated. */
+/** SLEEPING means accepted sleep without enough evidence to distinguish Light/Deep. */
 enum class SleepStage { AWAKE, LIGHT, DEEP, SLEEPING }
 
 data class SleepPart(val start: Long, val end: Long, val stage: SleepStage) {
@@ -25,7 +25,7 @@ data class SleepPart(val start: Long, val end: Long, val stage: SleepStage) {
 
 fun sleepParts(session: SleepSession): List<SleepPart> {
     if (session.endMillis <= session.startMillis) return emptyList()
-    val stageIntervals = session.stageIntervals
+    val stageIntervals = session.stageIntervals.filter { it.endMillis > it.startMillis }
     val awakeIntervals = normalizedAwake(session.startMillis, session.endMillis, session.awakeIntervals)
     val boundaries = buildSet {
         add(session.startMillis)
@@ -43,10 +43,10 @@ fun sleepParts(session: SleepSession): List<SleepPart> {
     boundaries.zipWithNext().forEach { (start, end) ->
         if (end <= start) return@forEach
         val awake = awakeIntervals.any { it.startMillis <= start && it.endMillis >= end }
-        val stage = if (awake) SleepStage.AWAKE else stageIntervals
-            .firstOrNull { it.startMillis <= start && it.endMillis >= end }
-            ?.stage
-            ?: if (stageIntervals.isEmpty()) SleepStage.SLEEPING else SleepStage.LIGHT
+        val matching = stageIntervals.filter { it.startMillis <= start && it.endMillis >= end }.map { it.stage }.distinct()
+        // Contradictory sleep labels are unknown; actual Awake evidence always wins.
+        val stage = if (awake || SleepStage.AWAKE in matching) SleepStage.AWAKE
+            else matching.singleOrNull() ?: SleepStage.SLEEPING
         val previous = parts.lastOrNull()
         if (previous != null && previous.end == start && previous.stage == stage) {
             parts[parts.lastIndex] = previous.copy(end = end)
@@ -55,4 +55,15 @@ fun sleepParts(session: SleepSession): List<SleepPart> {
         }
     }
     return parts
+}
+
+data class StageDurations(val deep: Long, val light: Long, val sleeping: Long, val awake: Long) {
+    val sleep: Long get() = deep + light + sleeping
+    val span: Long get() = sleep + awake
+}
+
+fun stageDurations(session: SleepSession): StageDurations {
+    val totals = sleepParts(session).groupBy { it.stage }.mapValues { (_, parts) -> parts.sumOf { it.end - it.start } }
+    return StageDurations(totals[SleepStage.DEEP] ?: 0, totals[SleepStage.LIGHT] ?: 0,
+        totals[SleepStage.SLEEPING] ?: 0, totals[SleepStage.AWAKE] ?: 0)
 }

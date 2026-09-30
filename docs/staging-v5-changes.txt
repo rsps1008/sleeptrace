@@ -1,0 +1,36 @@
+Base HEAD: dc92433 (clean at start)
+Changes remain in the working tree.
+
+AGENTS.md
+README.md
+app/src/androidTest/java/com/rsps1008/sleeptrace/StagingStorageRuntimeTest.kt
+app/src/debug/AndroidManifest.xml
+app/src/debug/java/com/rsps1008/sleeptrace/motion/CaptureExperimentReceiver.kt
+app/src/main/java/com/rsps1008/sleeptrace/MainActivity.kt
+app/src/main/java/com/rsps1008/sleeptrace/SleepDialogHelper.kt
+app/src/main/java/com/rsps1008/sleeptrace/data/SleepEventStore.kt
+app/src/main/java/com/rsps1008/sleeptrace/data/SleepStore.kt
+app/src/main/java/com/rsps1008/sleeptrace/health/HealthConnectSync.kt
+app/src/main/java/com/rsps1008/sleeptrace/motion/AutomaticPlacement.kt
+app/src/main/java/com/rsps1008/sleeptrace/motion/CaptureDiagnostics.kt
+app/src/main/java/com/rsps1008/sleeptrace/motion/MotionEngine.kt
+app/src/main/java/com/rsps1008/sleeptrace/motion/MotionService.kt
+app/src/main/java/com/rsps1008/sleeptrace/motion/MotionStore.kt
+app/src/main/java/com/rsps1008/sleeptrace/motion/SignalCoupling.kt
+app/src/main/java/com/rsps1008/sleeptrace/sleep/CsvFormatting.kt
+app/src/main/java/com/rsps1008/sleeptrace/sleep/SleepIntervals.kt
+app/src/main/java/com/rsps1008/sleeptrace/sleep/SleepModels.kt
+app/src/main/java/com/rsps1008/sleeptrace/sleep/SleepReconciler.kt
+app/src/main/java/com/rsps1008/sleeptrace/sleep/SleepSessionTimelineView.kt
+app/src/main/java/com/rsps1008/sleeptrace/sleep/SleepStageEstimator.kt
+app/src/main/res/values/strings.xml
+app/src/test/java/com/rsps1008/sleeptrace/AutomaticPlacementTest.kt
+app/src/test/java/com/rsps1008/sleeptrace/FrozenStageV4.kt
+app/src/test/java/com/rsps1008/sleeptrace/SleepStageCalibrationTest.kt
+app/src/test/java/com/rsps1008/sleeptrace/SleepStageEstimatorTest.kt
+app/src/test/java/com/rsps1008/sleeptrace/StagingEvidenceTest.kt
+app/src/test/java/com/rsps1008/sleeptrace/StagingReplayTest.kt
+docs/staging-v5-changes.txt
+docs/staging-v5-replay.txt
+
+External work log: E:/DailyDev.csv (merged existing 2026/9/30 sleep entry)

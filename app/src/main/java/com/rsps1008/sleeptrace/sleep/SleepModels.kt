@@ -56,9 +56,12 @@ data class SleepSession(
     /** True once the shared per-window UsageStats snapshot has been applied and persisted. */
     val usageSnapshotApplied: Boolean = false,
     /** Merged stage intervals, recomputed during reconciliation; empty means legacy generic sleep. */
-    val stageIntervals: List<SleepStageInterval> = emptyList()
+    val stageIntervals: List<SleepStageInterval> = emptyList(),
+    val stageAlgorithmVersion: Int? = null,
+    val stageFeatureVersion: Int? = null
 ) {
-    val durationMillis: Long get() = (endMillis - startMillis - awakeMillis).coerceAtLeast(0)
+    val durationMillis: Long get() = if (awakeIntervals.isNotEmpty() || stageIntervals.isNotEmpty()) stageDurations(this).sleep
+        else (endMillis - startMillis - awakeMillis).coerceAtLeast(0)
     fun title(): String = Instant.ofEpochMilli(startMillis).atZone(ZoneId.systemDefault())
         .format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))
 }

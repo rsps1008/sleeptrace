@@ -1,3 +1,9 @@
 <resources>
     <string name="app_name">眠迹 SleepTrace</string>
+    <string name="sleep_detail_total">總睡眠：%1$s\n</string>
+    <string name="sleep_detail_unknown">已記錄睡眠時間，感測資料不足以估計深淺眠。\n深淺未判定：%1$s\n</string>
+    <string name="sleep_detail_stages">推估淺眠：%1$s　推估深眠：%2$s\n深淺未判定：%3$s\n</string>
+    <string name="sleep_detail_footer">已知清醒：%1$s\n可分期時間：%2$s（與睡眠參考分數分開）\n手機工程推估，非醫療睡眠分期；規則 %3$s\n睡眠參考分數：%4$d/100（非準確率）\n\n%5$s</string>
+    <string name="sleep_detail_sync_error">\n\n同步錯誤：%1$s</string>
+    <string name="sleep_legacy_version">舊版來源不明</string>
 </resources>
