@@ -124,9 +124,22 @@ class StagingDiagnosticConsistencyTest {
 
         assertTrue(isolated.priorState)
         assertEquals(SleepStageEstimator.Action.MAINTAIN, isolated.action)
+        assertFalse(isolated.entryDecision.applicable)
+        assertFalse(isolated.entryDecision.allowed)
+        assertTrue(SleepStageEstimator.Reason.ACTIVITY_TOO_HIGH in isolated.entryDecision.reasons)
+        assertTrue(isolated.maintenanceDecision.applicable)
         assertTrue(isolated.maintenanceDecision.allowed)
         assertTrue(isolated.canMaintainDeep)
         assertEquals(SleepStage.DEEP, stageAt(result, 35))
+    }
+
+    @Test fun `formal decision applicability follows the prior Deep state`() {
+        val result = analyze(rows())
+        val entry = result.minutes.first { it.action == SleepStageEstimator.Action.ENTER }
+
+        assertFalse(entry.priorState)
+        assertTrue(entry.entryDecision.applicable)
+        assertFalse(entry.maintenanceDecision.applicable)
     }
 
     @Test fun `high rolling motion keeps the counter until the formal three-window exit`() {
@@ -229,7 +242,7 @@ class StagingDiagnosticConsistencyTest {
         assertEquals(SleepStage.LIGHT, guarded.finalStage)
     }
 
-    @Test fun `backfill activity and safety provenance use independent channels`() {
+    @Test fun `formal activity rewrite retains its own provenance channel`() {
         val result = analyze(rows().mapIndexed { index, minute ->
             if (index in 40..42) active(minute) else minute
         })
@@ -238,14 +251,7 @@ class StagingDiagnosticConsistencyTest {
         assertEquals(SleepStageEstimator.PostProcessReason.SUSTAINED_ACTIVITY_REWRITE,
             rewritten.retroactiveAdjustmentReason)
         assertTrue(result.minutes.any { it.wasBackfilled })
-
-        // The fields are deliberately independent: a later safety-cap pass can
-        // set its flag without erasing the activity source and reason.
-        val both = rewritten.copy(safetyCapAdjusted = true, finalStage = SleepStage.SLEEPING)
-        assertTrue(both.retroactivelyAdjusted)
-        assertEquals(SleepStageEstimator.PostProcessReason.SUSTAINED_ACTIVITY_REWRITE,
-            both.retroactiveAdjustmentReason)
-        assertTrue(both.safetyCapAdjusted)
+        assertFalse(rewritten.safetyCapAdjusted)
     }
 
     @Test fun `legal real accumulator gap blocks only while it remains in the recent five-minute context`() {
@@ -301,6 +307,7 @@ class StagingDiagnosticConsistencyTest {
         val adjusted = capped.minutes.filter { it.safetyCapAdjusted }
         assertTrue(adjusted.isNotEmpty())
         assertTrue(adjusted.all { it.formalStage == SleepStage.DEEP && it.finalStage == SleepStage.SLEEPING })
+        assertTrue(adjusted.none { it.retroactivelyAdjusted })
         capped.minutes.filter { it.action == SleepStageEstimator.Action.ENTER }.forEach {
             assertEquals("enter_stable_window", it.transitionReason)
         }

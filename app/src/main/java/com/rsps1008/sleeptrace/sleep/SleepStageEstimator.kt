@@ -109,8 +109,8 @@ object SleepStageEstimator {
         /** The state before later backfill and safety-cap post-processing. */
         val priorState: Boolean = false,
         val currentEligibility: Boolean = canStage,
-        val entryDecision: Decision = Decision(true, canEnterDeep),
-        val maintenanceDecision: Decision = Decision(false, canMaintainDeep),
+        val entryDecision: Decision = Decision(!priorState, canEnterDeep),
+        val maintenanceDecision: Decision = Decision(priorState, canMaintainDeep),
         val action: Action = Action.NONE,
         val formalStage: SleepStage = stage,
         val wasBackfilled: Boolean = false,
@@ -487,6 +487,9 @@ object SleepStageEstimator {
             index, timeline, rolling[index], baseline, evidenceStart,
             currentEligibility, currentReasons, baselineReasons
         )
+        // Retain the entry evaluation for diagnostic context, but mark only the
+        // decision branch selected by the formal state machine as applicable.
+        val entryDecision = entry.decision.copy(applicable = !priorState)
         val currentBreak = minute.hardBreak || !currentEligibility || baseline == null
 
         if (currentBreak) {
@@ -497,7 +500,7 @@ object SleepStageEstimator {
             }
             return FormalDecision(
                 priorState, currentEligibility, currentReasons, baselineReasons,
-                entry.decision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
+                entryDecision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
                 maintenance, if (priorState) Action.EXIT else Action.NONE,
                 if (priorState) transitionReasonFor(maintenance.reasons, hardBreak = true) else null,
                 highMotionWindowsBefore, 0, 0
@@ -532,16 +535,16 @@ object SleepStageEstimator {
             val transition = if (maintenance.allowed) null else transitionReasonFor(maintenance.reasons, hardBreak = false)
             return FormalDecision(
                 priorState, currentEligibility, currentReasons, baselineReasons,
-                entry.decision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
+                entryDecision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
                 maintenance, action, transition, highMotionWindowsBefore, highCandidate,
                 if (maintenance.allowed) highCandidate else 0
             )
         }
 
-        val action = if (entry.decision.allowed) Action.ENTER else Action.NONE
+        val action = if (entryDecision.allowed) Action.ENTER else Action.NONE
         return FormalDecision(
             priorState, currentEligibility, currentReasons, baselineReasons,
-            entry.decision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
+            entryDecision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
             Decision(false, false), action, if (action == Action.ENTER) "enter_stable_window" else null,
             highMotionWindowsBefore, 0, 0
         )
