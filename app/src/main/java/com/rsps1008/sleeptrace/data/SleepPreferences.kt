@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
+import com.rsps1008.sleeptrace.sleep.SleepObservationWindows
 import kotlinx.coroutines.flow.first
 
 private val Context.sleepDataStore by preferencesDataStore("sleeptrace_settings")
@@ -21,8 +22,9 @@ class SleepPreferences(private val context: Context) {
         val values = context.sleepDataStore.data.first()
         val weekendStart = values[weekendStartKey]?.takeIf { it in 0 until MINUTES_PER_DAY }
         val weekendEnd = values[weekendEndKey]?.takeIf { it in 0 until MINUTES_PER_DAY }
-        return SleepSchedule(values[startKey] ?: 0, values[endKey] ?: 540,
+        val nominal = SleepSchedule(values[startKey] ?: 0, values[endKey] ?: 540,
             weekendStart?.takeIf { weekendEnd != null }, weekendEnd?.takeIf { weekendStart != null })
+        return if (values[enabledKey] == true) SleepObservationWindows.apply(context, nominal) else nominal
     }
 
     suspend fun configured(): Boolean = context.sleepDataStore.data.first()[enabledKey] ?: false

@@ -16,7 +16,9 @@ data class SleepSchedule(
     val startMinute: Int,
     val endMinute: Int,
     val weekendStartMinute: Int? = null,
-    val weekendEndMinute: Int? = null
+    val weekendEndMinute: Int? = null,
+    /** Persisted effective ends, keyed by the original scheduled window. Labels remain user settings. */
+    val observationEnds: Map<SleepWindow, Long> = emptyMap()
 ) {
     init {
         require(startMinute in 0 until MINUTES_PER_DAY)
@@ -42,7 +44,8 @@ data class SleepSchedule(
         val nextStart = nextDate.atStartOfDay().plusMinutes(startMinuteFor(nextDate).toLong())
             .atZone(zone).toInstant().toEpochMilli()
         val endAt = minOf(requestedEnd, nextStart)
-        return SleepWindow(startAt, endAt)
+        val nominal = SleepWindow(startAt, endAt)
+        return SleepWindow(startAt, observationEnds[nominal]?.coerceIn(startAt + 1, nextStart) ?: endAt)
     }
 
     /** Returns the scheduled window containing this instant, if one is active. */
@@ -87,7 +90,7 @@ data class SleepSchedule(
     fun overlaps(startMillis: Long, endMillis: Long) = intersections(startMillis, endMillis).isNotEmpty()
 
     fun requiresWindowBoundary(): Boolean =
-        startMinute != endMinute || weekendStartMinute?.let { it != weekendEndMinute } == true
+        observationEnds.isNotEmpty() || startMinute != endMinute || weekendStartMinute?.let { it != weekendEndMinute } == true
 
     private fun rangeLabel(start: Int, end: Int): String =
         "%02d:%02d–%02d:%02d".format(start / 60, start % 60, end / 60, end % 60)

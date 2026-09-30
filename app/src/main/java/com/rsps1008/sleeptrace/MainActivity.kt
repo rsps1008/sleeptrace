@@ -870,7 +870,7 @@ class MainActivity : AppCompatActivity() {
         homeViews.scheduleMode.text = when {
             !recordingEnabled -> "自動記錄已暫停"
             !schedule.requiresWindowBoundary() -> "自動記錄已開啟 · 目前排程涵蓋全天"
-            exactAlarmAllowed -> "自動記錄已開啟 · 只在睡眠窗維持背景服務"
+            exactAlarmAllowed -> "自動記錄已開啟 · 起床後整理，仍在睡眠時延長觀測"
             else -> "未允許鬧鐘與提醒 · 睡眠窗背景啟動可能受限"
         }
         homeViews.windowAlarmAccess.visibility = if (recordingEnabled && schedule.requiresWindowBoundary() && !exactAlarmAllowed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) View.VISIBLE else View.GONE
@@ -955,7 +955,7 @@ class MainActivity : AppCompatActivity() {
         motionSettings.windowAlarmGuideShown = true
         MaterialAlertDialogBuilder(this)
             .setTitle("睡眠窗外關閉背景服務")
-            .setMessage("允許「鬧鐘與提醒」後，眠迹可準時啟動睡眠窗前景服務，並在睡眠窗結束時關閉。若略過，睡眠窗外仍會停止前景服務，但 Android 可能限制鬧鐘或 Sleep API 回呼從背景啟動服務，造成動作資料缺口；Sleep API 睡眠區段仍會接收，開啟 App 時也會補啟動。")
+            .setMessage("允許「鬧鐘與提醒」後，眠迹可準時啟動觀測，並在排程結束時評估是否仍在睡眠。有足夠起床證據會提早整理，仍有近期睡眠證據則延長觀測，實際觀測結束後關閉前景服務。若略過，Android 可能限制鬧鐘或 Sleep API 回呼從背景啟動服務，造成動作資料缺口；Sleep API 睡眠區段仍會接收，開啟 App 時也會補啟動。")
             .setPositiveButton("開啟系統設定") { _, _ -> openWindowAlarmSettings() }
             .setNegativeButton("稍後", null)
             .show()

@@ -1,0 +1,5 @@
+# Replay checks compare fixture bytes and generated report text across platforms.
+app/src/test/resources/staging/real_night_style.csv text eol=lf
+docs/staging-v7-replay.txt text eol=lf
+docs/staging-v7-transition-matrix.csv text eol=lf
+docs/staging-v7-diff-intervals.csv text eol=lf

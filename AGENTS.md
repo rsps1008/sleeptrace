@@ -4,7 +4,7 @@
 
 ## 1. 專案目標與已確定的使用者需求
 
-- Android 手機睡眠推估 App，名稱 **眠迹 SleepTrace**，applicationId／namespace 為 `com.rsps1008.sleeptrace`，Gradle 專案名稱為 `SleepTrace`。工作目錄目前為 `E:\Git\sleep`，保留現有名稱與包名，除非使用者要求更名。
+- Android 手機睡眠推估 App，名稱 **眠迹 SleepTrace**，applicationId／namespace 為 `com.rsps1008.sleeptrace`，Gradle 專案名稱為 `SleepTrace`。工作目錄目前為 `E:\Git\sleeptrace`，保留現有名稱與包名，除非使用者要求更名。
 - App 圖示為深靛藍夜色底、淡紫月牙與藍綠睡眠軌跡；adaptive icon 使用 `ic_launcher_background`、`ic_launcher_art` 與 `ic_launcher_monochrome`，各密度另有一般及圓形 legacy WebP。原始生成圖與預覽保存在 `artwork/`。
 - 優先省電；接受不非常精準的推估，但要以實際可取得的資料判斷。手機通常放在床上，也必須處理床邊放置情況。
 - **放置位置與動作偵測由 App 自動處理，不要要求使用者選床上／床邊或另外開啟感測器。首頁以睡眠時間與記錄狀態為主，避免顯示感測器參數／診斷圖表。**
@@ -20,7 +20,7 @@
 | 項目 | 目前設定 |
 | --- | --- |
 | 主機／Shell | Windows／PowerShell；搜尋優先使用 `rg`、`rg --files` |
-| Java | Java 21：`C:\Program Files\Java\jdk-21.0.11` |
+| Java | Java 21：`C:\Program Files\Java\jdk-21.0.10` |
 | Android SDK | 本機為 `C:\Users\CHINTING\AppData\Local\Android\Sdk`；其他環境以 `local.properties` 為準 |
 | 建置 | Gradle Wrapper 9.6.0、Android Gradle Plugin 9.4.1 |
 | Android | minSdk 29、compileSdk 37、targetSdk 37；版本目前為 1.0／versionCode 1 |
@@ -37,20 +37,26 @@
 
 ### 偵測時段及 Sleep API
 
+2026-09-30 起床／延長觀測規則：排程結束是重新評估的時間，不是仍在睡眠時的硬性停止點。排程後半段若先有至少早 30 分鐘的 confidence ≥ 80 睡眠證據，再連續至少 3 筆 confidence ≤ 20、跨至少 20 分鐘、相鄰不超過 15 分鐘、最後一筆距現在不超過 10 分鐘，關閉窗口於這串低分的起點並排入自動統計／同步。單次低分、夜間短醒、缺資料或完全靜止不能提早關閉。
+
+接近排程結束前 20 分鐘起，最新分類仍為 confidence ≥ 80 且距現在不超過 20 分鐘時，實際觀測結束延至該證據之後 30 分鐘；持續新睡眠回報可續延。續延需回報時間仍位於既有觀測範圍，不能用後來另一段睡眠重新打開已中斷窗口。沒有近期睡眠支持時在目前有效結束時間完成觀測，不把未知或手機靜止當成睡眠。最多延至下一個排程開始，避免平日／週末窗口重疊；下一窗可接續觀測。門檻未校準，分類延遲／漏失仍可能影響結果。
+
+實際窗口以原排程起訖為鍵、有效結束及 closed 標記保存於已排除備份的 sleeptrace_motion；先同步 commit 成功，再通知工作。重啟及遲到回報不重新打開已完成窗口。所有 schedule 消費端（FGS、分類訂閱、鬧鐘、motion／API 候選、分期、UsageStats snapshot、Health Connect 完成檢查）使用同一有效窗口；設定畫面仍顯示使用者指定的時間。排程變更使用新的原始起訖鍵；新窗口不能套用舊快照。未完成窗口不統計；閉合窗口仍需現有候選證據與至少 30 分鐘有效睡眠，不能僅憑判定起床生成睡眠。暫停、低電量、1 Hz 與系統背景限制照常生效。有效窗口標記保留 14 天並在讀取排程時清理。以下歷史驗證中「排程結束後才統計」是舊版行為。
+
 - 首次開啟要求設定偵測時段，設定前 `configured()` 為 false，不啟用睡眠分析。平日可使用每日時段；可選擇為週六／週日另設時段，跨午夜依睡眠窗開始日決定套用哪組。起訖相同時目前視為 24 小時。開始與結束時間在同一個對話框以 24 小時制拉選欄位選取，並即時標示跨夜狀態；不使用時鐘式選擇器。國定假日不會自動判斷。
 - `MainActivity` 每次啟動會自動檢查活動辨識、通知、Health Connect 與使用情況存取；可由 App 發起的權限會直接啟動系統授權流程，使用情況存取則帶到 Android 系統設定頁。畫面保留狀態與重新檢查入口，不要求使用者逐項尋找設定按鈕。
-- 完成上述流程及時段設定後，若未暫停，會引導背景電池設定與小米自啟動；若 Android 12+ 尚未允許「鬧鐘與提醒」，也會說明睡眠窗限定服務需要此特殊存取。即使略過，睡眠窗外也必須停止 FGS；非精準鬧鐘／Sleep API 回呼只可盡力啟動，Android 可能拒絕或延遲，首頁提示可能漏掉動作資料。Sleep API 區段同步仍可運作，使用者開啟 App 時會補啟動。
-- `SleepTracker` 全天訂閱 Sleep API 睡眠區段；睡眠窗開始前 15 分鐘至窗結束才額外訂閱週期性分類事件，使用 `SEGMENT_AND_CLASSIFY_EVENTS`，其餘時間使用 `SEGMENT_EVENTS_ONLY`。預熱分類可在睡眠窗開始時觸發取樣，但 FGS 與加速度計仍只在實際睡眠窗內啟動；需要活動辨識權限。
-- 接收 Sleep API 區段後排入背景分析工作。分類樣本只先保存，不因每個分類事件立即重跑全部分析。
-- 睡眠窗前 15 分鐘開始預熱 Sleep API 分類；目前睡眠窗或其前 15 分鐘內、最近 20 分鐘的分類信心值 ≥ 80 時，才在實際睡眠窗內啟動該時段的加速度計取樣。若時段開始已過 2 小時仍未觸發、螢幕亦已持續關閉至少 2 小時，啟動同樣 1 Hz 的低頻動作備援，避免 Google 回報延遲造成整夜空窗；這不是靜止或睡眠證明。80 與 2 小時都是未校準工程門檻，不代表準確率；分類可能約每 10 分鐘才回報、延遲或漏失。觸發後取樣到時段結束，不因後續單次低分反覆停止。
-- `SleepAnalyzer` 保留至少 30 分鐘且與時段重疊的區段。只在完整睡眠窗結束後以完整起訖查詢一次 UsageStats，再以 `(windowStart, windowEnd)` 複合鍵保存於 `sleep_events.db`，供 `AutomaticPlacement`、`SleepAnalyzer` 與 Health Connect 共用；排程結束時間改變時必須查詢新窗口，不能沿用舊 snapshot。未結束窗口不可保存半窗 snapshot、產生或上傳候選。缺少使用情況權限時按窗口保存不可用標記；理由只使用該睡眠窗的權限狀態及手機使用區間。
+- 完成上述流程及時段設定後，若未暫停，會引導背景電池設定與小米自啟動；若 Android 12+ 尚未允許「鬧鐘與提醒」，也會說明睡眠窗限定服務需要此特殊存取。即使略過，實際觀測窗外也必須停止 FGS；非精準鬧鐘／Sleep API 回呼只可盡力啟動，Android 可能拒絕或延遲，首頁提示可能漏掉動作資料。Sleep API 區段同步仍可運作，使用者開啟 App 時會補啟動。
+- `SleepTracker` 全天訂閱 Sleep API 睡眠區段；睡眠窗開始前 15 分鐘至窗結束才額外訂閱週期性分類事件，使用 `SEGMENT_AND_CLASSIFY_EVENTS`，其餘時間使用 `SEGMENT_EVENTS_ONLY`。預熱分類可在睡眠窗開始時觸發取樣，但 FGS 與加速度計仍只在實際觀測窗內啟動；需要活動辨識權限。
+- 接收 Sleep API 區段後排入背景分析工作。分類樣本保存後會評估起床／延長觀測並更新服務與鬧鐘；只有窗口完成才排入統計，不因每個分類事件立即重跑全部分析。
+- 睡眠窗前 15 分鐘開始預熱 Sleep API 分類；目前睡眠窗或其前 15 分鐘內、最近 20 分鐘的分類信心值 ≥ 80 時，才在實際睡眠窗內啟動該時段的加速度計取樣。若時段開始已過 2 小時仍未觸發、螢幕亦已持續關閉至少 2 小時，啟動同樣 1 Hz 的低頻動作備援，避免 Google 回報延遲造成整夜空窗；這不是靜止或睡眠證明。80 與 2 小時都是未校準工程門檻，不代表準確率；分類可能約每 10 分鐘才回報、延遲或漏失。觸發後取樣到實際觀測結束，不因後續單次低分反覆停止。
+- `SleepAnalyzer` 保留至少 30 分鐘且與時段重疊的區段。只在實際觀測窗完成後以完整起訖查詢一次 UsageStats，再以 `(windowStart, windowEnd)` 複合鍵保存於 `sleep_events.db`，供 `AutomaticPlacement`、`SleepAnalyzer` 與 Health Connect 共用；排程結束時間改變時必須查詢新窗口，不能沿用舊 snapshot。尚在觀測的窗口不可保存半窗 snapshot、產生或上傳候選；足夠起床證據關閉的窗口可在排程結束前統計與同步。缺少使用情況權限時按窗口保存不可用標記；理由只使用該睡眠窗的權限狀態及手機使用區間。
 - Sleep API 區段會與平日／週末排程取交集後才形成候選；跨越多日的長區段會分成各睡眠窗範圍，區段外的時間不採計。加速度計候選也限制在完整睡眠窗內。
 - Sleep API 參考分數由區段分數 × 45%、高信心分類比例 × 35%、分類覆蓋率 × 20% 組成。每個分類樣本以前後各 5 分鐘估計覆蓋；重疊覆蓋會合併。這是工程規則，不是經驗證的準確率。
 - `SleepUpdateReceiver` 將成功區段狀態映射為 100、其他非 NOT_DETECTED 狀態映射為 60；這不是 Google 直接提供的睡眠區段準確率。
 
 ### 加速度計與省電
 
-- 完成時段設定及活動辨識授權後，在排定睡眠窗內啟動前景記錄服務，窗外一律停止；開始／結束邊界由獨立 AlarmManager receiver 管理。「鬧鐘與提醒」可準時喚醒邊界。沒有特殊存取時只設非精準鬧鐘並在邊界／分類回呼嘗試啟動，背景限制可能造成延遲或漏記，不能為了自動恢復而回退全天 FGS。新資料保存為 `AUTO`，由 `AutomaticPlacement` 在分析時推估床上／床邊／未知，不使用舊版手動位置設定。
+- 完成時段設定及活動辨識授權後，在實際觀測窗內啟動前景記錄服務，窗外一律停止；開始／結束邊界由獨立 AlarmManager receiver 管理。「鬧鐘與提醒」可準時喚醒邊界。沒有特殊存取時只設非精準鬧鐘並在邊界／分類回呼嘗試啟動，背景限制可能造成延遲或漏記，不能為了自動恢復而回退全天 FGS。新資料保存為 `AUTO`，由 `AutomaticPlacement` 在分析時推估床上／床邊／未知，不使用舊版手動位置設定。
 - 新的 `recording_enabled` 預設 true，取代舊版感測器 `enabled`；原來沒開啟動作感測的使用者升級後也會自動記錄。首頁與通知只保留整體「暫停／恢復自動記錄」，明確暫停後不自動重啟。
 - Google 高信心分類觸發後固定要求 1 Hz，接電時也不提高頻率；有硬體 FIFO 時批次延遲依 FIFO 容量 × 取樣間隔 × 80% 換算，不另設 App 時間上限，僅受 Android API `Int` 可表示範圍限制。硬體最小取樣間隔也會限制請求頻率。
 - 無 FIFO 時仍為 1 Hz，但不能宣稱有硬體批次。優先選有 FIFO 的 wake-up accelerometer；非 wake-up 感測器休眠時可能缺資料。
@@ -122,6 +128,7 @@
 | `sleep/SleepUpdateReceiver.kt` | 保存 Sleep API 區段／分類，區段事件排入工作 |
 | `sleep/ResubscribeReceiver.kt` | 開機／套件更新後重新訂閱 Sleep API、排程並嘗試恢復自動記錄 |
 | `sleep/UsageMonitor.kt` | 查 UsageStats 螢幕互動與前景活動；向前查 24 小時以承接區段起點之前的狀態，並在裝置關機／啟動事件結算與清除跨 boot 狀態 |
+| `sleep/SleepObservationPolicy.kt`、`sleep/SleepObservationWindows.kt` | 起床／延長觀測工程判斷、持久化有效窗口；供所有 schedule 消費端共用 |
 | `sleep/SleepSchedule.kt`、`sleep/SleepAnalyzer.kt` | 時段重疊與 Sleep API 候選／分數 |
 | `sleep/SleepStageEstimator.kt` | 僅在已成立 session 內以睡前 UsageStats guard、BED nightly percentiles、inclusive 15 分鐘 rolling median 與 hysteresis 重算 Light／Deep；提供匯出診斷，不保存原始波形 |
 | `sleep/SleepUsageSnapshot.kt` | 每個排程睡眠窗一次的 UsageStats 快照；以窗口起訖複合鍵重用，分析與理由依各窗權限狀態分開處理 |
@@ -130,7 +137,7 @@
 | `motion/MotionEngine.kt` | 純 Kotlin 取樣策略、事件時間 1 秒代表 sample、分鐘聚合、動作分類／候選與分數調整 |
 | `motion/AutomaticPlacement.kt` | 純 Kotlin 自動放置／床面動作證據判斷；無手動選擇 |
 | `motion/MotionService.kt` | 睡眠窗內前景感測服務、電量／供電切換、flush 與快取設定；螢幕事件只更新記憶體狀態 |
-| `motion/SleepWindowScheduler.kt` | 睡眠窗開始／結束及分類備援邊界；未變更的下一個邊界不重設鬧鐘 |
+| `motion/SleepWindowScheduler.kt` | 實際觀測窗開始／結束及分類備援邊界；未變更的下一個邊界不重設鬧鐘 |
 | `motion/MotionStore.kt` | SQLite 分鐘摘要及 SharedPreferences 動作設定；由 Application 容器共用並啟用 WAL |
 | `motion/MotionTimelineView.kt` | 保留的時間軸繪製工具，首頁已不使用 |
 | `data/SleepPreferences.kt`、`data/SleepStore.kt`、`data/SleepEventStore.kt` | 平日／週末時段設定、Sleep API 原始事件、每晚 UsageStats snapshot 與睡眠紀錄；snapshot 使用 `(windowStart, windowEnd)` 複合鍵並由資料庫版本遷移舊表；session 查詢支援 limit／offset、摘要 projection、狀態篩選與時間／狀態索引 |
@@ -147,7 +154,7 @@
 | --- | --- |
 | DataStore `sleeptrace_settings` | 平日開始／結束、可選週末開始／結束分鐘、`tracking_enabled`；目前 configured 與 enabled 共用此旗標 |
 | SharedPreferences `sleeptrace_records` | 僅作為舊版 JSON `sessions`／raw `segments`／`samples` 的一次性遷移來源；遷移完成後移除內容 |
-| SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、鬧鐘邊界快取與每日清理日期、battery_guide_shown／xiaomi_guide_shown／window_alarm_guide_shown 引導旗標（不是授權狀態）；舊 enabled／placement 不再控制新資料 |
+| SharedPreferences `sleeptrace_motion` | 整體自動記錄開關 recording_enabled、鬧鐘邊界快取與每日清理日期、battery_guide_shown／xiaomi_guide_shown／window_alarm_guide_shown 引導旗標（不是授權狀態）、observation_end_* 實際觀測結束與已關閉標記；舊 enabled／placement 不再控制新資料 |
 | SQLite `motion.db`／`minutes` | 每分鐘感測統計，以開始時間為主鍵；schema 3 保存 nullable v5 時間結構特徵及 capture_runs；舊欄位保留，沒有原始感測波形 |
 | SQLite `sleep_events.db`／`segments`、`samples`、`sessions`、`usage_snapshots` | Sleep API 原始區段與分類以時間鍵去重，資料含一次性每日清理檢查及 14 天保留；每晚 UsageStats snapshot 以 `(windowStart, windowEnd)` 複合鍵保存；schema 11 的 session 規則／特徵來源 nullable 欄位；沿用 schema 10 的 evidenceStart 記錄前 30 分鐘 guard 證據，缺少此前置範圍的舊 snapshot 會補查一次；session 保存穩定 ID、版本、同步狀態、清醒明細與合併後的 `stageIntervals` JSON，不保存逐分鐘分期或 accelerometer 波形。兩個 SQLite helper 啟用 WAL；reconcile 只查最近 48 小時及 PENDING／SYNCING／FAILED_RETRYABLE session，差異列以單一 transaction 刪除／upsert，未變更歷史不重寫；`replaceSessions` 僅用於明確完整重算或遷移 |
 
@@ -160,7 +167,7 @@ App 沒有自己的雲端後端，不讀取其他 App 的健康紀錄。清除�
 在專案根目錄執行：
 
 ```powershell
-$env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.11'
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.10'
 $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --no-configuration-cache
 ```
@@ -175,6 +182,7 @@ $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 
 - `app/src/test/java/com/rsps1008/sleeptrace/SleepAnalyzerTest.kt`：手機使用扣除、分類不足仍自動同步、一般候選。
 - `app/src/test/java/com/rsps1008/sleeptrace/SleepStageEstimatorTest.kt`：平板／手機靜置與 API 起點、15 分鐘手機使用 guard、短翻身、長活動、夜間拿手機、資料缺口、床邊／未知放置及無 motion fallback。
+- `app/src/test/java/com/rsps1008/sleeptrace/SleepObservationPolicyTest.kt`：持續起床／單次低分／夜間短醒／回報缺口與過期、睡眠續延、已完成窗口不重開、下一窗邊界及服務／訂閱／鬧鐘／快照／候選共用有效窗口。
 - `app/src/test/java/com/rsps1008/sleeptrace/SleepScheduleTest.kt`：平日／週末睡眠窗、跨午夜歸屬與相鄰窗口邊界。
 - `app/src/test/java/com/rsps1008/sleeptrace/SleepUsageSnapshotTest.kt`：手機使用區間套用與原因文字一致、無權限限制說明。
 - `app/src/test/java/com/rsps1008/sleeptrace/MotionEngineTest.kt`：Google 分類觸發門檻、1 Hz／FIFO、批次時間、資料缺口、床邊／手機使用、跨午夜、動作衝突等。
@@ -335,3 +343,7 @@ adb.exe -s <序號> shell am broadcast -n com.rsps1008.sleeptrace/.motion.Captur
 只找到既有合成 `real_night_style.csv`，沒有真實整晚 raw CSV；沒有虛構實機那一晚結果。凍結 HEAD 的 algorithm 4 對照 algorithm 5（報告 `docs/staging-v5-replay.txt`）：329 分鐘合成跨度，Deep 132→104、Light 197→42、未判定 0→183、Awake 0→0；切換 8→11、<5 分鐘睡眠片段 1→1。有效分鐘覆蓋兩版均 89.6657%；新版跨度感測覆蓋 89.7568%，可細分睡眠覆蓋 44.3769%；未判定主要原因為缺 motion 33 分鐘、覆蓋不足 1 分鐘、耦合不足 149 分鐘。這是工程回歸，不是真實生理準確度、深眠比例優化或與原生／醫療演算法等價的證明。
 
 目前只連接 Mi Note 10 與 Pixel 實體裝置，依測試的可丟棄模擬器限制未安裝、未跑會改資料／權限的 instrumentation。UI 實機目視、SQLite 升級裝置執行、Health Connect 真實寫入／刪除、採集實驗、Google 回報延遲、OEM／Doze／FIFO 完整性、PSG／穿戴對照與整夜耗電均尚未驗證。1 Hz 無法重建未觀測秒內動作；歷史摘要不能重建原始波形；所有耦合／分期門檻未校準，2 Hz 未比較準確度或耗電。Health Connect 成功亦不代表其他 App 已顯示。
+
+### 2026-09-30 起床與延長觀測驗證
+
+使用本機 JDK 21.0.10 執行 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --no-configuration-cache`：184 個 JVM 測試通過（含 9 個新增觀測規則測試），lint 25 warnings／0 errors，Debug、AndroidTest 與 unsigned Release APK 建置成功。`.gitattributes` 固定合成回放 fixture 及 v7 報告的 LF 換行，保留 HEAD 原始位元組，解決 Windows autocrlf 導致的雜湊／文字比對失敗；未覆寫回放預期或更改分期演算法。未執行 instrumentation、實機整夜觀測／耗電、Google 真實分類回報及 Health Connect 真實寫入。
