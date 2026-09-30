@@ -123,9 +123,14 @@ object SleepStageEstimator {
         val highMotionWindowsCandidate: Int = 0,
         val highMotionWindowsAfter: Int = 0
     ) {
-        val primaryReason: Reason? get() = if (Reason.SAFETY_CAP in reasons) Reason.SAFETY_CAP
-            else if (canStage) reasons.firstOrNull() else reasons.firstOrNull {
-                it !in setOf(Reason.ONSET_GUARD, Reason.WINDOW_TOO_SHORT) } ?: reasons.firstOrNull()
+        val primaryReason: Reason? get() = when {
+            Reason.SAFETY_CAP in reasons -> Reason.SAFETY_CAP
+            action == Action.ENTER -> Reason.ENTER_DEEP
+            action == Action.MAINTAIN -> Reason.MAINTAIN_DEEP
+            canStage -> reasons.firstOrNull()
+            else -> reasons.firstOrNull { it !in setOf(Reason.ONSET_GUARD, Reason.WINDOW_TOO_SHORT) }
+                ?: reasons.firstOrNull()
+        }
 
     }
     data class StagingResult(

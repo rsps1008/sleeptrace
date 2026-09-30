@@ -295,6 +295,9 @@ class StagingDiagnosticConsistencyTest {
         assertTrue(reentry.windowBlockingIntervals.isEmpty())
         assertTrue(SleepStageEstimator.Reason.ALLOWED_MINOR_GAP in reentry.nonBlockingReasons)
         assertFalse(SleepStageEstimator.Reason.WINDOW_TOO_SHORT in reentry.currentEligibilityReasons)
+        assertEquals(SleepStageEstimator.Action.ENTER, reentry.action)
+        assertTrue(SleepStageEstimator.Reason.ENTER_DEEP in reentry.reasons)
+        assertEquals(SleepStageEstimator.Reason.ENTER_DEEP, reentry.primaryReason)
         assertEquals("enter_stable_window", reentry.transitionReason)
     }
 
