@@ -99,7 +99,8 @@ class SleepStageEstimatorTest {
         val stages = estimate(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
 
         assertFalse(stages.any { it.stage == SleepStage.DEEP && it.startMillis < base + 40 * MINUTE_MS && it.endMillis > base + 35 * MINUTE_MS })
-        assertTrue(stages.any { it.stage == SleepStage.DEEP && it.startMillis >= base + 50 * MINUTE_MS })
+        // A newly confirmed window may backfill its last seven stable minutes.
+        assertEquals(SleepStage.DEEP, stageAt(stages, base + 55 * MINUTE_MS))
     }
 
     @Test fun `night phone use is Awake and resets the Deep guard and continuity`() {
@@ -110,8 +111,8 @@ class SleepStageEstimatorTest {
 
         assertTrue(stages.any { it.stage == SleepStage.AWAKE && it.startMillis == use.startMillis && it.endMillis == use.endMillis })
         assertTrue(parts.any { it.stage == SleepStage.AWAKE && it.start == use.startMillis && it.end == use.endMillis })
-        assertFalse(parts.any { it.stage == SleepStage.DEEP && it.start < use.endMillis + 25 * MINUTE_MS && it.end > use.startMillis })
-        assertTrue(parts.any { it.stage == SleepStage.DEEP && it.start >= use.endMillis + 25 * MINUTE_MS })
+        assertFalse(parts.any { it.stage == SleepStage.DEEP && it.start < use.endMillis + 15 * MINUTE_MS && it.end > use.startMillis })
+        assertEquals(SleepStage.DEEP, stageAt(stages, use.endMillis + 30 * MINUTE_MS))
     }
 
     @Test fun `missing motion coverage is never treated as quiet`() {

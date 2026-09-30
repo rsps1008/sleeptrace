@@ -18,7 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Indexed, transactional storage for raw Sleep API events and local sleep records. */
-class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 9) {
+class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "sleep_events.db", null, 10) {
     private val maintenancePrefs = context.applicationContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
         setWriteAheadLoggingEnabled(true)
@@ -48,6 +48,12 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
         if (oldVersion < 7) createUsageSnapshots(db)
         if (oldVersion < 8) upgradeUsageSnapshotsToCompositeKey(db)
         if (oldVersion in 2 until 9) db.execSQL("ALTER TABLE sessions ADD COLUMN stageIntervals TEXT NOT NULL DEFAULT '[]'")
+        if (oldVersion in 8 until 10) {
+            db.execSQL("ALTER TABLE usage_snapshots ADD COLUMN evidenceStart INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion in 7 until 10) {
+            db.execSQL("UPDATE usage_snapshots SET evidenceStart = windowStart")
+        }
     }
 
     private fun createSessions(db: SQLiteDatabase) = db.execSQL("""
@@ -77,7 +83,7 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
     )
 
     private fun createUsageSnapshots(db: SQLiteDatabase) = db.execSQL(
-        "CREATE TABLE IF NOT EXISTS usage_snapshots (windowStart INTEGER NOT NULL, windowEnd INTEGER NOT NULL, accessAvailable INTEGER NOT NULL, intervals TEXT NOT NULL, capturedAt INTEGER NOT NULL, PRIMARY KEY(windowStart, windowEnd))"
+        "CREATE TABLE IF NOT EXISTS usage_snapshots (windowStart INTEGER NOT NULL, windowEnd INTEGER NOT NULL, accessAvailable INTEGER NOT NULL, intervals TEXT NOT NULL, capturedAt INTEGER NOT NULL, evidenceStart INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(windowStart, windowEnd))"
     )
 
     private fun upgradeUsageSnapshotsToCompositeKey(db: SQLiteDatabase) {
@@ -120,13 +126,15 @@ class SleepEventStore(context: Context) : SQLiteOpenHelper(context.applicationCo
                 intervals = List(intervals.length()) { index -> intervals.getJSONObject(index).let {
                     UsageInterval(it.getLong("start"), it.getLong("end"))
                 } },
-                capturedAtMillis = cursor.getLong(cursor.getColumnIndexOrThrow("capturedAt"))
+                capturedAtMillis = cursor.getLong(cursor.getColumnIndexOrThrow("capturedAt")),
+                evidenceStartMillis = cursor.getLong(cursor.getColumnIndexOrThrow("evidenceStart"))
             )
         }
     }
 
     fun saveUsageSnapshot(snapshot: UsageSnapshot) {
         writableDatabase.insertWithOnConflict("usage_snapshots", null, ContentValues().apply {
+            put("evidenceStart", snapshot.evidenceStartMillis)
             put("windowStart", snapshot.windowStartMillis)
             put("windowEnd", snapshot.windowEndMillis)
             put("accessAvailable", if (snapshot.accessAvailable) 1 else 0)

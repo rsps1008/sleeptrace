@@ -40,6 +40,33 @@ internal fun isTransientSyncError(error: Throwable): Boolean {
     return false
 }
 
+internal fun toHealthRecord(session: SleepSession): SleepSessionRecord {
+    val zone = ZoneId.systemDefault().rules
+    val start = Instant.ofEpochMilli(session.startMillis)
+    val end = Instant.ofEpochMilli(session.endMillis)
+    val stages = sleepParts(session).map {
+        Stage(startTime = Instant.ofEpochMilli(it.start), endTime = Instant.ofEpochMilli(it.end),
+            stage = when (it.stage) {
+                SleepStage.AWAKE -> SleepSessionRecord.STAGE_TYPE_AWAKE
+                SleepStage.LIGHT -> SleepSessionRecord.STAGE_TYPE_LIGHT
+                SleepStage.DEEP -> SleepSessionRecord.STAGE_TYPE_DEEP
+                SleepStage.SLEEPING -> SleepSessionRecord.STAGE_TYPE_SLEEPING
+            })
+    }
+    return SleepSessionRecord(
+            startTime = start, startZoneOffset = zone.getOffset(start),
+            endTime = end, endZoneOffset = zone.getOffset(end),
+            title = "眠迹 SleepTrace",
+            notes = if (session.stageIntervals.isNotEmpty()) "非醫療睡眠分期推估；${session.reason}" else "以手機推估；${session.reason}",
+            stages = stages,
+            metadata = Metadata.autoRecorded(
+                clientRecordId = session.id,
+                clientRecordVersion = session.revision,
+                device = Device(type = Device.TYPE_PHONE)
+            )
+        )
+}
+
 class HealthConnectSync(private val context: Context) {
     val writePermissions: Set<String> = setOf(HealthPermission.getWritePermission(SleepSessionRecord::class))
 
@@ -48,33 +75,6 @@ class HealthConnectSync(private val context: Context) {
         if (!available()) return false
         return HealthConnectClient.getOrCreate(context).permissionController.getGrantedPermissions().containsAll(writePermissions)
     }
-    private fun toHealthRecord(session: SleepSession): SleepSessionRecord {
-        val zone = ZoneId.systemDefault().rules
-        val start = Instant.ofEpochMilli(session.startMillis)
-        val end = Instant.ofEpochMilli(session.endMillis)
-        val stages = sleepParts(session).map {
-            Stage(startTime = Instant.ofEpochMilli(it.start), endTime = Instant.ofEpochMilli(it.end),
-                stage = when (it.stage) {
-                    SleepStage.AWAKE -> SleepSessionRecord.STAGE_TYPE_AWAKE
-                    SleepStage.LIGHT -> SleepSessionRecord.STAGE_TYPE_LIGHT
-                    SleepStage.DEEP -> SleepSessionRecord.STAGE_TYPE_DEEP
-                    SleepStage.SLEEPING -> SleepSessionRecord.STAGE_TYPE_SLEEPING
-                })
-        }
-        return SleepSessionRecord(
-                startTime = start, startZoneOffset = zone.getOffset(start),
-                endTime = end, endZoneOffset = zone.getOffset(end),
-                title = "眠迹 SleepTrace",
-                notes = if (session.stageIntervals.isNotEmpty()) "非醫療睡眠分期推估；${session.reason}" else "以手機推估；${session.reason}",
-                stages = stages,
-                metadata = Metadata.autoRecorded(
-                    clientRecordId = session.id,
-                    clientRecordVersion = session.revision,
-                    device = Device(type = Device.TYPE_PHONE)
-                )
-            )
-    }
-
     suspend fun syncPending(): Boolean {
         return syncPendingOutcome() == SyncOutcome.SUCCESS
     }

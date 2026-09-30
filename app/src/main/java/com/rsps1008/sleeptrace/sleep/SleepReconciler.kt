@@ -44,9 +44,7 @@ class SleepReconciler(private val context: Context) {
             usageAvailable = usageResult::availableFor
         ).mapNotNull { candidate -> confirmMotionCandidateOnset(candidate, segments, samples) }
         val staged = selectBestSessions(calculated, fallback).map { session ->
-            val sessionUsage = usageResult.intervals.filter {
-                it.endMillis > session.startMillis && it.startMillis < session.endMillis
-            }
+            val sessionUsage = stageUsageFor(session, usageResult.intervals)
             session.copy(stageIntervals = SleepStageEstimator.estimate(
                 session = session,
                 motionMinutes = resolved,
@@ -60,9 +58,7 @@ class SleepReconciler(private val context: Context) {
         store.sessionsInRange(analysisStart, now)
             .filter { it.manuallyEdited && it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT) }
             .forEach { session ->
-                val sessionUsage = usageResult.intervals.filter {
-                    it.endMillis > session.startMillis && it.startMillis < session.endMillis
-                }
+                val sessionUsage = stageUsageFor(session, usageResult.intervals)
                 store.updateStageIntervals(session, SleepStageEstimator.estimate(
                     session = session,
                     motionMinutes = resolved,
@@ -82,6 +78,14 @@ class SleepReconciler(private val context: Context) {
         )
     }
 }
+
+internal const val PRE_SESSION_USAGE_LOOKBACK = 30 * com.rsps1008.sleeptrace.motion.MINUTE_MS
+
+/** Guard evidence remains unclipped; SleepStageEstimator clips only the Awake overlay. */
+internal fun stageUsageFor(session: SleepSession, intervals: List<UsageInterval>): List<UsageInterval> =
+    intervals.filter {
+        it.endMillis > session.startMillis - PRE_SESSION_USAGE_LOOKBACK && it.startMillis < session.endMillis
+    }
 
 /** Motion-only stillness may refine a confirmed onset, but can never establish sleep by itself. */
 internal fun confirmMotionCandidateOnset(

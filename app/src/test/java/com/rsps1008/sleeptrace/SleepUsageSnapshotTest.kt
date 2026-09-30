@@ -63,7 +63,8 @@ class SleepUsageSnapshotTest {
             windowEndMillis = 20,
             accessAvailable = true,
             intervals = emptyList(),
-            capturedAtMillis = 30
+            capturedAtMillis = 30,
+            evidenceStartMillis = 10 - com.rsps1008.sleeptrace.sleep.PRE_SESSION_USAGE_LOOKBACK
         )
 
         assertTrue(SleepUsageSnapshot.canReuse(previous, SleepWindow(10, 20), accessAvailableNow = true))
@@ -86,5 +87,14 @@ class SleepUsageSnapshotTest {
         assertTrue(result.availableFor(SleepWindow(10, 20)))
         assertFalse(result.availableFor(SleepWindow(20, 30)))
         assertFalse(result.availableFor(listOf(SleepWindow(10, 20), SleepWindow(20, 30))))
+    }
+
+    @Test fun `legacy snapshot without pre-window guard evidence is refreshed once`() {
+        val window = SleepWindow(10_000_000, 20_000_000)
+        val old = UsageSnapshot(window.startMillis, window.endMillis, true, emptyList(), window.endMillis)
+        assertFalse(SleepUsageSnapshot.canReuse(old, window, true))
+        val complete = old.copy(evidenceStartMillis = window.startMillis - com.rsps1008.sleeptrace.sleep.PRE_SESSION_USAGE_LOOKBACK)
+        assertTrue(SleepUsageSnapshot.canReuse(complete, window, true))
+        assertTrue(SleepUsageSnapshot.canReuse(old.copy(accessAvailable = false), window, false))
     }
 }

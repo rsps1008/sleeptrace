@@ -56,7 +56,8 @@ object SleepClassificationTrigger {
 
 data class MotionMinute(
     val startMillis: Long, val coveredMillis: Long, val activeMillis: Long,
-    val squaredDeltaTime: Double, val sampleCount: Int, val placement: Placement
+    val squaredDeltaTime: Double, val sampleCount: Int, val placement: Placement,
+    val featureVersion: Int = 2
 ) {
     val rms: Double get() = if (coveredMillis == 0L) 0.0 else sqrt(squaredDeltaTime / coveredMillis)
     val level: MotionLevel get() = when {
@@ -67,7 +68,8 @@ data class MotionMinute(
 }
 
 /** Works on event timestamps, never delivery time: FIFO bursts must not look like motion bursts. */
-class MotionAccumulator(private val plan: SamplingPlan, private val placement: Placement) {
+class MotionAccumulator(@Suppress("UNUSED_PARAMETER") plan: SamplingPlan, private val placement: Placement) {
+    companion object { const val FEATURE_SAMPLE_PERIOD_MS = 1_000L }
     private data class Bucket(var covered: Long = 0, var active: Long = 0, var squared: Double = 0.0, var count: Int = 0)
     private val buckets = sortedMapOf<Long, Bucket>()
     private var lastTime = Long.MIN_VALUE
@@ -75,21 +77,25 @@ class MotionAccumulator(private val plan: SamplingPlan, private val placement: P
     private var lastY = 0.0
     private var lastZ = 0.0
 
-    fun add(timeMillis: Long, x: Double, y: Double, z: Double) {
-        if (timeMillis <= lastTime || !x.isFinite() || !y.isFinite() || !z.isFinite()) return
-        val bucket = buckets.getOrPut(timeMillis / MINUTE_MS * MINUTE_MS) { Bucket() }
+    fun add(timeMillis: Long, x: Double, y: Double, z: Double): Boolean {
+        if (timeMillis <= lastTime || !x.isFinite() || !y.isFinite() || !z.isFinite()) return false
+        // First event in each event-time second: constant cost, no delivery-time/FIFO dependency.
+        // Quantize the representative timestamp too; callbacks inside this second add no features.
+        val featureTime = Math.floorDiv(timeMillis, FEATURE_SAMPLE_PERIOD_MS) * FEATURE_SAMPLE_PERIOD_MS
+        if (featureTime <= lastTime) return false
+        val bucket = buckets.getOrPut(Math.floorDiv(featureTime, MINUTE_MS) * MINUTE_MS) { Bucket() }
         bucket.count++
         if (lastTime != Long.MIN_VALUE) {
-            val dt = timeMillis - lastTime
-            if (dt <= maxOf(1_500L, plan.periodUs / 1000L * 3)) {
+            val dt = featureTime - lastTime
+            if (dt == FEATURE_SAMPLE_PERIOD_MS) {
                 val deltaX = x - lastX
                 val deltaY = y - lastY
                 val deltaZ = z - lastZ
                 val deltaSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
                 var cursor = lastTime
-                while (cursor < timeMillis) {
+                while (cursor < featureTime) {
                     val key = cursor / MINUTE_MS * MINUTE_MS
-                    val end = minOf(timeMillis, key + MINUTE_MS)
+                    val end = minOf(featureTime, key + MINUTE_MS)
                     val part = buckets.getOrPut(key) { Bucket() }
                     val duration = end - cursor
                     part.covered += duration
@@ -99,10 +105,11 @@ class MotionAccumulator(private val plan: SamplingPlan, private val placement: P
                 }
             }
         }
-        lastTime = timeMillis
+        lastTime = featureTime
         lastX = x
         lastY = y
         lastZ = z
+        return true
     }
 
     fun drain(throughMillis: Long, includePartial: Boolean = false): List<MotionMinute> {

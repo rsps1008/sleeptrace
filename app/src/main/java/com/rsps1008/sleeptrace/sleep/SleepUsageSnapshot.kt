@@ -29,8 +29,9 @@ class SleepUsageSnapshot(private val context: Context) {
                             windowEndMillis = window.endMillis,
                             accessAvailable = accessNow,
                             intervals = if (accessNow)
-                                UsageMonitor.interactionIntervals(context, window.startMillis, window.endMillis) else emptyList(),
-                            capturedAtMillis = nowMillis
+                                UsageMonitor.interactionIntervals(context, window.startMillis - PRE_SESSION_USAGE_LOOKBACK, window.endMillis) else emptyList(),
+                            capturedAtMillis = nowMillis,
+                            evidenceStartMillis = window.startMillis - PRE_SESSION_USAGE_LOOKBACK
                         )
                         store.saveUsageSnapshot(captured)
                         captured
@@ -72,6 +73,7 @@ class SleepUsageSnapshot(private val context: Context) {
             previous.windowStartMillis == window.startMillis &&
             previous.windowEndMillis == window.endMillis &&
             previous.capturedAtMillis >= window.endMillis &&
+            (!previous.accessAvailable || previous.evidenceStartMillis <= window.startMillis - PRE_SESSION_USAGE_LOOKBACK) &&
             (previous.accessAvailable || !accessAvailableNow)
 
         internal fun isWindowComplete(

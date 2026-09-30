@@ -79,8 +79,8 @@ class SleepStore(context: Context) {
         val replacement = expected.copy(
             stageIntervals = stageIntervals,
             revision = expected.revision + 1,
-            state = if (expected.state == SyncState.SYNCED) SyncState.PENDING else expected.state,
-            syncError = if (expected.state == SyncState.SYNCED) null else expected.syncError
+            state = if (expected.state in setOf(SyncState.SYNCED, SyncState.SYNCING)) SyncState.PENDING else expected.state,
+            syncError = if (expected.state in setOf(SyncState.SYNCED, SyncState.SYNCING)) null else expected.syncError
         )
         if (eventStore.session(expected.id) != expected) return@synchronized false
         eventStore.upsertSession(replacement)

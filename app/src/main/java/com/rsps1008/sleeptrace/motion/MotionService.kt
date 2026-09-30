@@ -262,7 +262,7 @@ class MotionService : Service(), SensorEventListener2 {
             if (pendingChange == null && !stopped) configure(schedule)
             return
         }
-        engine.add(time, event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble())
+        if (!engine.add(time, event.values[0].toDouble(), event.values[1].toDouble(), event.values[2].toDouble())) return
         pendingMinutes += engine.drain(time)
         // Sensor timestamps can jump across a whole FIFO batch. Throttle by elapsed wall time,
         // which continues during device suspend, not by sample event time.

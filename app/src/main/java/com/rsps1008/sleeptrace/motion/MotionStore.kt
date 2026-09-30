@@ -23,7 +23,7 @@ class MotionSettings(context: Context) {
 }
 
 /** Stores minute features only; no raw accelerometer stream. Inserts are batched in one transaction. */
-class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 1) {
+class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 2) {
     private val appContext = context.applicationContext
     private val maintenancePrefs = appContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
@@ -36,9 +36,11 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("CREATE TABLE minutes (start INTEGER PRIMARY KEY, covered INTEGER NOT NULL, active INTEGER NOT NULL, squared REAL NOT NULL, samples INTEGER NOT NULL, placement TEXT NOT NULL)")
+        db.execSQL("CREATE TABLE minutes (start INTEGER PRIMARY KEY, covered INTEGER NOT NULL, active INTEGER NOT NULL, squared REAL NOT NULL, samples INTEGER NOT NULL, placement TEXT NOT NULL, featureVersion INTEGER NOT NULL DEFAULT 1)")
     }
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) db.execSQL("ALTER TABLE minutes ADD COLUMN featureVersion INTEGER NOT NULL DEFAULT 1")
+    }
 
     @Synchronized
     fun append(minutes: List<MotionMinute>, now: Long = System.currentTimeMillis()) {
@@ -58,7 +60,7 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
             minutes.forEach { item ->
                 // Restarting or changing mode can yield two partial contributions to the same minute.
                 val existing = existingByStart[item.startMillis]
-                val compatible = existing?.takeIf { it.placement == item.placement }
+                val compatible = existing?.takeIf { it.placement == item.placement && it.featureVersion == item.featureVersion }
                 val row = ContentValues().apply {
                     put("start", item.startMillis)
                     put("covered", minOf(MINUTE_MS, item.coveredMillis + (compatible?.coveredMillis ?: 0)))
@@ -66,6 +68,7 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
                     put("squared", item.squaredDeltaTime + (compatible?.squaredDeltaTime ?: 0.0))
                     put("samples", item.sampleCount + (compatible?.sampleCount ?: 0))
                     put("placement", item.placement.name)
+                    put("featureVersion", item.featureVersion)
                 }
                 db.insertWithOnConflict("minutes", null, row, SQLiteDatabase.CONFLICT_REPLACE)
                 existingByStart[item.startMillis] = MotionMinute(
@@ -74,7 +77,7 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
                     row.getAsLong("active"),
                     row.getAsDouble("squared"),
                     row.getAsInteger("samples"),
-                    item.placement
+                    item.placement, item.featureVersion
                 )
             }
             if (shouldCleanup) {
@@ -86,7 +89,8 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
     }
 
     private fun android.database.Cursor.readMinute() = MotionMinute(
-        getLong(0), getLong(1), getLong(2), getDouble(3), getInt(4), Placement.valueOf(getString(5))
+        getLong(0), getLong(1), getLong(2), getDouble(3), getInt(4), Placement.valueOf(getString(5)),
+        getInt(getColumnIndexOrThrow("featureVersion"))
     )
 
     fun read(start: Long, end: Long): List<MotionMinute> = readableDatabase.query(

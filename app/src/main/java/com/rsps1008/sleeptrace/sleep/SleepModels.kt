@@ -37,7 +37,8 @@ data class UsageSnapshot(
     val windowEndMillis: Long,
     val accessAvailable: Boolean,
     val intervals: List<UsageInterval>,
-    val capturedAtMillis: Long
+    val capturedAtMillis: Long,
+    val evidenceStartMillis: Long = windowStartMillis
 )
 
 data class SleepSession(

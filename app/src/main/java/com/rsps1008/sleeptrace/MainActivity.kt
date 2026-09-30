@@ -45,6 +45,8 @@ import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepTracker
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageMonitor
+import com.rsps1008.sleeptrace.sleep.SleepStageEstimator
+import com.rsps1008.sleeptrace.sleep.stageUsageFor
 import com.rsps1008.sleeptrace.work.WorkScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -100,8 +102,29 @@ class MainActivity : AppCompatActivity() {
                     val start = date.atStartOfDay(zone).toInstant().toEpochMilli()
                     val end = date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
                     val rows = dependencies.motionStore.read(start, end)
+                    val sessions = store.sessionsInRange(start, end).filter {
+                        it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT)
+                    }
+                    val schedule = preferences.schedule()
+                    val contextStart = minOf(start, sessions.minOfOrNull { it.startMillis } ?: start) - 30 * MINUTE_MS
+                    val contextEnd = maxOf(end, sessions.maxOfOrNull { it.endMillis } ?: end) + 30 * MINUTE_MS
+                    val usage = schedule.windowsBetween(contextStart, contextEnd).flatMap {
+                        store.usageSnapshot(it.startMillis, it.endMillis)?.intervals.orEmpty()
+                    }
+                    val resolved = AutomaticPlacement.resolve(dependencies.motionStore.read(contextStart, contextEnd), usage)
+                    val placementByMinute = resolved.associateBy { it.startMillis }
+                    val samples = store.recentSamples(contextStart)
+                    val segments = store.segments(contextStart, contextEnd)
+                    val diagnostics = sessions.associateWith { session ->
+                        SleepStageEstimator.analyze(session, resolved, samples, stageUsageFor(session, usage), segments, schedule)
+                    }
+                    val diagnosticByMinute = diagnostics.flatMap { (session, result) ->
+                        result.minutes.map { minute ->
+                            (Math.floorDiv(minute.startMillis, MINUTE_MS) * MINUTE_MS) to Triple(session, result, minute)
+                        }
+                    }.toMap()
                     contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
-                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement\r\n")
+                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,session_motion_coverage_percent,first_motion_delay_minutes\r\n")
                         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(zone)
                         rows.forEach { minute ->
                             writer.append(formatter.format(Instant.ofEpochMilli(minute.startMillis))).append(',')
@@ -109,7 +132,28 @@ class MainActivity : AppCompatActivity() {
                                 .append((minute.activeMillis / 1000.0).csvNumber()).append(',')
                                 .append(minute.rms.csvNumber()).append(',')
                                 .append(minute.sampleCount.toString()).append(',')
-                                .append(minute.placement.name).append("\r\n")
+                                .append(minute.placement.name)
+                            val diagnostic = diagnosticByMinute[minute.startMillis]
+                            val session = diagnostic?.first
+                            val result = diagnostic?.second
+                            val feature = diagnostic?.third
+                            val baseline = result?.baseline
+                            val storedStage = session?.stageIntervals?.firstOrNull {
+                                it.startMillis < minute.startMillis + MINUTE_MS && it.endMillis > minute.startMillis
+                            }?.stage
+                            val extra = listOf(
+                                minute.featureVersion.toString(),
+                                if (minute.featureVersion >= 2) minute.sampleCount.toString() else "",
+                                placementByMinute[minute.startMillis]?.placement?.name.orEmpty(), minute.level.name,
+                                session?.id.orEmpty(), baseline?.p25?.csvNumber().orEmpty(), baseline?.p35?.csvNumber().orEmpty(),
+                                baseline?.p50?.csvNumber().orEmpty(), baseline?.p65?.csvNumber().orEmpty(),
+                                baseline?.p70?.csvNumber().orEmpty(), baseline?.p75?.csvNumber().orEmpty(),
+                                feature?.rollingMedianRms?.csvNumber().orEmpty(), feature?.stage?.name.orEmpty(),
+                                storedStage?.name.orEmpty(), feature?.event.orEmpty(),
+                                result?.motionCoverageRatio?.times(100)?.csvNumber().orEmpty(),
+                                result?.firstMotionDelayMillis?.div(60_000.0)?.csvNumber().orEmpty()
+                            )
+                            writer.append(',').append(extra.joinToString(",")).append("\r\n")
                         }
                     } ?: error("無法建立匯出檔案")
                     rows.size
