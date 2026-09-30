@@ -57,8 +57,9 @@ object SleepClassificationTrigger {
 data class MotionMinute(
     val startMillis: Long, val coveredMillis: Long, val activeMillis: Long,
     val squaredDeltaTime: Double, val sampleCount: Int, val placement: Placement,
-    val featureVersion: Int = 2
+    val featureVersion: Int = MotionAccumulator.CURRENT_FEATURE_VERSION
 ) {
+    val supportsCurrentStaging: Boolean get() = featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION
     val rms: Double get() = if (coveredMillis == 0L) 0.0 else sqrt(squaredDeltaTime / coveredMillis)
     val level: MotionLevel get() = when {
         coveredMillis < 45_000 -> MotionLevel.UNKNOWN
@@ -68,34 +69,49 @@ data class MotionMinute(
 }
 
 /** Works on event timestamps, never delivery time: FIFO bursts must not look like motion bursts. */
-class MotionAccumulator(@Suppress("UNUSED_PARAMETER") plan: SamplingPlan, private val placement: Placement) {
-    companion object { const val FEATURE_SAMPLE_PERIOD_MS = 1_000L }
+class MotionAccumulator(plan: SamplingPlan, private val placement: Placement) {
+    companion object {
+        const val FEATURE_SAMPLE_PERIOD_MS = 1_000L
+        const val CURRENT_FEATURE_VERSION = 2
+        const val CADENCE_INCOMPATIBLE_FEATURE_VERSION = 3
+        private const val MIN_STAGING_CADENCE_MS = 1_500L
+        private const val JITTER_TOLERANCE_MS = 100L
+    }
+    private val featurePeriodMs = maxOf(FEATURE_SAMPLE_PERIOD_MS, plan.periodUs / 1000L)
+    private val featureVersion = if (featurePeriodMs <= MIN_STAGING_CADENCE_MS) CURRENT_FEATURE_VERSION else CADENCE_INCOMPATIBLE_FEATURE_VERSION
     private data class Bucket(var covered: Long = 0, var active: Long = 0, var squared: Double = 0.0, var count: Int = 0)
     private val buckets = sortedMapOf<Long, Bucket>()
-    private var lastTime = Long.MIN_VALUE
+    private var lastRawTime = Long.MIN_VALUE
+    private var anchorTime = Long.MIN_VALUE
+    private var nextFeatureTime = Long.MIN_VALUE
+    private var lastFeatureTime = Long.MIN_VALUE
     private var lastX = 0.0
     private var lastY = 0.0
     private var lastZ = 0.0
 
     fun add(timeMillis: Long, x: Double, y: Double, z: Double): Boolean {
-        if (timeMillis <= lastTime || !x.isFinite() || !y.isFinite() || !z.isFinite()) return false
-        // First event in each event-time second: constant cost, no delivery-time/FIFO dependency.
-        // Quantize the representative timestamp too; callbacks inside this second add no features.
-        val featureTime = Math.floorDiv(timeMillis, FEATURE_SAMPLE_PERIOD_MS) * FEATURE_SAMPLE_PERIOD_MS
-        if (featureTime <= lastTime) return false
-        val bucket = buckets.getOrPut(Math.floorDiv(featureTime, MINUTE_MS) * MINUTE_MS) { Bucket() }
-        bucket.count++
-        if (lastTime != Long.MIN_VALUE) {
-            val dt = featureTime - lastTime
-            if (dt == FEATURE_SAMPLE_PERIOD_MS) {
+        if (timeMillis <= lastRawTime || !x.isFinite() || !y.isFinite() || !z.isFinite()) return false
+        lastRawTime = timeMillis
+        if (anchorTime == Long.MIN_VALUE) {
+            anchorTime = timeMillis
+            nextFeatureTime = timeMillis
+        }
+        if (timeMillis < nextFeatureTime - JITTER_TOLERANCE_MS) return false
+        val skippedSlots = if (timeMillis > nextFeatureTime + JITTER_TOLERANCE_MS)
+            (timeMillis - nextFeatureTime) / featurePeriodMs else 0L
+        val dt = if (lastFeatureTime == Long.MIN_VALUE) 0L else timeMillis - lastFeatureTime
+        if (lastFeatureTime != Long.MIN_VALUE && dt < featurePeriodMs - minOf(100L, JITTER_TOLERANCE_MS)) return false
+        buckets.getOrPut(Math.floorDiv(timeMillis, MINUTE_MS) * MINUTE_MS) { Bucket() }.count++
+        if (lastFeatureTime != Long.MIN_VALUE) {
+            if (skippedSlots == 0L && dt in (featurePeriodMs - JITTER_TOLERANCE_MS)..(featurePeriodMs + JITTER_TOLERANCE_MS)) {
                 val deltaX = x - lastX
                 val deltaY = y - lastY
                 val deltaZ = z - lastZ
                 val deltaSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
-                var cursor = lastTime
-                while (cursor < featureTime) {
+                var cursor = lastFeatureTime
+                while (cursor < timeMillis) {
                     val key = cursor / MINUTE_MS * MINUTE_MS
-                    val end = minOf(featureTime, key + MINUTE_MS)
+                    val end = minOf(timeMillis, key + MINUTE_MS)
                     val part = buckets.getOrPut(key) { Bucket() }
                     val duration = end - cursor
                     part.covered += duration
@@ -105,7 +121,8 @@ class MotionAccumulator(@Suppress("UNUSED_PARAMETER") plan: SamplingPlan, privat
                 }
             }
         }
-        lastTime = featureTime
+        lastFeatureTime = timeMillis
+        nextFeatureTime += (skippedSlots + 1) * featurePeriodMs
         lastX = x
         lastY = y
         lastZ = z
@@ -116,7 +133,7 @@ class MotionAccumulator(@Suppress("UNUSED_PARAMETER") plan: SamplingPlan, privat
         val keys = buckets.keys.filter { includePartial || it + MINUTE_MS <= throughMillis }
         return keys.map { key ->
             val value = buckets.remove(key)!!
-            MotionMinute(key, value.covered, value.active, value.squared, value.count, placement)
+            MotionMinute(key, value.covered, value.active, value.squared, value.count, placement, featureVersion)
         }
     }
 }

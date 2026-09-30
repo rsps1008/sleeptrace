@@ -15,7 +15,7 @@ class SleepReconcileWorker(context: Context, parameters: WorkerParameters) : Cor
             SleepReconciler(applicationContext).reconcile()
             val dependencies = applicationContext.sleepDependencies()
             val outcome = dependencies.healthSync.syncPendingOutcome()
-            if (dependencies.preferences.configured() && dependencies.motionSettings.enabled && dependencies.store.hasReconciliationDirty()) {
+            if (dependencies.preferences.configured() && dependencies.store.hasReconciliationDirty()) {
                 Result.retry()
             } else when (outcome) {
                 SyncOutcome.SUCCESS -> Result.success()

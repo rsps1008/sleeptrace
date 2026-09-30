@@ -8,13 +8,38 @@ import com.rsps1008.sleeptrace.sleepDependencies
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+internal enum class HistoricalReconcileAction { RECONCILE, COMPLETE_EMPTY_MIGRATION, DEFER_UNCONFIGURED_HISTORY }
+
+/** Recording state is intentionally absent: it only controls future capture, not saved history. */
+internal fun historicalReconcileAction(configured: Boolean, hasStoredSession: Boolean): HistoricalReconcileAction = when {
+    configured -> HistoricalReconcileAction.RECONCILE
+    !hasStoredSession -> HistoricalReconcileAction.COMPLETE_EMPTY_MIGRATION
+    else -> HistoricalReconcileAction.DEFER_UNCONFIGURED_HISTORY
+}
+
 class SleepReconciler(private val context: Context) {
     suspend fun reconcile() = mutex.withLock {
         val dependencies = context.sleepDependencies()
         val preferences = dependencies.preferences
-        if (!preferences.configured() || !dependencies.motionSettings.enabled) return@withLock
+        // Recording controls future sensor capture only. Historical staging and rule migration
+        // continue from already saved Sleep API, UsageStats, motion and session data while paused.
         val store = dependencies.store
         val capturedGeneration = AutomaticWorkSignals.generation(context)
+        val configured = preferences.configured()
+        val action = historicalReconcileAction(
+            configured,
+            hasStoredSession = configured || store.sessions(limit = 1, includeAwakeIntervals = false).isNotEmpty()
+        )
+        when (action) {
+            HistoricalReconcileAction.RECONCILE -> Unit
+            HistoricalReconcileAction.COMPLETE_EMPTY_MIGRATION -> {
+                // With no configured sleep window and no stored session, there is no history to
+                // stage. Complete the rule marker so an empty install does not remain perpetually dirty.
+                store.markReconciled(capturedGeneration)
+                return@withLock
+            }
+            HistoricalReconcileAction.DEFER_UNCONFIGURED_HISTORY -> return@withLock
+        }
         val schedule = preferences.schedule()
         val now = System.currentTimeMillis()
         val analysisStart = now - RECENT_ANALYSIS_MILLIS
@@ -43,30 +68,34 @@ class SleepReconciler(private val context: Context) {
             resolved, usageResult.intervals, schedule, now,
             usageAvailable = usageResult::availableFor
         ).mapNotNull { candidate -> confirmMotionCandidateOnset(candidate, segments, samples) }
+        val existingRecent = store.sessionsInRange(analysisStart, now)
         val staged = selectBestSessions(calculated, fallback).map { session ->
             val sessionUsage = stageUsageFor(session, usageResult.intervals)
-            session.copy(stageIntervals = SleepStageEstimator.estimate(
+            val estimate = SleepStageEstimator.analyze(
                 session = session,
                 motionMinutes = resolved,
                 classifications = samples,
                 usageIntervals = sessionUsage,
                 sleepSegments = segments,
                 schedule = schedule
-            ))
+            )
+            val old = existingRecent.firstOrNull { it.id == session.id || (it.startMillis < session.endMillis && it.endMillis > session.startMillis) }
+            session.copy(stageIntervals = preserveExistingStagesWithoutV2Evidence(estimate, old?.stageIntervals))
         }
         store.mergeCalculated(staged, analysisStart, now)
         store.sessionsInRange(analysisStart, now)
             .filter { it.manuallyEdited && it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT) }
             .forEach { session ->
                 val sessionUsage = stageUsageFor(session, usageResult.intervals)
-                store.updateStageIntervals(session, SleepStageEstimator.estimate(
+                val estimate = SleepStageEstimator.analyze(
                     session = session,
                     motionMinutes = resolved,
                     classifications = samples,
                     usageIntervals = sessionUsage,
                     sleepSegments = segments,
                     schedule = schedule
-                ))
+                )
+                store.updateStageIntervals(session, preserveExistingStagesWithoutV2Evidence(estimate, session.stageIntervals))
             }
         store.markReconciled(capturedGeneration)
     }
@@ -78,6 +107,11 @@ class SleepReconciler(private val context: Context) {
         )
     }
 }
+
+internal fun preserveExistingStagesWithoutV2Evidence(
+    result: SleepStageEstimator.StagingResult,
+    existing: List<SleepStageInterval>?
+): List<SleepStageInterval> = if (result.baseline == null && !existing.isNullOrEmpty()) existing else result.intervals
 
 internal const val PRE_SESSION_USAGE_LOOKBACK = 30 * com.rsps1008.sleeptrace.motion.MINUTE_MS
 

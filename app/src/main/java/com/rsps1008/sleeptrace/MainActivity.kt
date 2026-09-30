@@ -124,7 +124,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }.toMap()
                     contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
-                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,session_motion_coverage_percent,first_motion_delay_minutes\r\n")
+                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,session_motion_coverage_percent,first_motion_delay_minutes,staging_motion_usable,staging_motion_exclusion_reason,baseline_feature_version,baseline_sample_count,baseline_reason\r\n")
                         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(zone)
                         rows.forEach { minute ->
                             writer.append(formatter.format(Instant.ofEpochMilli(minute.startMillis))).append(',')
@@ -151,7 +151,12 @@ class MainActivity : AppCompatActivity() {
                                 feature?.rollingMedianRms?.csvNumber().orEmpty(), feature?.stage?.name.orEmpty(),
                                 storedStage?.name.orEmpty(), feature?.event.orEmpty(),
                                 result?.motionCoverageRatio?.times(100)?.csvNumber().orEmpty(),
-                                result?.firstMotionDelayMillis?.div(60_000.0)?.csvNumber().orEmpty()
+                                result?.firstMotionDelayMillis?.div(60_000.0)?.csvNumber().orEmpty(),
+                                feature?.stagingMotionUsable?.toString().orEmpty(),
+                                feature?.stagingMotionExclusionReason.orEmpty(),
+                                result?.baselineFeatureVersion?.toString().orEmpty(),
+                                result?.baselineSampleCount?.toString().orEmpty(),
+                                result?.baselineReason.orEmpty()
                             )
                             writer.append(',').append(extra.joinToString(",")).append("\r\n")
                         }

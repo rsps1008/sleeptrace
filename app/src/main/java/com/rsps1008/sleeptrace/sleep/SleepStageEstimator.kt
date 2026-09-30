@@ -2,6 +2,7 @@ package com.rsps1008.sleeptrace.sleep
 
 import com.rsps1008.sleeptrace.motion.MINUTE_MS
 import com.rsps1008.sleeptrace.motion.MotionLevel
+import com.rsps1008.sleeptrace.motion.MotionAccumulator
 import com.rsps1008.sleeptrace.motion.MotionMinute
 import com.rsps1008.sleeptrace.motion.Placement
 
@@ -20,7 +21,10 @@ object SleepStageEstimator {
     data class NightlyBaseline(
         val p25: Double, val p35: Double, val p50: Double,
         val p65: Double, val p70: Double, val p75: Double,
-        val bedMinutes: Int, val narrowDistribution: Boolean
+        val bedMinutes: Int, val narrowDistribution: Boolean,
+        val featureVersion: Int = MotionAccumulator.CURRENT_FEATURE_VERSION,
+        val sampleCount: Int = bedMinutes,
+        val reason: String? = null
     )
     data class RollingFeatures(
         val validMinutes: Int, val quietMinutes: Int, val activeMinutes: Int,
@@ -29,12 +33,16 @@ object SleepStageEstimator {
     )
     data class MinuteDiagnostic(
         val startMillis: Long, val placement: Placement?, val level: MotionLevel?,
-        val rollingMedianRms: Double?, val stage: SleepStage, val event: String?
+        val rollingMedianRms: Double?, val stage: SleepStage, val event: String?,
+        val stagingMotionUsable: Boolean, val stagingMotionExclusionReason: String?
     )
     data class StagingResult(
         val intervals: List<SleepStageInterval>, val baseline: NightlyBaseline?,
         val motionCoverageRatio: Double, val firstMotionDelayMillis: Long?,
-        val minutes: List<MinuteDiagnostic>
+        val minutes: List<MinuteDiagnostic>,
+        val baselineFeatureVersion: Int? = baseline?.featureVersion,
+        val baselineSampleCount: Int = baseline?.sampleCount ?: 0,
+        val baselineReason: String? = baseline?.reason ?: "insufficient_v2_bed_motion"
     )
     private data class MinuteSignal(
         val start: Long, val end: Long, val motion: MotionMinute?,
@@ -44,8 +52,9 @@ object SleepStageEstimator {
         val validMotion: Boolean get() = motion?.let {
             it.coveredMillis >= MINUTE_COVERAGE_MILLIS && it.level != MotionLevel.UNKNOWN && it.rms.isFinite()
         } == true
+        val currentFeature: Boolean get() = motion?.supportsCurrentStaging == true
         val hardBreak: Boolean get() = inPhoneUse || inOnsetGuard || !inSchedule ||
-            beforeEvidence || !validMotion || motion?.placement == Placement.BEDSIDE
+            beforeEvidence || !validMotion || !currentFeature || motion?.placement == Placement.BEDSIDE
         val usable: Boolean get() = !hardBreak
         val quiet: Boolean get() = usable && motion?.level == MotionLevel.QUIET
         val bed: Boolean get() = usable && motion?.placement == Placement.BED
@@ -74,7 +83,13 @@ object SleepStageEstimator {
             .map { maxOf(session.startMillis, it.startMillis) } + classifications.asSequence()
             .filter { it.confidence >= MINIMUM_SLEEP_API_CONFIDENCE && it.timeMillis >= session.startMillis && it.timeMillis < session.endMillis }
             .map { it.timeMillis }).minOrNull()
-        val motionByMinute = motionMinutes.associateBy { it.startMillis }
+        val motionByMinute = motionMinutes.groupBy { it.startMillis }.mapValues { (_, rows) ->
+            rows.sortedByDescending { when (it.featureVersion) {
+                MotionAccumulator.CURRENT_FEATURE_VERSION -> 3
+                MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION -> 2
+                else -> 1
+            } }.first()
+        }
         val timeline = buildList {
             var cursor = session.startMillis
             while (cursor < session.endMillis) {
@@ -82,7 +97,8 @@ object SleepStageEstimator {
                 val motionStart = Math.floorDiv(cursor, MINUTE_MS) * MINUTE_MS
                 val end = minOf(session.endMillis, motionStart + MINUTE_MS)
                 val lastUse = lastMeaningfulPhoneUseBefore(cursor, meaningfulUse)
-                add(MinuteSignal(cursor, end, motionByMinute[motionStart],
+                val fullBucketInSession = motionStart >= session.startMillis && motionStart + MINUTE_MS <= session.endMillis
+                add(MinuteSignal(cursor, end, motionByMinute[motionStart].takeIf { fullBucketInSession },
                     phoneUse.any { it.startMillis < end && it.endMillis > cursor },
                     lastUse != null && cursor - lastUse < SLEEP_ONSET_GUARD_MILLIS,
                     schedule.windowAt(cursor) != null,
@@ -104,6 +120,7 @@ object SleepStageEstimator {
                     minute.inPhoneUse -> "exit_phone_use"
                     minute.inOnsetGuard -> "exit_onset_guard"
                     minute.motion?.placement == Placement.BEDSIDE -> "exit_bedside"
+                    minute.motion != null && !minute.currentFeature -> "exit_legacy_or_incompatible_feature"
                     !minute.validMotion -> "exit_missing_motion"
                     else -> "exit_no_sleep_evidence_or_schedule"
                 }
@@ -153,19 +170,27 @@ object SleepStageEstimator {
         val merged = timeline.indices.map {
             SleepStageInterval(timeline[it].start, timeline[it].end, stages[it])
         }.mergeAdjacentStages()
-        val coverage = timeline.filter { it.validMotion }.sumOf { it.end - it.start }.toDouble() / session.durationMillis
+        fun awakeOverlap(start: Long, end: Long) = phoneUse.sumOf {
+            (minOf(end, it.endMillis) - maxOf(start, it.startMillis)).coerceAtLeast(0L)
+        }
+        val sleepMillis = session.endMillis - session.startMillis - phoneUse.sumOf { it.endMillis - it.startMillis }
+        val coveredSleepMillis = timeline.filter { it.validMotion && it.currentFeature }.sumOf {
+            (it.end - it.start - awakeOverlap(it.start, it.end)).coerceAtLeast(0L)
+        }
+        val coverage = (coveredSleepMillis.toDouble() / sleepMillis.coerceAtLeast(1L)).coerceIn(0.0, 1.0)
         return StagingResult(
             overlayAwakeIntervals(merged, phoneUse).mergeAdjacentStages(), baseline, coverage,
-            timeline.firstOrNull { it.motion != null }?.let { it.start - session.startMillis },
+            timeline.firstOrNull { it.validMotion && it.currentFeature }?.let { it.start - session.startMillis },
             timeline.indices.map { i -> MinuteDiagnostic(timeline[i].start, timeline[i].motion?.placement,
                 timeline[i].motion?.level, rolling[i].medianRms,
-                if (timeline[i].inPhoneUse) SleepStage.AWAKE else stages[i], events[i]) }
+                if (timeline[i].inPhoneUse) SleepStage.AWAKE else stages[i], events[i],
+                stagingUsable(timeline[i], baseline), stagingExclusionReason(timeline[i], baseline)) }
         )
     }
 
     private fun nightlyBaseline(timeline: List<MinuteSignal>): NightlyBaseline? {
         // BED-only baseline: UNKNOWN can maintain established Deep briefly, never establish it alone.
-        val sorted = timeline.filter { it.bed }.map { it.motion!!.rms }.sorted()
+        val sorted = timeline.filter { it.bed && it.currentFeature }.map { it.motion!!.rms }.sorted()
         if (sorted.size < MINIMUM_BASELINE_MINUTES) return null
         val p25 = percentileSorted(sorted, 0.25)
         val p50 = percentileSorted(sorted, 0.50)
@@ -176,7 +201,7 @@ object SleepStageEstimator {
     }
 
     private fun rollingFeatures(timeline: List<MinuteSignal>, range: IntRange): RollingFeatures {
-        val usable = range.map { timeline[it] }.filter { it.usable }
+        val usable = range.map { timeline[it] }.filter { it.usable && it.currentFeature }
         val sorted = usable.map { it.motion!!.rms }.sorted()
         return RollingFeatures(usable.size, usable.count { it.quiet },
             usable.count { it.motion?.level == MotionLevel.ACTIVE },
@@ -194,12 +219,29 @@ object SleepStageEstimator {
         if (!minute.bed || !minute.quiet ||
             minute.start < maxOf(timeline.first().start, evidenceStart) + MIN_SESSION_AGE_FOR_DEEP) return false
         val range = index - DEEP_WINDOW_MINUTES + 1..index
-        if (range.any { timeline[it].inPhoneUse || timeline[it].inOnsetGuard ||
+        if (range.any { !timeline[it].currentFeature || !timeline[it].validMotion || timeline[it].inPhoneUse || timeline[it].inOnsetGuard ||
                 timeline[it].beforeEvidence || !timeline[it].inSchedule ||
                 timeline[it].motion?.placement == Placement.BEDSIDE }) return false
         return features.validMinutes >= 12 && features.bedMinutes >= (if (baseline.narrowDistribution) 12 else 10) &&
             features.quietMinutes.toDouble() / features.validMinutes >= 0.80 &&
             features.activeMinutes <= 1 && features.medianRms!! <= baseline.p50
+    }
+
+    private fun stagingUsable(minute: MinuteSignal, baseline: NightlyBaseline?): Boolean =
+        baseline != null && minute.usable && minute.currentFeature
+
+    private fun stagingExclusionReason(minute: MinuteSignal, baseline: NightlyBaseline?): String? = when {
+        minute.inPhoneUse -> "in_phone_use"
+        minute.inOnsetGuard -> "onset_guard"
+        !minute.inSchedule -> "outside_schedule"
+        minute.beforeEvidence -> "before_sleep_evidence"
+        minute.motion == null -> "missing_motion_or_partial_minute"
+        minute.motion.featureVersion != MotionAccumulator.CURRENT_FEATURE_VERSION -> "legacy_feature_version"
+        minute.motion.coveredMillis < MINUTE_COVERAGE_MILLIS || minute.motion.level == MotionLevel.UNKNOWN -> "insufficient_coverage"
+        minute.motion.placement == Placement.BEDSIDE -> "bedside"
+        minute.motion.placement == Placement.UNKNOWN -> "placement_unknown"
+        baseline == null -> "insufficient_v2_bed_motion"
+        else -> null
     }
 
     private fun applySafetyBound(
@@ -219,15 +261,32 @@ object SleepStageEstimator {
             else if (run.isNotEmpty()) { runs.add(run); run = mutableListOf() }
         }
         if (run.isNotEmpty()) runs.add(run)
-        runs.sortedByDescending { indices -> indices.map { rolling[it].medianRms ?: Double.MAX_VALUE }.average() }
-            .forEach { indices ->
-                for (i in indices.asReversed()) {
-                    if (deepDuration <= limit) break
+        val weakestFirst = runs.sortedByDescending { indices ->
+            indices.map { rolling[it].medianRms ?: Double.MAX_VALUE }.average()
+        }
+        for (indices in weakestFirst) {
+            if (deepDuration <= limit) break
+            val duration = indices.sumOf { timeline[it].end - timeline[it].start }
+            if (deepDuration - duration >= limit || duration <= deepDuration - limit) {
+                indices.forEach { i -> stages[i] = SleepStage.LIGHT; events[i] = "safety_cap_low_differentiation" }
+                deepDuration -= duration
+            } else {
+                // If no full run fits the remaining excess, trim the weakest boundary minute(s)
+                // from this weakest run rather than mechanically trimming the latest run.
+                val remaining = indices.toMutableList()
+                while (remaining.isNotEmpty() && deepDuration > limit) {
+                    val first = remaining.first()
+                    val last = remaining.last()
+                    val firstStrength = rolling[first].medianRms ?: Double.MAX_VALUE
+                    val lastStrength = rolling[last].medianRms ?: Double.MAX_VALUE
+                    val i = if (lastStrength >= firstStrength) last else first
                     stages[i] = SleepStage.LIGHT
                     events[i] = "safety_cap_low_differentiation"
                     deepDuration -= timeline[i].end - timeline[i].start
+                    remaining.remove(i)
                 }
             }
+        }
     }
 
     fun lastMeaningfulPhoneUseBefore(timeMillis: Long, intervals: List<UsageInterval>): Long? =

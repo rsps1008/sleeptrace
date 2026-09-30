@@ -11,6 +11,7 @@ object AutomaticPlacement {
         fun flush() {
             run.forEachIndexed { index, minute ->
                 val nearby = run.subList(maxOf(0, index - 30), minOf(run.size, index + 31))
+                    .filter { it.featureVersion == minute.featureVersion }
                 // Use the lower tail of apparently still minutes as a local noise-floor estimate.
                 // These conservative relative thresholds remain engineering heuristics, not calibration.
                 val stillRms = nearby.asSequence()
@@ -43,7 +44,9 @@ object AutomaticPlacement {
                 flush()
                 result += if (minute.placement == Placement.AUTO) minute.copy(placement = Placement.UNKNOWN) else minute
             } else {
-                if (run.lastOrNull()?.let { it.startMillis + MINUTE_MS != minute.startMillis } == true) flush()
+                if (run.lastOrNull()?.let {
+                    it.startMillis + MINUTE_MS != minute.startMillis || it.featureVersion != minute.featureVersion
+                } == true) flush()
                 run += minute
             }
         }

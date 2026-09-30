@@ -56,7 +56,15 @@ class StagingStorageRuntimeTest {
             val row = store.read(0,MINUTE_MS).single()
             assertEquals(2,row.featureVersion)
             assertEquals(60,row.sampleCount)
+            assertEquals(MINUTE_MS,row.coveredMillis)
+            assertEquals(0L,row.activeMillis)
+            assertEquals(.01*.01*MINUTE_MS,row.squaredDeltaTime,.000001)
             assertEquals(.01,row.rms,.000001)
+            store.append(listOf(MotionMinute(0,10_000,5_000,25.0,7,Placement.AUTO,1)),now=2*MINUTE_MS)
+            val afterLateLegacy = store.read(0,MINUTE_MS).single()
+            assertEquals(2,afterLateLegacy.featureVersion)
+            assertEquals(MINUTE_MS,afterLateLegacy.coveredMillis)
+            assertEquals(60,afterLateLegacy.sampleCount)
         }
     }
 

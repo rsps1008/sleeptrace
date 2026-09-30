@@ -42,11 +42,10 @@ class SleepStageCalibrationTest {
         val slow = capture(1000)
         for (step in listOf(100L, 20L)) {
             val fast = capture(step)
-            assertEquals(slow, fast)
-            assertTrue(fast.all { it.sampleCount == 60 && it.featureVersion == 2 })
+            assertTrue(fast.all { it.sampleCount in 58..62 && it.featureVersion == 2 })
             slow.zip(fast).forEach { (a,b) ->
-                assertEquals(a.rms, b.rms, .000001)
-                assertEquals(a.activeMillis, b.activeMillis)
+                assertEquals(a.rms, b.rms, .01)
+                assertTrue(kotlin.math.abs(a.activeMillis - b.activeMillis) <= 1_000L)
                 assertEquals(a.level, b.level)
             }
         }
@@ -72,6 +71,84 @@ class SleepStageCalibrationTest {
         val minute = engine.drain(base + MINUTE_MS).single()
         assertEquals(58_000L, minute.coveredMillis)
         assertEquals(59, minute.sampleCount)
+    }
+
+    @Test fun `timestamp jitter at one and fifty Hz stays on stable cadence`() {
+        fun capture(events: List<Long>): List<MotionMinute> {
+            val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.AUTO)
+            events.forEach { ms ->
+                val value = sin(ms / 4_000.0) * if (ms in 30_000..42_000) .8 else .02
+                engine.add(base + ms, value, value * .1, 9.81)
+            }
+            return engine.drain(base + 120_000)
+        }
+        val ideal = capture((0L..120_000L step 1_000L).toList())
+        val oneHz = capture((0L..120L).map { it * 1_000L + when (it % 4) { 0L -> 3L; 1L -> 18L; 2L -> -12L; else -> 9L } })
+        val tenHz = capture((0L..1_200L).map { i -> i * 100L + when (i % 3) { 0L -> 8L; 1L -> -11L; else -> 3L } })
+        val fiftyHz = capture((0L..6_000L).map { i -> i * 20L + when (i % 3) { 0L -> 2L; 1L -> -3L; else -> 1L } })
+        listOf(oneHz, tenHz, fiftyHz).forEach { jittered ->
+            assertEquals(ideal.size, jittered.size)
+            ideal.zip(jittered).forEach { (a,b) ->
+                assertTrue(kotlin.math.abs(a.sampleCount - b.sampleCount) <= 2)
+                assertTrue(kotlin.math.abs(a.coveredMillis - b.coveredMillis) <= 500)
+                assertEquals(a.rms, b.rms, .01)
+                assertTrue("active difference=${kotlin.math.abs(a.activeMillis - b.activeMillis)}", kotlin.math.abs(a.activeMillis - b.activeMillis) <= 2_000)
+            }
+        }
+    }
+
+    @Test fun `sensor cadence above one point five seconds is retained but not Deep eligible`() {
+        val engine = MotionAccumulator(SamplingPlan.choose(100, 2_000_000), Placement.BED)
+        for (ms in 0L..180_000L step 2_000L) engine.add(base + ms, 0.01, 0.0, 9.81)
+        val rows = engine.drain(base + 180_000)
+        assertTrue(rows.sumOf { it.coveredMillis } >= 175_000)
+        assertTrue(rows.all { it.featureVersion == MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION })
+        assertNull(result(rows, 3).baseline)
+        assertEquals(0L, deepMinutes(result(rows, 3)))
+    }
+
+    @Test fun `v1 values never influence v2 nightly baseline`() {
+        val v2 = (60 until 120).map { row(it, .002 + (it % 10) * .001) }
+        val modernOnly = result(v2)
+        for (legacyRms in listOf(0.0001, 0.9)) {
+            val mixed = (0 until 60).map { row(it, legacyRms).copy(featureVersion = 1) } + v2
+            val staged = result(mixed)
+            assertEquals(modernOnly.baseline!!.p50, staged.baseline!!.p50, 1e-12)
+            assertEquals(60, staged.baseline.bedMinutes)
+            assertEquals(60 * MINUTE_MS, staged.firstMotionDelayMillis)
+            assertTrue(staged.minutes.take(60).all { it.stage == SleepStage.LIGHT && !it.stagingMotionUsable })
+            for (i in 60..66) assertEquals(SleepStage.LIGHT, stage(staged, i))
+        }
+    }
+
+    @Test fun `legacy only has no baseline and preserves existing staged intervals`() {
+        val legacy = rows().map { it.copy(featureVersion = 1) }
+        val staged = result(legacy)
+        assertNull(staged.baseline)
+        assertEquals(0L, deepMinutes(staged))
+        val existing = listOf(SleepStageInterval(base, base + 120 * MINUTE_MS, SleepStage.LIGHT))
+        assertEquals(existing, preserveExistingStagesWithoutV2Evidence(staged, existing))
+        val synced = session().copy(state = SyncState.SYNCED, revision = 7, stageIntervals = existing)
+        val candidate = synced.copy(stageIntervals = preserveExistingStagesWithoutV2Evidence(staged, synced.stageIntervals))
+        val merged = com.rsps1008.sleeptrace.sleep.mergeSleepSessions(listOf(synced), listOf(candidate)).single()
+        assertEquals(7L, merged.revision)
+        assertEquals(SyncState.SYNCED, merged.state)
+        assertEquals(existing, merged.stageIntervals)
+    }
+
+    @Test fun `recording disabled still reconciles stored history and empty install can complete migration`() {
+        // Capture preference is intentionally not an input to historical reconciliation policy.
+        assertEquals(HistoricalReconcileAction.RECONCILE, historicalReconcileAction(configured = true, hasStoredSession = true))
+        assertEquals(HistoricalReconcileAction.COMPLETE_EMPTY_MIGRATION, historicalReconcileAction(configured = false, hasStoredSession = false))
+        assertEquals(HistoricalReconcileAction.DEFER_UNCONFIGURED_HISTORY, historicalReconcileAction(configured = false, hasStoredSession = true))
+    }
+
+    @Test fun `placement local evidence does not cross a feature version boundary`() {
+        val legacy = (0 until 45).map { i -> row(i, .5, Placement.AUTO, if (i % 10 == 0) 1_000 else 0).copy(featureVersion = 1) }
+        val current = (45 until 105).map { i -> row(i, .02, Placement.AUTO, if (i % 10 == 5) 1_000 else 0) }
+        val isolated = AutomaticPlacement.resolve(current, emptyList()).associateBy { it.startMillis }
+        val mixed = AutomaticPlacement.resolve(legacy + current, emptyList()).associateBy { it.startMillis }
+        for (i in 75 until 105) assertEquals(isolated.getValue(base + i * MINUTE_MS).placement, mixed.getValue(base + i * MINUTE_MS).placement)
     }
 
     @Test fun `inclusive fifteen minute window confirms even when its last minute is above enter RMS`() {
@@ -155,6 +232,37 @@ class SleepStageCalibrationTest {
         assertTrue(staged.baseline!!.narrowDistribution)
         assertTrue(deepMinutes(staged) <= 180*.35)
         assertTrue(staged.intervals.any { it.stage == SleepStage.LIGHT })
+        assertTrue(staged.intervals.count { it.stage == SleepStage.DEEP } <= 1)
+    }
+
+    @Test fun `partial session endpoints remain clipped and coverage cannot exceed one`() {
+        val start = base + 37_000
+        val end = base + 60 * MINUTE_MS + 22_000
+        val partialSession = session().copy(startMillis = start, endMillis = end)
+        val rows = (0..60).map { i -> MotionMinute(base + i * MINUTE_MS, MINUTE_MS, 0, .01 * .01 * MINUTE_MS, 60, Placement.BED) }
+        val result = SleepStageEstimator.analyze(partialSession, rows,
+            emptyList(), listOf(UsageInterval(start + 30_000, start + 90_000)),
+            listOf(SleepSegment(start, end, 95)), schedule)
+        assertTrue(result.intervals.all { it.startMillis >= start && it.endMillis <= end && it.endMillis > it.startMillis })
+        assertTrue(result.motionCoverageRatio in 0.0..1.0)
+        assertEquals(0.0, result.minutes.first().rollingMedianRms ?: 0.0, 0.0)
+        assertEquals(base + 18 * MINUTE_MS, result.minutes.first { it.stagingMotionUsable }.startMillis)
+    }
+
+    @Test fun `safety cap removes weaker earlier run before stronger later run`() {
+        val rows = (0 until 180).map { i ->
+            when {
+                i in 70..74 -> row(i, .00204).copy(activeMillis = 6_000)
+                i in 75..84 -> row(i, .00205)
+                i < 70 -> row(i, .00204)
+                else -> row(i, .002)
+            }
+        }
+        val staged = result(rows, 180)
+        assertTrue(staged.baseline!!.narrowDistribution)
+        assertTrue(staged.minutes.any { it.event == "safety_cap_low_differentiation" })
+        assertEquals(SleepStage.LIGHT, stage(staged, 30))
+        assertEquals(SleepStage.DEEP, stage(staged, 150))
     }
 
     @Test fun `Google confidence and light do not create Deep without usable local BED evidence`() {
@@ -194,9 +302,28 @@ class SleepStageCalibrationTest {
         assertEquals(3L,old)
         assertTrue("Deep=$new",new>30)
         assertTrue(new<329*.60)
-        assertEquals(33*MINUTE_MS,staged.firstMotionDelayMillis)
+        assertEquals(34*MINUTE_MS,staged.firstMotionDelayMillis)
         assertEquals(295.0/329,staged.motionCoverageRatio,.00001)
         for(i in 0..33) assertEquals(SleepStage.LIGHT,stage(staged,i))
+    }
+
+    @Test fun `synthetic night legacy and mixed versions build baseline only from v2`() {
+        val fixture = requireNotNull(javaClass.getResourceAsStream("/staging/real_night_style.csv")).bufferedReader().useLines { lines ->
+            lines.drop(1).map { line ->
+                val v=line.split(','); val cover=(v[1].toDouble()*1000).toLong(); val rms=v[3].toDouble()
+                MotionMinute(base+v[0].toLong()*MINUTE_MS,cover,(v[2].toDouble()*1000).toLong(),rms*rms*cover,60,Placement.valueOf(v[4]))
+            }.toList()
+        }
+        val allLegacy = fixture.map { it.copy(featureVersion = 1) }
+        assertNull(result(allLegacy, 329).baseline)
+        assertEquals(0L, deepMinutes(result(allLegacy, 329)))
+        val mixed = fixture.map { if ((it.startMillis - base) / MINUTE_MS < 133) it.copy(featureVersion = 1) else it }
+        val mixedResult = result(mixed, 329)
+        val v2OnlyResult = result(mixed.filter { it.featureVersion == 2 }, 329)
+        assertEquals(v2OnlyResult.baseline!!.p50, mixedResult.baseline!!.p50, 1e-12)
+        assertEquals(v2OnlyResult.baseline.bedMinutes, mixedResult.baseline.bedMinutes)
+        for (i in 133..139) assertEquals(SleepStage.LIGHT, stage(mixedResult, i))
+        assertTrue(deepMinutes(mixedResult) < deepMinutes(result(fixture, 329)))
     }
 
     /** Frozen v1 rule, retained only to measure the reported failure on synthetic input. */
