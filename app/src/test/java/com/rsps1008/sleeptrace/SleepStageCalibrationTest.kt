@@ -74,6 +74,18 @@ class SleepStageCalibrationTest {
         assertEquals(59, minute.sampleCount)
     }
 
+    @Test fun `real accumulator reports cumulative uncovered time rather than only the longest gap`() {
+        val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.AUTO, 77)
+        for (second in 0..60) if (second !in setOf(10, 20, 30, 40)) {
+            engine.add(base + second * 1_000, 0.0, 0.0, 9.81)
+        }
+        val minute = engine.drain(base + MINUTE_MS).single()
+        assertEquals(52_000L, minute.coveredMillis)
+        assertEquals(2_000L, minute.longestGapMillis)
+        assertEquals(8_000L, MINUTE_MS - minute.coveredMillis)
+        assertEquals(77L, minute.recordingId)
+    }
+
     @Test fun `timestamp jitter at one and fifty Hz stays on stable cadence`() {
         fun capture(events: List<Long>): List<MotionMinute> {
             val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.AUTO)

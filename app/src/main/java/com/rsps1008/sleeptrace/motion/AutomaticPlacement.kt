@@ -63,9 +63,12 @@ object AutomaticPlacement {
                 // Initial proof still needs the complete three-separated-movement
                 // history.  Once that proof is alive, one new qualifying movement
                 // renews it; quiet time can never renew it.
-                if ((supportedAt == null && established && newQualifyingMovement) ||
+                if ((supportedAt == null && established) ||
                     (supportStillValid && newQualifyingMovement)) {
-                    supportedAt = minute.startMillis
+                    // A quiet confirmation minute never becomes positive
+                    // evidence.  Initial expiry remains tied to the final
+                    // qualifying movement in the completed history.
+                    supportedAt = if (newQualifyingMovement) minute.startMillis else movements.last().startMillis
                     invalidation = null
                 }
                 val age = supportedAt?.let { minute.startMillis - it }

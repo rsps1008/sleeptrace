@@ -252,4 +252,27 @@ class StagingEvidenceTest {
         assertFalse(r.minutes[40].canStage)
         assertTrue(SleepStageEstimator.Reason.INSUFFICIENT_COVERAGE in r.minutes[40].reasons)
     }
+
+    @Test fun `multiple real-second gaps do not pass the one minor gap budget`() {
+        val gappy = rows().mapIndexed { index, minute ->
+            if (index == 40) minute.copy(coveredMillis = 52_000, longestGapMillis = 2_000,
+                coupling = CouplingEvidence(CouplingState.HELD, 30 * MINUTE_MS, null)) else minute
+        }
+        val staged = analyze(gappy)
+        // The four missing seconds occupy the 31..45 entry window. V6 used
+        // longestGapMillis (=2s) as the total and incorrectly entered here.
+        assertNotEquals("enter_stable_window", staged.minutes[45].event)
+        assertFalse(staged.minutes[45].canEnterDeep)
+        assertTrue(SleepStageEstimator.Reason.WINDOW_CONTAINS_GAP in staged.minutes[45].windowBlockingReasons)
+    }
+
+    @Test fun `contradictory full coverage with a claimed gap is never a positive gap fixture`() {
+        val contradictory = rows().mapIndexed { index, minute ->
+            if (index == 40) minute.copy(longestGapMillis = 2_000,
+                coupling = CouplingEvidence(CouplingState.HELD, 30 * MINUTE_MS, null)) else minute
+        }
+        val staged = analyze(contradictory)
+        assertFalse(staged.minutes[45].canEnterDeep)
+        assertTrue(SleepStageEstimator.Reason.WINDOW_CONTAINS_GAP in staged.minutes[45].windowBlockingReasons)
+    }
 }

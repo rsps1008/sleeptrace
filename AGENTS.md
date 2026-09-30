@@ -253,11 +253,11 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 
 ## 2026-09-30 分期規則 v5：未判定、耦合及可觀測特徵
 
-## 2026-09-30 V6 分期證據修正
+## 2026-09-30 V7 分期證據修正
 
-正式分期規則版本為 6，採集 featureVersion 仍為 5。首次 AUTO 耦合建立保持三個分散短動作、30 分鐘 history、八分鐘跨度；在既有支持尚未失效、同一 recording/version/window 且沒有使用／handling／嚴重缺資料反證時，一個新的合格動作可更新最後正向證據。安靜不能續期；失效或反證後單次動作不能復活。邊界會先清狀態，且同分鐘 handling／缺資料仍不可加入新 history。
+正式分期規則版本為 7，採集 featureVersion 仍為 5。首次 AUTO 耦合建立保持三個分散短動作、至少 20 個連續 history、30 分鐘回看窗口與八分鐘跨度；成立時不要求當前分鐘有新動作，期限仍取最後正向動作。存活支持可由一個新動作續期；安靜不能續期，失效或反證後單次動作不能復活。邊界會先清狀態，且同分鐘 handling／缺資料仍不可加入新 history。
 
-featureVersion 5 的一個明確 2 秒內短缺口可作為後續完整分鐘入 Deep 的窗口上下文，但缺口分鐘自身永遠維持 SLEEPING，最多一個、其餘至少十四個完整合格分鐘且最後五分鐘完整；未知位置的舊摘要不適用。手機使用、handling、長缺口、耦合失效及 recording/version/window 邊界均為硬中斷。`MinuteDiagnostic` 保留 current eligibility、window blockers/intervals、baseline 與 transition diagnostics。詳見 `docs/staging-v6-changes.md`；CSV replay 是 estimator-only，不能驗證 AUTO，也不是醫療或 PSG 證據。
+featureVersion 5 的一個明確短缺口僅在完整 60 秒桶的 `60000-coveredMillis` 不超過 2000 ms 時可作為後續完整分鐘入 Deep 的窗口上下文；最長單次缺口不代表累積缺漏。缺口分鐘自身永遠維持 SLEEPING，最多一個、其餘至少十四個完整合格分鐘且最後五分鐘完整；矛盾、部分桶或資訊不明均不適用。手機使用、handling、長缺口、耦合失效及 recording/version/window 邊界均為硬中斷。`MinuteDiagnostic` 保留 current eligibility、window blockers/intervals、baseline 與 transition diagnostics。詳見 `docs/staging-v7-changes.md`；CSV replay 是 estimator-only，不能驗證 AUTO，也不是醫療或 PSG 證據。
 
 以下是目前實作；前面按日期保存的驗證紀錄描述各次歷史版本，不代表目前規則。
 
@@ -267,7 +267,7 @@ featureVersion 5 的一個明確 2 秒內短缺口可作為後續完整分鐘入
 
 耦合參數集中在 `CouplingPolicy`，均為未校準工程值：近期 30 分鐘至少 20 分鐘資料，3 個分散短動作且首末相隔 8 分鐘；局部安靜底噪乘 3、RMS 絕對下限 0.015 m/s²，活動 0.2～12 秒。手機使用前後 2 分鐘、單次大動作／低頻向量變化 >1.5 m/s²、資料缺口及錄製片段／版本／睡眠窗邊界使支持失效。建立後 HELD 期限 45 分鐘，容許安靜半小時仍有耦合，但不能用安靜永久刷新整晚可信。歷史放置標記保留讀取相容，非物理位置保證；耦合本身絕不是睡眠證據。
 
-`MotionAccumulator.CURRENT_FEATURE_VERSION = 5`，`SleepStageEstimator.ALGORITHM_VERSION = 5`，兩者分別表示摘要定義與推估規則。事件時間 → 帶 100 ms 容許抖動的固定 1 秒代表點 → 摘要 → 離線分期；不累加所有高頻 callback。1 Hz 正式請求及 FIFO 不變，沒有插值，漏一點不補零，長缺口不延伸前值。非有限／重複／倒序事件不改代表點；拒絕數保存在採集摘要。即時與 FIFO 同事件集合得到相同特徵。服務重啟／校時建立不同錄製身份，不跨邊界比較差值。只保存摘要，沒有整晚原始三軸波形。
+`MotionAccumulator.CURRENT_FEATURE_VERSION = 5`，`SleepStageEstimator.ALGORITHM_VERSION = 7`，兩者分別表示摘要定義與推估規則。事件時間 → 帶 100 ms 容許抖動的固定 1 秒代表點 → 摘要 → 離線分期；不累加所有高頻 callback。1 Hz 正式請求及 FIFO 不變，沒有插值，漏一點不補零，長缺口不延伸前值。非有限／重複／倒序事件不改代表點；拒絕數保存在採集摘要。即時與 FIFO 同事件集合得到相同特徵。服務重啟／校時建立不同錄製身份，不跨邊界比較差值。只保存摘要，沒有整晚原始三軸波形。
 
 分鐘新增特徵（舊列為 null；CSV 空白表示沒有測量，與 0 不同）：
 

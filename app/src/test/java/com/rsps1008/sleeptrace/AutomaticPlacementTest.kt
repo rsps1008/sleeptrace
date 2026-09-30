@@ -64,6 +64,17 @@ class AutomaticPlacementTest {
         assertEquals(0L, resolved[60].coupling?.ageMillis)
     }
 
+    @Test fun `quiet twentieth historical minute establishes coupling without treating quiet as new evidence`() {
+        // The proof has already accumulated by minute 19.  Establishment is
+        // confirmed then, but its expiry is anchored to the last movement at 15.
+        val resolved = AutomaticPlacement.resolve(rows(setOf(5, 10, 15), 30), emptyList())
+        assertTrue(resolved.take(19).none { it.coupling?.state == CouplingState.SUPPORTED || it.coupling?.state == CouplingState.HELD })
+        assertEquals(CouplingState.HELD, resolved[19].coupling?.state)
+        assertEquals(4 * MINUTE_MS, resolved[19].coupling?.ageMillis)
+        assertEquals(CouplingState.HELD, resolved[20].coupling?.state)
+        assertEquals(5 * MINUTE_MS, resolved[20].coupling?.ageMillis)
+    }
+
     @Test fun `quiet never renews and a single movement after expiry cannot resurrect coupling`() {
         val expired = AutomaticPlacement.resolve(rows(setOf(5, 15, 25), 90), emptyList())
         assertEquals("COUPLING_EXPIRED", expired[71].coupling?.reason)
@@ -101,6 +112,34 @@ class AutomaticPlacementTest {
         val resolved = AutomaticPlacement.resolve(raw, emptyList())
         assertTrue(resolved.any { it.coupling?.state == CouplingState.SUPPORTED })
         assertTrue(resolved.drop(25).any { it.placement == Placement.BED })
+    }
+
+    @Test fun `end to end accumulator AUTO and staging retain supported evidence but reject flat signal`() {
+        fun capture(movements: Set<Int>): List<MotionMinute> {
+            val accumulator = MotionAccumulator(SamplingPlan(1_000_000, 0), Placement.AUTO, 88)
+            for (minute in 0 until 90) for (second in 0 until 60) {
+                val x = when {
+                    minute in movements && second == 20 -> .20
+                    minute in movements && second == 21 -> 0.0
+                    else -> if (minute < 45) .003 else .015
+                }
+                accumulator.add(start + minute * MINUTE_MS + second * 1_000L, x, 0.0, 9.8)
+            }
+            return accumulator.drain(start + 90 * MINUTE_MS)
+        }
+        fun stages(minutes: List<MotionMinute>) = SleepStageEstimator.analyze(
+            SleepSession(startMillis = start, endMillis = start + 90 * MINUTE_MS, confidence = 80,
+                awakeMillis = 0, state = SyncState.PENDING, reason = "e2e"),
+            AutomaticPlacement.resolve(minutes, emptyList()), emptyList(), emptyList(),
+            listOf(SleepSegment(start, start + 90 * MINUTE_MS, 80)), SleepSchedule(0, 0))
+        val supported = stages(capture(setOf(5, 10, 15, 60)))
+        assertTrue(supported.minutes.any { it.motion?.coupling?.state == CouplingState.SUPPORTED })
+        assertTrue(supported.durations.deep > 0)
+        assertTrue(supported.durations.light > 0)
+        val flat = stages(capture(emptySet()))
+        assertTrue(flat.minutes.all { it.motion?.placement != Placement.BED })
+        assertEquals(0L, flat.durations.deep)
+        assertTrue(flat.intervals.all { it.stage == SleepStage.SLEEPING })
     }
 
     @Test fun `legacy minute placement remains readable but cannot spread into new records`() {

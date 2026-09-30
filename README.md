@@ -152,7 +152,7 @@ reconciliation rule version 目前為 5，沿用 `SleepStageEstimator.ALGORITHM_
 
 耦合參數集中在 `CouplingPolicy`，均為未校準工程值：近期 30 分鐘至少 20 分鐘資料，3 個分散短動作且首末相隔 8 分鐘；局部安靜底噪乘 3、RMS 絕對下限 0.015 m/s²，活動 0.2～12 秒。手機使用前後 2 分鐘、單次大動作／低頻向量變化 >1.5 m/s²、資料缺口及錄製片段／版本／睡眠窗邊界使支持失效。建立後 HELD 期限 45 分鐘，容許安靜半小時仍有耦合，但不能用安靜永久刷新整晚可信。歷史放置標記保留讀取相容，非物理位置保證；耦合本身絕不是睡眠證據。
 
-`MotionAccumulator.CURRENT_FEATURE_VERSION = 5`，`SleepStageEstimator.ALGORITHM_VERSION = 5`，兩者分別表示摘要定義與推估規則。事件時間 → 帶 100 ms 容許抖動的固定 1 秒代表點 → 摘要 → 離線分期；不累加所有高頻 callback。1 Hz 正式請求及 FIFO 不變，沒有插值，漏一點不補零，長缺口不延伸前值。非有限／重複／倒序事件不改代表點；拒絕數保存在採集摘要。即時與 FIFO 同事件集合得到相同特徵。服務重啟／校時建立不同錄製身份，不跨邊界比較差值。只保存摘要，沒有整晚原始三軸波形。
+`MotionAccumulator.CURRENT_FEATURE_VERSION = 5`，`SleepStageEstimator.ALGORITHM_VERSION = 7`，兩者分別表示摘要定義與推估規則。事件時間 → 帶 100 ms 容許抖動的固定 1 秒代表點 → 摘要 → 離線分期；不累加所有高頻 callback。1 Hz 正式請求及 FIFO 不變，沒有插值，漏一點不補零，長缺口不延伸前值。非有限／重複／倒序事件不改代表點；拒絕數保存在採集摘要。即時與 FIFO 同事件集合得到相同特徵。服務重啟／校時建立不同錄製身份，不跨邊界比較差值。只保存摘要，沒有整晚原始三軸波形。
 
 分鐘新增特徵（舊列為 null；CSV 空白表示沒有測量，與 0 不同）：
 
@@ -214,11 +214,11 @@ adb.exe -s <序號> shell am broadcast -n com.rsps1008.sleeptrace/.motion.Captur
 只找到既有合成 `real_night_style.csv`，沒有真實整晚 raw CSV；沒有虛構實機那一晚結果。凍結 HEAD 的 algorithm 4 對照 algorithm 5（報告 `docs/staging-v5-replay.txt`）：329 分鐘合成跨度，Deep 132→104、Light 197→42、未判定 0→183、Awake 0→0；切換 8→11、<5 分鐘睡眠片段 1→1。有效分鐘覆蓋兩版均 89.6657%；新版跨度感測覆蓋 89.7568%，可細分睡眠覆蓋 44.3769%；未判定主要原因為缺 motion 33 分鐘、覆蓋不足 1 分鐘、耦合不足 149 分鐘。這是工程回歸，不是真實生理準確度、深眠比例優化或與原生／醫療演算法等價的證明。
 
 目前只連接 Mi Note 10 與 Pixel 實體裝置，依測試的可丟棄模擬器限制未安裝、未跑會改資料／權限的 instrumentation。UI 實機目視、SQLite 升級裝置執行、Health Connect 真實寫入／刪除、採集實驗、Google 回報延遲、OEM／Doze／FIFO 完整性、PSG／穿戴對照與整夜耗電均尚未驗證。1 Hz 無法重建未觀測秒內動作；歷史摘要不能重建原始波形；所有耦合／分期門檻未校準，2 Hz 未比較準確度或耗電。Health Connect 成功亦不代表其他 App 已顯示。
-# V6 分期證據更新（2026-09-30）
+# V7 分期證據修正（2026-09-30）
 
-V6 將 AUTO 耦合的「首次建立」與「有效期限內續期」分開：首次建立仍需多次分散短動作；已建立、未失效且同一錄製片段內的新合格動作可續期，安靜不會續期。錄製／版本／睡眠窗邊界會清除舊證據，但同時存在的 handling、手機使用或缺資料仍會被排除，不能成為新 history。
+V7 修正 V6 首次建立誤把「當前分鐘必須有新動作」當成額外條件的缺陷：完整歷史已滿足 20 個連續摘要、三個分散短動作與八分鐘跨度時，即使確認分鐘安靜也建立支持；有效期限仍從最後一個合格動作計算。已建立且未失效時一個新動作可續期；過期、handling、使用、錄製／版本／睡眠窗邊界後都必須重新滿足完整歷史。
 
-分期仍只在已接受的睡眠 session 內進行。沒有耦合、耦合失效、缺資料、基準不足或必要特徵不存在時，保留 `SLEEPING`（深淺未判定），不因 Sleep API 睡眠證據直接假設 `LIGHT`。featureVersion 5 有明確記錄的單一不超過 2 秒短缺口，缺口分鐘本身仍為 `SLEEPING`；只有後續完整分鐘符合嚴格 14/15 與最近五分鐘完整規則時，才可重新進 Deep。手機使用、handling、長缺口與任何比較邊界不可跨越。
+分期仍只在已接受的睡眠 session 內進行。缺口例外只可用於完整 60 秒 v5 桶：累積未覆蓋時間以 `60,000 - coveredMillis` 判定，單一 2 秒最長缺口不能掩蓋同分鐘四次漏樣的 8 秒總缺漏；部分桶、遺失資訊或 `covered=60,000` 卻宣稱有缺口的矛盾摘要都走嚴格路徑。容許的短缺口是診斷資訊而非進入阻擋原因；缺口分鐘本身仍為 `SLEEPING`，最近五分鐘必須完整。沒有耦合、耦合失效、缺資料、基準不足或必要特徵時仍保留 `SLEEPING`，不假設 `LIGHT`。
 
-回放說明見 [`docs/staging-v6-replay.txt`](docs/staging-v6-replay.txt)；其中原 CSV 是 estimator-only，沒有跑 AUTO，且合成回放不是醫療或 PSG 驗證。演算法版本為 6，感測 featureVersion 維持 5。
+回放說明見 [`docs/staging-v7-replay.txt`](docs/staging-v7-replay.txt)；其矩陣與差異 CSV 由同一 JVM 回放物件生成，檢查命令不覆寫已提交文件。原 CSV 是 estimator-only，沒有跑 AUTO，且合成回放不是醫療或 PSG 驗證。演算法版本為 7，感測 featureVersion 維持 5。
 
