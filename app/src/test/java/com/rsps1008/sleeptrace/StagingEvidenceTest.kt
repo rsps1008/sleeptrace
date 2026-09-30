@@ -157,7 +157,7 @@ class StagingEvidenceTest {
         val next = s.copy(stageAlgorithmVersion = SleepStageEstimator.ALGORITHM_VERSION, stageFeatureVersion = 5)
         val merged = mergeSleepSessions(listOf(s), listOf(next)).single()
         assertEquals(7L, merged.revision); assertEquals("identity", merged.id)
-        assertEquals(5, merged.stageAlgorithmVersion)
+        assertEquals(SleepStageEstimator.ALGORITHM_VERSION, merged.stageAlgorithmVersion)
     }
     @Test fun `historical inputs unavailable retain old stages and manual bounds`() {
         val s = session().copy(manuallyEdited = true, startMillis = base + 20 * MINUTE_MS,

@@ -54,6 +54,55 @@ class AutomaticPlacementTest {
         assertEquals("COUPLING_EXPIRED", resolved[100].coupling?.reason)
     }
 
+    @Test fun `live coupling renews on one new qualifying movement without rebuilding initial history`() {
+        // 5/15/25 establish the original proof.  At 60 the old three movements
+        // have aged out of the 30-minute establishment window, but 25 is only
+        // 35 minutes old, so the new observed movement renews the live proof.
+        val resolved = AutomaticPlacement.resolve(rows(setOf(5, 15, 25, 60), 75), emptyList())
+        assertEquals(CouplingState.HELD, resolved[59].coupling?.state)
+        assertEquals(CouplingState.SUPPORTED, resolved[60].coupling?.state)
+        assertEquals(0L, resolved[60].coupling?.ageMillis)
+    }
+
+    @Test fun `quiet never renews and a single movement after expiry cannot resurrect coupling`() {
+        val expired = AutomaticPlacement.resolve(rows(setOf(5, 15, 25), 90), emptyList())
+        assertEquals("COUPLING_EXPIRED", expired[71].coupling?.reason)
+        val afterOneMovement = AutomaticPlacement.resolve(rows(setOf(5, 15, 25, 80), 90), emptyList())
+        assertEquals(CouplingState.INSUFFICIENT, afterOneMovement[80].coupling?.state)
+        assertEquals(Placement.UNKNOWN, afterOneMovement[80].placement)
+    }
+
+    @Test fun `recording boundary handling minute is not allowed into fresh evidence history`() {
+        val input = rows(setOf(5, 15, 25), 40).mapIndexed { i, row ->
+            if (i == 30) row.copy(recordingId = 2, maxDelta = 2.0, squaredDeltaTime = 2.0 * 2.0 * MINUTE_MS)
+            else row.copy(recordingId = 1)
+        }
+        val resolved = AutomaticPlacement.resolve(input, emptyList())
+        assertEquals(Placement.UNKNOWN, resolved[30].placement)
+        assertTrue(resolved[30].coupling?.reason?.contains("HANDLING") == true)
+        assertTrue(resolved.drop(31).none { it.placement == Placement.BED })
+    }
+
+    @Test fun `end to end accumulator events feed AUTO rather than pre-labelled BED`() {
+        val accumulator = MotionAccumulator(SamplingPlan(1_000_000, 0), Placement.AUTO, 44)
+        val movements = setOf(5, 15, 25)
+        for (minute in 0 until 55) for (second in 0 until 60) {
+            // A physically plausible short displacement and return, with all
+            // intervening 1 Hz observations retained by the real accumulator.
+            val x = when {
+                minute in movements && second == 20 -> .20
+                minute in movements && second == 21 -> 0.0
+                else -> 0.0
+            }
+            accumulator.add(start + minute * MINUTE_MS + second * 1_000L, x, 0.0, 9.8)
+        }
+        val raw = accumulator.drain(start + 55 * MINUTE_MS)
+        assertTrue(raw.all { it.placement == Placement.AUTO })
+        val resolved = AutomaticPlacement.resolve(raw, emptyList())
+        assertTrue(resolved.any { it.coupling?.state == CouplingState.SUPPORTED })
+        assertTrue(resolved.drop(25).any { it.placement == Placement.BED })
+    }
+
     @Test fun `legacy minute placement remains readable but cannot spread into new records`() {
         val input = listOf(rows().first().copy(placement = Placement.BED)) + rows().drop(1)
         val resolved = AutomaticPlacement.resolve(input, emptyList())

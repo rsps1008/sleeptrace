@@ -7,6 +7,9 @@ import com.rsps1008.sleeptrace.sleep.SleepSchedule
 object AutomaticPlacement {
     fun resolve(minutes: List<MotionMinute>, usage: List<UsageInterval>, schedule: SleepSchedule? = null): List<MotionMinute> {
         val history = mutableListOf<MotionMinute>()
+        // `supportedAt` is deliberately the *last positive movement evidence*, not
+        // the time at which a quiet minute happened to be processed.  Initial
+        // establishment and a renewal have different proof requirements.
         var supportedAt: Long? = null
         var previous: MotionMinute? = null
         var invalidation: String? = null
@@ -20,13 +23,15 @@ object AutomaticPlacement {
             val handling = minute.rms > CouplingPolicy.HANDLING_DELTA ||
                 (minute.maxDelta ?: 0.0) > CouplingPolicy.HANDLING_DELTA ||
                 (minute.postureDelta ?: 0.0) > CouplingPolicy.HANDLING_DELTA
-            val invalid = when {
-                inUse -> "PHONE_IN_USE"
-                boundary -> "RECORDING_BOUNDARY"
-                handling -> "HANDLING"
-                minute.level == MotionLevel.UNKNOWN || (minute.longestGapMillis ?: 0) > CouplingPolicy.MAX_HISTORY_GAP_MILLIS -> "MISSING_MOTION"
-                else -> null
+            // A boundary first discards prior evidence.  It must not, however,
+            // hide handling/missing data on the first minute of the new run.
+            if (boundary) { history.clear(); supportedAt = null; invalidation = "RECORDING_BOUNDARY" }
+            val invalidReasons = buildList {
+                if (inUse) add("PHONE_IN_USE")
+                if (handling) add("HANDLING")
+                if (minute.level == MotionLevel.UNKNOWN || (minute.longestGapMillis ?: 0) > CouplingPolicy.MAX_HISTORY_GAP_MILLIS) add("MISSING_MOTION")
             }
+            val invalid = invalidReasons.joinToString("|").ifEmpty { null }
             if (invalid != null) { history.clear(); supportedAt = null; invalidation = invalid }
             previous = minute
             if (minute.placement != Placement.AUTO) {
@@ -34,7 +39,7 @@ object AutomaticPlacement {
                 // Preserve old explicit placement as a limited compatibility path, never propagate it.
                 minute.copy(coupling = CouplingEvidence(if (minute.placement == Placement.BED && invalid == null)
                     CouplingState.SUPPORTED else CouplingState.INSUFFICIENT, null, "LEGACY_PLACEMENT"))
-            } else if (invalid != null && invalid != "RECORDING_BOUNDARY") {
+            } else if (invalid != null) {
                 minute.copy(placement = Placement.UNKNOWN, coupling = CouplingEvidence(CouplingState.INSUFFICIENT, null, invalid))
             } else {
                 history += minute
@@ -45,9 +50,23 @@ object AutomaticPlacement {
                     it.activeMillis in CouplingPolicy.MIN_ACTIVE_MILLIS..CouplingPolicy.MAX_SHORT_ACTIVE_MILLIS && (it.longestActiveMillis ?: 0) <= CouplingPolicy.MAX_SHORT_ACTIVE_MILLIS }
                 val established = history.size >= CouplingPolicy.MIN_HISTORY_MINUTES && movements.size >= CouplingPolicy.MIN_MOVEMENTS &&
                     movements.last().startMillis - movements.first().startMillis >= CouplingPolicy.MIN_SPAN_MILLIS
-                // Only a new observed movement refreshes an already established coupling.
-                if (established && (supportedAt == null || movements.last() == minute)) {
-                    supportedAt = movements.last().startMillis; invalidation = null
+                val newQualifyingMovement = movements.any { it.startMillis == minute.startMillis }
+                val ageBefore = supportedAt?.let { minute.startMillis - it }
+                val supportStillValid = ageBefore != null && ageBefore <= CouplingPolicy.HOLD_MILLIS
+                if (ageBefore != null && !supportStillValid) {
+                    // Expiry intentionally discards the old proof.  A later full
+                    // establishment may create fresh support, but a lone movement
+                    // cannot revive this timestamp.
+                    supportedAt = null
+                    invalidation = "COUPLING_EXPIRED"
+                }
+                // Initial proof still needs the complete three-separated-movement
+                // history.  Once that proof is alive, one new qualifying movement
+                // renews it; quiet time can never renew it.
+                if ((supportedAt == null && established && newQualifyingMovement) ||
+                    (supportStillValid && newQualifyingMovement)) {
+                    supportedAt = minute.startMillis
+                    invalidation = null
                 }
                 val age = supportedAt?.let { minute.startMillis - it }
                 val state = when {

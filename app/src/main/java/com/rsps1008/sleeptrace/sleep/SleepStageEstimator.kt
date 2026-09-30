@@ -11,7 +11,7 @@ import com.rsps1008.sleeptrace.motion.CouplingState
 /** Offline engineering estimates inside an accepted session; never a clinical sleep stage. */
 object SleepStageEstimator {
     // This version also gates automatic reconciliation-rule migrations.
-    const val ALGORITHM_VERSION = 5
+    const val ALGORITHM_VERSION = 6
     const val SLEEP_ONSET_GUARD_MILLIS = 15 * MINUTE_MS
     const val MINIMUM_BASELINE_MINUTES = 10
     const val DEEP_WINDOW_MINUTES = 15
@@ -26,12 +26,17 @@ object SleepStageEstimator {
     private const val ENTER_MAX_EVENTS = 6
     private const val EXIT_DENSE_EVENTS = 8
     private const val MAX_CONTINUOUS_ACTIVE_MILLIS = 12_000L
+    /** V6 short-gap policy: an observed v5 gap can bridge entry context, never be staged. */
+    private const val MINOR_GAP_MAX_MILLIS = 2_000L
+    private const val MAX_MINOR_GAP_MINUTES_IN_WINDOW = 1
+    private const val MAX_MINOR_GAP_TOTAL_MILLIS = 2_000L
 
     enum class Reason {
         NO_SLEEP_EVIDENCE, PHONE_IN_USE, ONSET_GUARD, MISSING_MOTION, INSUFFICIENT_COVERAGE,
         COUPLING_INSUFFICIENT, COUPLING_EXPIRED, BASELINE_INSUFFICIENT, LOW_SIGNAL_DIFFERENTIATION,
         WINDOW_TOO_SHORT, ACTIVITY_TOO_HIGH, ENTER_DEEP, MAINTAIN_DEEP, EXIT_SUSTAINED_ACTIVITY,
-        EXIT_COUPLING_LOST, SAFETY_CAP, LEGACY_FEATURE_LIMITATION
+        EXIT_COUPLING_LOST, SAFETY_CAP, LEGACY_FEATURE_LIMITATION, WINDOW_CONTAINS_GAP,
+        RECORDING_BOUNDARY, COUPLING_INVALIDATED, LEGACY_PLACEMENT_UNKNOWN
     }
     data class NightlyBaseline(
         val p25: Double, val p35: Double, val p50: Double,
@@ -59,7 +64,12 @@ object SleepStageEstimator {
         val stageAlgorithmVersion: Int = ALGORITHM_VERSION,
         val couplingState: CouplingState? = motion?.coupling?.state,
         val couplingAgeMillis: Long? = motion?.coupling?.ageMillis,
-        val couplingInvalidation: String? = motion?.coupling?.reason
+        val couplingInvalidation: String? = motion?.coupling?.reason,
+        val currentEligibilityReasons: List<Reason> = reasons,
+        val windowBlockingReasons: List<Reason> = emptyList(),
+        val windowBlockingIntervals: List<LongRange> = emptyList(),
+        val baselineReasons: List<Reason> = emptyList(),
+        val transitionReason: String? = event
     ) {
         val primaryReason: Reason? get() = if (Reason.SAFETY_CAP in reasons) Reason.SAFETY_CAP
             else if (canStage) reasons.firstOrNull() else reasons.firstOrNull {
@@ -96,6 +106,9 @@ object SleepStageEstimator {
         val hasRequiredFeatures: Boolean get() = motion?.let { it.featureVersion == MotionAccumulator.CADENCE_ANCHOR_FEATURE_VERSION ||
             (it.maxDelta != null && it.movementEvents != null && it.longestActiveMillis != null && it.quietTailMillis != null && it.longestGapMillis != null) } == true
         val observedQuality: Boolean get() = validMotion && currentFeature && hasRequiredFeatures && !recordingBoundary && (motion?.longestGapMillis ?: 0) == 0L
+        val minorObservedGap: Boolean get() = validMotion && currentFeature && hasRequiredFeatures && !recordingBoundary &&
+            motion?.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION &&
+            (motion.longestGapMillis ?: 0) in 1..MINOR_GAP_MAX_MILLIS
         val stageEligible: Boolean get() = !inPhoneUse && inSchedule && !beforeEvidence && observedQuality && couplingSupported
         val hardBreak: Boolean get() = inPhoneUse || inOnsetGuard || !inSchedule ||
             beforeEvidence || !observedQuality || !couplingSupported
@@ -157,7 +170,6 @@ object SleepStageEstimator {
         val stages = MutableList(timeline.size) { if (canStage(timeline[it])) SleepStage.LIGHT else SleepStage.SLEEPING }
         val events = arrayOfNulls<String>(timeline.size)
         var deep = false
-        var unknownRun = 0
         var highMotionWindows = 0
         timeline.indices.forEach { index ->
             val minute = timeline[index]
@@ -170,13 +182,11 @@ object SleepStageEstimator {
                     !minute.validMotion -> "exit_missing_motion"
                     else -> "exit_no_sleep_evidence_or_schedule"
                 }
-                deep = false; unknownRun = 0; highMotionWindows = 0
+                deep = false; highMotionWindows = 0
                 return@forEach
             }
             val recent = maxOf(0, index - 4)..index
             val short = rollingFeatures(timeline, recent)
-            val unknown = !minute.couplingSupported
-            unknownRun = if (unknown) unknownRun + 1 else 0
             var exited = false
             if (deep) {
                 val high = short.validMinutes == 5 && short.medianRms!! > baseline.p70
@@ -184,8 +194,7 @@ object SleepStageEstimator {
                 val exitReason = when {
                     short.activeMinutes >= 3 -> "exit_active_3_in_5"
                     recent.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS -> "exit_dense_events"
-                    unknown && (!minute.quiet || minute.motion!!.rms > baseline.p75) -> "exit_unreliable_unknown"
-                    unknownRun > UNKNOWN_DEEP_GRACE_MINUTES -> "exit_unknown_timeout"
+                    !minute.couplingSupported -> "exit_coupling_lost"
                     highMotionWindows >= 3 -> "exit_sustained_rolling_motion"
                     else -> null
                 }
@@ -201,7 +210,7 @@ object SleepStageEstimator {
                 }
             }
             if (!deep && !exited && canEnterDeep(index, timeline, rolling[index], baseline, evidenceStart)) {
-                deep = true; unknownRun = 0; highMotionWindows = 0
+                deep = true; highMotionWindows = 0
                 events[index] = "enter_stable_window"
                 // At most seven proven stable minutes. Never cross any guard, gap or weak placement.
                 for (i in index - 1 downTo maxOf(0, index - DEEP_BACKFILL_MINUTES)) {
@@ -245,7 +254,12 @@ object SleepStageEstimator {
             else {
                 if (!m.validMotion || (m.motion.longestGapMillis ?: 0) > 0L) add(Reason.INSUFFICIENT_COVERAGE)
                 if (!m.currentFeature || !m.hasRequiredFeatures || (baseline != null && m.motion.featureVersion != baseline.featureVersion)) add(Reason.LEGACY_FEATURE_LIMITATION)
-                if (!m.couplingSupported) add(if (m.motion.coupling?.reason == "COUPLING_EXPIRED") Reason.COUPLING_EXPIRED else Reason.COUPLING_INSUFFICIENT)
+                if (!m.couplingSupported) add(when {
+                    m.motion.coupling?.reason == "COUPLING_EXPIRED" -> Reason.COUPLING_EXPIRED
+                    m.motion.coupling?.reason?.contains("HANDLING") == true || m.motion.coupling?.reason?.contains("PHONE") == true -> Reason.COUPLING_INVALIDATED
+                    m.motion.coupling?.reason == "LEGACY_PLACEMENT" -> Reason.LEGACY_PLACEMENT_UNKNOWN
+                    else -> Reason.COUPLING_INSUFFICIENT
+                })
             }
             if (baseline == null) add(Reason.BASELINE_INSUFFICIENT)
             if (baseline?.narrowDistribution == true) add(Reason.LOW_SIGNAL_DIFFERENTIATION)
@@ -269,8 +283,12 @@ object SleepStageEstimator {
                 if (canStage(m)) null else reasons(i).firstOrNull()?.name,
                 if (canStage(m)) "full" else stagingRole(m), m.end, reasons(i), canStage(m),
                 baseline?.let { canEnterDeep(i, timeline, rolling[i], it, evidenceStart) } == true,
-                stages[i] == SleepStage.DEEP, awakeOverlap(m.start, m.end), m.inOnsetGuard, !m.beforeEvidence,
-                m.motion ?: m.coverageMotion)
+                canMaintainDeep(i, timeline, baseline), awakeOverlap(m.start, m.end), m.inOnsetGuard, !m.beforeEvidence,
+                m.motion ?: m.coverageMotion,
+                currentEligibilityReasons = reasons(i),
+                windowBlockingReasons = windowBlockingReasons(i, timeline, baseline),
+                windowBlockingIntervals = windowBlockingIntervals(i, timeline),
+                baselineReasons = listOfNotNull(if (baseline == null) Reason.BASELINE_INSUFFICIENT else null, if (baseline?.narrowDistribution == true) Reason.LOW_SIGNAL_DIFFERENTIATION else null))
         }
         var gapRun = 0L; var longestGap = 0L
         timeline.forEach { m ->
@@ -334,18 +352,53 @@ object SleepStageEstimator {
         if (!minute.bed || !minute.quiet ||
             minute.start < maxOf(timeline.first().start, evidenceStart) + MIN_SESSION_AGE_FOR_DEEP) return false
         val range = index - DEEP_WINDOW_MINUTES + 1..index
-        if (range.any { !timeline[it].observedQuality || !timeline[it].couplingSupported ||
+        // A single explicitly measured v5 short gap may contribute context only.
+        // It remains SLEEPING itself; all other minutes need full quality.
+        val gaps = range.filter { timeline[it].minorObservedGap }
+        if (gaps.size > MAX_MINOR_GAP_MINUTES_IN_WINDOW ||
+            gaps.sumOf { timeline[it].motion?.longestGapMillis ?: 0L } > MAX_MINOR_GAP_TOTAL_MILLIS ||
+            (index - 4..index).any { !timeline[it].observedQuality } ||
+            range.any { (!timeline[it].observedQuality && !timeline[it].minorObservedGap) || !timeline[it].couplingSupported ||
                 timeline[it].motion?.featureVersion != baseline.featureVersion ||
                 timeline[it].motion?.recordingId != minute.motion?.recordingId || (timeline[it].coverageMotion?.let { motion -> !motion.supportsCurrentStaging } == true) || timeline[it].inPhoneUse || timeline[it].inOnsetGuard ||
                 timeline[it].beforeEvidence || !timeline[it].inSchedule ||
                 timeline[it].coverageMotion?.placement == Placement.BEDSIDE }) return false
         val short = rollingFeatures(timeline, index - 4..index)
         if ((short.medianRms ?: Double.MAX_VALUE) > baseline.p70 || short.activeMinutes >= 3) return false
-        return features.validMinutes == DEEP_WINDOW_MINUTES && features.bedMinutes >= (if (baseline.narrowDistribution) 12 else 10) &&
+        return features.validMinutes >= DEEP_WINDOW_MINUTES - MAX_MINOR_GAP_MINUTES_IN_WINDOW && features.bedMinutes >= (if (baseline.narrowDistribution) 12 else 10) &&
             features.quietMinutes.toDouble() / features.validMinutes >= 0.80 &&
             features.activeMinutes <= 1 && features.medianRms!! <= baseline.p50 &&
             range.sumOf { timeline[it].motion?.movementEvents ?: 0 } <= ENTER_MAX_EVENTS &&
             range.none { (timeline[it].motion?.longestActiveMillis ?: 0) >= MAX_CONTINUOUS_ACTIVE_MILLIS }
+    }
+
+    /** Current evidence to retain an established Deep run; this is not final-stage output. */
+    private fun canMaintainDeep(index: Int, timeline: List<MinuteSignal>, baseline: NightlyBaseline?): Boolean {
+        val minute = timeline[index]
+        if (baseline == null || !minute.stageEligible || !minute.quiet) return false
+        val recent = maxOf(0, index - 4)..index
+        val features = rollingFeatures(timeline, recent)
+        return features.validMinutes == recent.count() && features.activeMinutes < 3 &&
+            (features.medianRms ?: Double.MAX_VALUE) <= baseline.p70
+    }
+
+    private fun windowBlockingReasons(index: Int, timeline: List<MinuteSignal>, baseline: NightlyBaseline?): List<Reason> {
+        if (index < DEEP_WINDOW_MINUTES - 1) return listOf(Reason.WINDOW_TOO_SHORT)
+        val range = index - DEEP_WINDOW_MINUTES + 1..index
+        return buildList {
+            if (range.any { it < 0 }) add(Reason.WINDOW_TOO_SHORT)
+            if (range.any { timeline[it].minorObservedGap || !timeline[it].observedQuality }) add(Reason.WINDOW_CONTAINS_GAP)
+            if (range.any { !timeline[it].couplingSupported }) add(Reason.COUPLING_INSUFFICIENT)
+            if (range.any { timeline[it].recordingBoundary }) add(Reason.RECORDING_BOUNDARY)
+            if (baseline == null) add(Reason.BASELINE_INSUFFICIENT)
+        }
+    }
+
+    private fun windowBlockingIntervals(index: Int, timeline: List<MinuteSignal>): List<LongRange> {
+        if (index < DEEP_WINDOW_MINUTES - 1) return emptyList()
+        return (index - DEEP_WINDOW_MINUTES + 1..index).filter {
+            !timeline[it].observedQuality || !timeline[it].couplingSupported || timeline[it].recordingBoundary
+        }.map { timeline[it].start..(timeline[it].end - 1) }
     }
 
     private fun stagingRole(minute: MinuteSignal): String {

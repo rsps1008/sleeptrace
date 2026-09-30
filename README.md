@@ -214,3 +214,11 @@ adb.exe -s <序號> shell am broadcast -n com.rsps1008.sleeptrace/.motion.Captur
 只找到既有合成 `real_night_style.csv`，沒有真實整晚 raw CSV；沒有虛構實機那一晚結果。凍結 HEAD 的 algorithm 4 對照 algorithm 5（報告 `docs/staging-v5-replay.txt`）：329 分鐘合成跨度，Deep 132→104、Light 197→42、未判定 0→183、Awake 0→0；切換 8→11、<5 分鐘睡眠片段 1→1。有效分鐘覆蓋兩版均 89.6657%；新版跨度感測覆蓋 89.7568%，可細分睡眠覆蓋 44.3769%；未判定主要原因為缺 motion 33 分鐘、覆蓋不足 1 分鐘、耦合不足 149 分鐘。這是工程回歸，不是真實生理準確度、深眠比例優化或與原生／醫療演算法等價的證明。
 
 目前只連接 Mi Note 10 與 Pixel 實體裝置，依測試的可丟棄模擬器限制未安裝、未跑會改資料／權限的 instrumentation。UI 實機目視、SQLite 升級裝置執行、Health Connect 真實寫入／刪除、採集實驗、Google 回報延遲、OEM／Doze／FIFO 完整性、PSG／穿戴對照與整夜耗電均尚未驗證。1 Hz 無法重建未觀測秒內動作；歷史摘要不能重建原始波形；所有耦合／分期門檻未校準，2 Hz 未比較準確度或耗電。Health Connect 成功亦不代表其他 App 已顯示。
+# V6 分期證據更新（2026-09-30）
+
+V6 將 AUTO 耦合的「首次建立」與「有效期限內續期」分開：首次建立仍需多次分散短動作；已建立、未失效且同一錄製片段內的新合格動作可續期，安靜不會續期。錄製／版本／睡眠窗邊界會清除舊證據，但同時存在的 handling、手機使用或缺資料仍會被排除，不能成為新 history。
+
+分期仍只在已接受的睡眠 session 內進行。沒有耦合、耦合失效、缺資料、基準不足或必要特徵不存在時，保留 `SLEEPING`（深淺未判定），不因 Sleep API 睡眠證據直接假設 `LIGHT`。featureVersion 5 有明確記錄的單一不超過 2 秒短缺口，缺口分鐘本身仍為 `SLEEPING`；只有後續完整分鐘符合嚴格 14/15 與最近五分鐘完整規則時，才可重新進 Deep。手機使用、handling、長缺口與任何比較邊界不可跨越。
+
+回放說明見 [`docs/staging-v6-replay.txt`](docs/staging-v6-replay.txt)；其中原 CSV 是 estimator-only，沒有跑 AUTO，且合成回放不是醫療或 PSG 驗證。演算法版本為 6，感測 featureVersion 維持 5。
+

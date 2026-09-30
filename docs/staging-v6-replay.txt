@@ -1,0 +1,39 @@
+SleepTrace staging V6 replay
+============================
+
+Fixture: app/src/test/resources/staging/real_night_style.csv
+Classification: ESTIMATOR-ONLY synthetic fixture.  It directly constructs
+featureVersion=4 MotionMinute values from the CSV and preserves the CSV
+placement.  It deliberately does NOT call AutomaticPlacement.resolve(), so it
+cannot validate AUTO establishment, renewal, expiry, or v5 collector time
+structure.  It is not a recorded user night, medical evidence, or PSG result.
+
+Fixed input: base=20000 minutes since epoch, UTC-independent epoch arithmetic,
+session=329 minutes, schedule=00:00-00:00, one 60-confidence Sleep API segment.
+
+Frozen V4 reference: Deep 132 min, Light 197 min, Sleeping 0 min, Awake 0 min.
+Frozen V5 reference (a41f233): Deep 104 min, Light 42 min, Sleeping 183 min,
+Awake 0 min.  Existing V5 report attributes primary Sleeping minutes to missing
+motion 33 min, insufficient coverage 1 min, coupling insufficient 149 min.
+Those are primary-reason buckets, not proof that 149 min were expiry.
+
+V6 actual estimator-only replay: Deep 104 min, Light 42 min, Sleeping 183 min,
+Awake 0 min.  The V6 coupling renewal and explicit-v5 minor-gap policy do not
+alter this v4/direct-placement fixture; this is expected and is not hidden by
+changing placement, RMS, coverage, or the fixture.
+
+V4->V5/V6 aligned conversion (milliseconds):
+  DEEP -> DEEP       6,240,000 (104 min)
+  DEEP -> LIGHT      1,020,000 (17 min)
+  DEEP -> SLEEPING     660,000 (11 min)
+  LIGHT -> DEEP      1,500,000 (25 min)
+  LIGHT -> LIGHT     1,500,000 (25 min)
+  LIGHT -> SLEEPING 10,320,000 (172 min)
+  AWAKE -> *                  0
+  SLEEPING -> *               0
+
+Therefore Deep 132->104 is a net -28 minutes: 17 minutes moved to Light and
+11 minutes moved to Sleeping, while 25 minutes of prior Light became Deep.
+The machine-generated V4->V6 matrix and changed interval list are regenerated
+by StagingReplayTest in app/build/reports/.  The committed CSV copies below use
+the same millisecond values for review.

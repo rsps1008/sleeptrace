@@ -3,6 +3,9 @@ package com.rsps1008.sleeptrace
 import com.rsps1008.sleeptrace.motion.MINUTE_MS
 import com.rsps1008.sleeptrace.motion.MotionLevel
 import com.rsps1008.sleeptrace.motion.MotionMinute
+import com.rsps1008.sleeptrace.motion.MotionAccumulator
+import com.rsps1008.sleeptrace.motion.CouplingEvidence
+import com.rsps1008.sleeptrace.motion.CouplingState
 import com.rsps1008.sleeptrace.motion.MotionSleepEstimator
 import com.rsps1008.sleeptrace.motion.Placement
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
@@ -123,6 +126,29 @@ class SleepStageEstimatorTest {
 
         assertEquals(SleepStage.SLEEPING, stageAt(stages, base + 40 * MINUTE_MS))
         assertFalse(stages.any { it.stage == SleepStage.DEEP && it.startMillis < base + 41 * MINUTE_MS && it.endMillis > base + 40 * MINUTE_MS })
+    }
+
+    @Test fun `one explicit short v5 gap stays Sleeping but later complete minutes may re-enter Deep`() {
+        val session = session(base, 80)
+        val rows = (0 until 80).map { index ->
+            val rms = if (index < 56) 0.010 + (index % 6) * .001 else .040
+            MotionMinute(base + index * MINUTE_MS, 60_000, 0, rms * rms * 60_000, 60, Placement.BED,
+                featureVersion = MotionAccumulator.CURRENT_FEATURE_VERSION, maxDelta = .02, movementEvents = 0,
+                longestActiveMillis = 0, quietTailMillis = 60_000, longestGapMillis = if (index == 40) 1_000 else 0,
+                postureDelta = .01, recordingId = 7, coupling = CouplingEvidence(CouplingState.HELD, MINUTE_MS, null))
+        }
+        val stages = estimate(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
+        assertEquals(SleepStage.SLEEPING, stageAt(stages, base + 40 * MINUTE_MS))
+        assertEquals(SleepStage.DEEP, stageAt(stages, base + 55 * MINUTE_MS))
+        val result = SleepStageEstimator.analyze(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)), schedule)
+        assertTrue(result.minutes[41].windowBlockingReasons.contains(SleepStageEstimator.Reason.WINDOW_CONTAINS_GAP))
+    }
+
+    @Test fun `unknown placement with no coupling never becomes Light or Deep`() {
+        val session = session(base, 60)
+        val rows = motion(base, 60, Placement.UNKNOWN)
+        val stages = estimate(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
+        assertTrue(stages.all { it.stage == SleepStage.SLEEPING })
     }
 
     @Test fun `bedside and unknown placement never infer Deep from phone stillness`() {

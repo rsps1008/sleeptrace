@@ -1,0 +1,11 @@
+relative_start_ms,relative_end_ms,old_stage,new_stage,duration_ms,fixture_feature_version,placement,notes
+0,2040000,LIGHT,SLEEPING,2040000,4,CSV,estimator-only; current primary reason coupling insufficient
+3900000,4200000,DEEP,SLEEPING,300000,4,CSV,estimator-only
+4200000,6060000,LIGHT,SLEEPING,1860000,4,CSV,estimator-only
+6300000,6900000,DEEP,LIGHT,600000,4,CSV,estimator-only
+7860000,7980000,DEEP,LIGHT,120000,4,CSV,estimator-only
+9660000,9960000,DEEP,SLEEPING,300000,4,CSV,estimator-only
+9960000,12060000,LIGHT,SLEEPING,2100000,4,CSV,estimator-only
+12600000,12900000,DEEP,LIGHT,300000,4,CSV,estimator-only
+15360000,15420000,DEEP,SLEEPING,60000,4,CSV,estimator-only
+15420000,19740000,LIGHT,SLEEPING,4320000,4,CSV,estimator-only

@@ -253,6 +253,12 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 
 ## 2026-09-30 分期規則 v5：未判定、耦合及可觀測特徵
 
+## 2026-09-30 V6 分期證據修正
+
+正式分期規則版本為 6，採集 featureVersion 仍為 5。首次 AUTO 耦合建立保持三個分散短動作、30 分鐘 history、八分鐘跨度；在既有支持尚未失效、同一 recording/version/window 且沒有使用／handling／嚴重缺資料反證時，一個新的合格動作可更新最後正向證據。安靜不能續期；失效或反證後單次動作不能復活。邊界會先清狀態，且同分鐘 handling／缺資料仍不可加入新 history。
+
+featureVersion 5 的一個明確 2 秒內短缺口可作為後續完整分鐘入 Deep 的窗口上下文，但缺口分鐘自身永遠維持 SLEEPING，最多一個、其餘至少十四個完整合格分鐘且最後五分鐘完整；未知位置的舊摘要不適用。手機使用、handling、長缺口、耦合失效及 recording/version/window 邊界均為硬中斷。`MinuteDiagnostic` 保留 current eligibility、window blockers/intervals、baseline 與 transition diagnostics。詳見 `docs/staging-v6-changes.md`；CSV replay 是 estimator-only，不能驗證 AUTO，也不是醫療或 PSG 證據。
+
 以下是目前實作；前面按日期保存的驗證紀錄描述各次歷史版本，不代表目前規則。
 
 四種階段使用同一 `sleepParts()` 時間線：AWAKE 是已知清醒／實際手機使用；LIGHT、DEEP 是有資料能力的工程推估；SLEEPING 是已接受的睡眠 session 內深淺未判定。未成立候選、session 外或排程空白不會補成睡眠。部分 stage 空白、無 motion、無基準、無耦合或低訊號差異不能假裝淺眠。清醒採裁切後聯集，幾秒使用只扣幾秒，首尾清醒保留；矛盾睡眠 stage 重疊回未判定，AWAKE 優先。深 + 淺 + 未判定 = 睡眠，睡眠 + 清醒 = session 跨度，全部先計毫秒。
