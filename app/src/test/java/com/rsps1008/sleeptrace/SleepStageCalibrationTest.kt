@@ -42,7 +42,7 @@ class SleepStageCalibrationTest {
         val slow = capture(1000)
         for (step in listOf(100L, 20L)) {
             val fast = capture(step)
-            assertTrue(fast.all { it.sampleCount in 58..62 && it.featureVersion == 2 })
+            assertTrue(fast.all { it.sampleCount in 58..62 && it.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION })
             slow.zip(fast).forEach { (a,b) ->
                 assertEquals(a.rms, b.rms, .01)
                 assertTrue(kotlin.math.abs(a.activeMillis - b.activeMillis) <= 1_000L)
@@ -98,7 +98,13 @@ class SleepStageCalibrationTest {
     }
 
     @Test fun `current feature cadence ends at twelve hundred milliseconds`() {
-        for ((period, expected) in listOf(1_000L to 2, 1_100L to 2, 1_200L to 2, 1_300L to 3, 2_000L to 3)) {
+        for ((period, expected) in listOf(
+            1_000L to MotionAccumulator.CURRENT_FEATURE_VERSION,
+            1_100L to MotionAccumulator.CURRENT_FEATURE_VERSION,
+            1_200L to MotionAccumulator.CURRENT_FEATURE_VERSION,
+            1_300L to MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION,
+            2_000L to MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION
+        )) {
             val engine = MotionAccumulator(SamplingPlan.choose(100, (period * 1_000).toInt()), Placement.BED)
             for (ms in 0L..60_000L step period) engine.add(base + ms, 0.01, 0.0, 9.81)
             assertTrue("period=$period", engine.drain(base + 60_000).all { it.featureVersion == expected })
@@ -129,11 +135,12 @@ class SleepStageCalibrationTest {
         assertTrue(hourly.all { it in 3_590_000L..3_610_000L })
     }
 
-    @Test fun `v1 values never influence v2 nightly baseline`() {
-        val v2 = (60 until 120).map { row(it, .002 + (it % 10) * .001) }
-        val modernOnly = result(v2)
+    @Test fun `legacy v1 and v2 values never influence current v4 nightly baseline`() {
+        val v4 = (60 until 120).map { row(it, .002 + (it % 10) * .001) }
+        val modernOnly = result(v4)
         for (legacyRms in listOf(0.0001, 0.9)) {
-            val mixed = (0 until 60).map { row(it, legacyRms).copy(featureVersion = 1) } + v2
+            val mixed = (0 until 30).map { row(it, legacyRms).copy(featureVersion = MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION) } +
+                (30 until 60).map { row(it, legacyRms).copy(featureVersion = MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION) } + v4
             val staged = result(mixed)
             assertEquals(modernOnly.baseline!!.p50, staged.baseline!!.p50, 1e-12)
             assertEquals(60, staged.baseline.bedMinutes)
@@ -141,6 +148,14 @@ class SleepStageCalibrationTest {
             assertTrue(staged.minutes.take(60).all { it.stage == SleepStage.LIGHT && !it.stagingMotionUsable })
             for (i in 60..66) assertEquals(SleepStage.LIGHT, stage(staged, i))
         }
+    }
+
+    @Test fun `legacy fixed v2 alone cannot create current feature deep staging`() {
+        val legacyV2 = rows().map { it.copy(featureVersion = MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION) }
+        val staged = result(legacyV2)
+        assertNull(staged.baseline)
+        assertEquals(0, staged.currentFeatureValidMinutes)
+        assertEquals(0L, deepMinutes(staged))
     }
 
     @Test fun `legacy only has no baseline and preserves existing staged intervals`() {
@@ -179,7 +194,11 @@ class SleepStageCalibrationTest {
     }
 
     @Test fun `feature definition boundary blocks deep entry despite twelve other valid minutes`() {
-        for (version in listOf(1, MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION)) {
+        for (version in listOf(
+            MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION,
+            MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION,
+            MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION
+        )) {
             val mixed = rows().map { if (((it.startMillis - base) / MINUTE_MS).toInt() == 25) it.copy(featureVersion = version) else it }
             val staged = result(mixed, usage = listOf(UsageInterval(base, base + 5 * MINUTE_MS)), evidenceStart = 14)
             assertNotEquals("enter_stable_window", staged.minutes[34].event)
@@ -226,9 +245,10 @@ class SleepStageCalibrationTest {
         assertTrue(recomputed.none { it.stage == SleepStage.DEEP })
     }
 
-    @Test fun `feature storage priority favors current over cadence and legacy`() {
-        assertTrue(MotionFeaturePolicy.storagePriority(2) > MotionFeaturePolicy.storagePriority(3))
-        assertTrue(MotionFeaturePolicy.storagePriority(3) > MotionFeaturePolicy.storagePriority(1))
+    @Test fun `feature storage priority favors v4 then v3 then legacy v1 and v2`() {
+        assertTrue(MotionFeaturePolicy.storagePriority(MotionAccumulator.CURRENT_FEATURE_VERSION) > MotionFeaturePolicy.storagePriority(MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION))
+        assertTrue(MotionFeaturePolicy.storagePriority(MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION) > MotionFeaturePolicy.storagePriority(MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION))
+        assertEquals(MotionFeaturePolicy.storagePriority(MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION), MotionFeaturePolicy.storagePriority(MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION))
     }
 
     @Test fun `diagnostic roles distinguish stay-only and incompatible features`() {
@@ -258,7 +278,7 @@ class SleepStageCalibrationTest {
     }
 
     @Test fun `placement local evidence does not cross a feature version boundary`() {
-        val legacy = (0 until 45).map { i -> row(i, .5, Placement.AUTO, if (i % 10 == 0) 1_000 else 0).copy(featureVersion = 1) }
+        val legacy = (0 until 45).map { i -> row(i, .5, Placement.AUTO, if (i % 10 == 0) 1_000 else 0).copy(featureVersion = MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION) }
         val current = (45 until 105).map { i -> row(i, .02, Placement.AUTO, if (i % 10 == 5) 1_000 else 0) }
         val isolated = AutomaticPlacement.resolve(current, emptyList()).associateBy { it.startMillis }
         val mixed = AutomaticPlacement.resolve(legacy + current, emptyList()).associateBy { it.startMillis }
@@ -441,21 +461,21 @@ class SleepStageCalibrationTest {
         for(i in 0..33) assertEquals(SleepStage.LIGHT,stage(staged,i))
     }
 
-    @Test fun `synthetic night legacy and mixed versions build baseline only from v2`() {
+    @Test fun `synthetic night legacy and mixed versions build baseline only from v4`() {
         val fixture = requireNotNull(javaClass.getResourceAsStream("/staging/real_night_style.csv")).bufferedReader().useLines { lines ->
             lines.drop(1).map { line ->
                 val v=line.split(','); val cover=(v[1].toDouble()*1000).toLong(); val rms=v[3].toDouble()
                 MotionMinute(base+v[0].toLong()*MINUTE_MS,cover,(v[2].toDouble()*1000).toLong(),rms*rms*cover,60,Placement.valueOf(v[4]))
             }.toList()
         }
-        val allLegacy = fixture.map { it.copy(featureVersion = 1) }
+        val allLegacy = fixture.map { it.copy(featureVersion = MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION) }
         assertNull(result(allLegacy, 329).baseline)
         assertEquals(0L, deepMinutes(result(allLegacy, 329)))
-        val mixed = fixture.map { if ((it.startMillis - base) / MINUTE_MS < 133) it.copy(featureVersion = 1) else it }
+        val mixed = fixture.map { if ((it.startMillis - base) / MINUTE_MS < 133) it.copy(featureVersion = MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION) else it }
         val mixedResult = result(mixed, 329)
-        val v2OnlyResult = result(mixed.filter { it.featureVersion == 2 }, 329)
-        assertEquals(v2OnlyResult.baseline!!.p50, mixedResult.baseline!!.p50, 1e-12)
-        assertEquals(v2OnlyResult.baseline.bedMinutes, mixedResult.baseline.bedMinutes)
+        val v4OnlyResult = result(mixed.filter { it.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION }, 329)
+        assertEquals(v4OnlyResult.baseline!!.p50, mixedResult.baseline!!.p50, 1e-12)
+        assertEquals(v4OnlyResult.baseline.bedMinutes, mixedResult.baseline.bedMinutes)
         for (i in 133..139) assertEquals(SleepStage.LIGHT, stage(mixedResult, i))
         assertTrue(deepMinutes(mixedResult) < deepMinutes(result(fixture, 329)))
     }

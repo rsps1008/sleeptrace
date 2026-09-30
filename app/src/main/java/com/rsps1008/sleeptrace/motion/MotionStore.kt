@@ -61,7 +61,7 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
                 // Restarting or changing mode can yield two partial contributions to the same minute.
                 val existing = existingByStart[item.startMillis]
                 // Keep feature definitions separate. Their version numbers are identifiers, not a
-                // monotonic quality scale (current v2 outranks incompatible cadence v3).
+                // Version identifiers are not quality ranks (current v4 outranks cadence v3).
                 val incomingPriority = MotionFeaturePolicy.storagePriority(item.featureVersion)
                 val existingPriority = existing?.let { MotionFeaturePolicy.storagePriority(it.featureVersion) }
                 if (existing != null && existingPriority!! > incomingPriority) return@forEach

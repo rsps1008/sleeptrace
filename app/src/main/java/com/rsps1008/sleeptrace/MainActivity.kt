@@ -123,8 +123,37 @@ class MainActivity : AppCompatActivity() {
                             (Math.floorDiv(minute.startMillis, MINUTE_MS) * MINUTE_MS) to Triple(session, result, minute)
                         }
                     }.toMap()
+                    data class SessionExportStats(
+                        val legacyFeatureMinutes: Int,
+                        val currentFeatureMinutes: Int,
+                        val cadenceIncompatibleMinutes: Int,
+                        val bedMinutes: Int,
+                        val unknownMinutes: Int,
+                        val deepEnterEvents: Int,
+                        val deepExitEvents: Int
+                    )
+                    val exportStats = sessions.associateWith { session ->
+                        val sessionRows = resolved.filter {
+                            it.startMillis >= session.startMillis && it.startMillis < session.endMillis
+                        }
+                        val stageResult = diagnostics[session]
+                        SessionExportStats(
+                            legacyFeatureMinutes = sessionRows.count {
+                                it.featureVersion == MotionAccumulator.LEGACY_CALLBACK_FEATURE_VERSION ||
+                                    it.featureVersion == MotionAccumulator.LEGACY_FIXED_FEATURE_VERSION
+                            },
+                            currentFeatureMinutes = sessionRows.count { it.supportsCurrentStaging },
+                            cadenceIncompatibleMinutes = sessionRows.count {
+                                it.featureVersion == MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION
+                            },
+                            bedMinutes = sessionRows.count { it.placement == Placement.BED },
+                            unknownMinutes = sessionRows.count { it.placement == Placement.UNKNOWN },
+                            deepEnterEvents = stageResult?.minutes?.count { it.event == "enter_stable_window" } ?: 0,
+                            deepExitEvents = stageResult?.minutes?.count { it.event?.startsWith("exit_") == true } ?: 0
+                        )
+                    }
                     contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
-                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,valid_motion_minute_percent,sensor_coverage_percent,first_motion_delay_minutes,staging_motion_usable,staging_motion_role,staging_motion_exclusion_reason,baseline_feature_version,baseline_sample_count,baseline_eligible_minutes,current_feature_valid_minutes,baseline_reason,v1_minutes,v2_minutes,v3_minutes,bed_minutes,unknown_minutes,deep_enter_events,deep_exit_events\r\n")
+                        writer.write("timestamp_local,covered_seconds,active_seconds,delta_rms_m_s2,sample_count,placement,feature_version,resampled_sample_count,resolved_placement,motion_level,session_id,nightly_p25,nightly_p35,nightly_p50,nightly_p65,nightly_p70,nightly_p75,rolling_median_rms,computed_stage,stored_stage,staging_event,valid_motion_minute_percent,sensor_coverage_percent,first_motion_delay_minutes,staging_motion_usable,staging_motion_role,staging_motion_exclusion_reason,baseline_feature_version,baseline_sample_count,baseline_eligible_minutes,current_feature_valid_minutes,baseline_reason,legacy_feature_minutes,current_feature_minutes,cadence_incompatible_minutes,bed_minutes,unknown_minutes,deep_enter_events,deep_exit_events\r\n")
                         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(zone)
                         rows.forEach { minute ->
                             writer.append(formatter.format(Instant.ofEpochMilli(minute.startMillis))).append(',')
@@ -137,6 +166,7 @@ class MainActivity : AppCompatActivity() {
                             val session = diagnostic?.first
                             val result = diagnostic?.second
                             val feature = diagnostic?.third
+                            val stats = session?.let(exportStats::get)
                             val baseline = result?.baseline
                             val storedStage = session?.stageIntervals?.firstOrNull {
                                 it.startMillis < minute.startMillis + MINUTE_MS && it.endMillis > minute.startMillis
@@ -161,13 +191,13 @@ class MainActivity : AppCompatActivity() {
                                 result?.baselineEligibleMinutes?.toString().orEmpty(),
                                 result?.currentFeatureValidMinutes?.toString().orEmpty(),
                                 result?.baselineReason.orEmpty(),
-                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.featureVersion == 1 }.toString(),
-                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION }.toString(),
-                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.featureVersion == MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION }.toString(),
-                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.placement == Placement.BED }.toString(),
-                                resolved.count { session != null && it.startMillis >= session.startMillis && it.startMillis < session.endMillis && it.placement == Placement.UNKNOWN }.toString(),
-                                result?.minutes?.count { it.event == "enter_stable_window" }?.toString().orEmpty(),
-                                result?.minutes?.count { it.event?.startsWith("exit_") == true }?.toString().orEmpty()
+                                stats?.legacyFeatureMinutes?.toString().orEmpty(),
+                                stats?.currentFeatureMinutes?.toString().orEmpty(),
+                                stats?.cadenceIncompatibleMinutes?.toString().orEmpty(),
+                                stats?.bedMinutes?.toString().orEmpty(),
+                                stats?.unknownMinutes?.toString().orEmpty(),
+                                stats?.deepEnterEvents?.toString().orEmpty(),
+                                stats?.deepExitEvents?.toString().orEmpty()
                             )
                             writer.append(',').append(extra.joinToString(",")).append("\r\n")
                         }

@@ -9,7 +9,7 @@ import com.rsps1008.sleeptrace.motion.Placement
 
 /** Offline engineering estimates inside an accepted session; never a clinical sleep stage. */
 object SleepStageEstimator {
-    const val ALGORITHM_VERSION = 2
+    const val ALGORITHM_VERSION = 3
     const val SLEEP_ONSET_GUARD_MILLIS = 15 * MINUTE_MS
     const val MINIMUM_BASELINE_MINUTES = 10
     const val DEEP_WINDOW_MINUTES = 15
@@ -44,7 +44,7 @@ object SleepStageEstimator {
         val minutes: List<MinuteDiagnostic>,
         val baselineFeatureVersion: Int? = baseline?.featureVersion,
         val baselineSampleCount: Int = baseline?.sampleCount ?: 0,
-        val baselineReason: String? = baseline?.reason ?: "insufficient_v2_bed_motion",
+        val baselineReason: String? = baseline?.reason ?: "insufficient_current_bed_motion",
         val sensorCoverageRatio: Double = motionCoverageRatio,
         val currentFeatureValidMinutes: Int = 0,
         val baselineEligibleMinutes: Int = 0
@@ -277,7 +277,7 @@ object SleepStageEstimator {
         motion.placement == Placement.BEDSIDE -> "bedside"
         motion.placement == Placement.UNKNOWN && minute.quiet -> null
         motion.placement == Placement.UNKNOWN -> "placement_unknown"
-        baseline == null -> "insufficient_v2_bed_motion"
+        baseline == null -> "insufficient_current_bed_motion"
         else -> null
         }
     }

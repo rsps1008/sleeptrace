@@ -14,7 +14,7 @@ enum class Placement { BED, BEDSIDE, AUTO, UNKNOWN }
 enum class MotionLevel { QUIET, ACTIVE, UNKNOWN }
 
 object MotionFeaturePolicy {
-    /** CURRENT compatible features outrank cadence-incompatible, which outrank legacy data. */
+    /** Current cadence-anchor features outrank cadence-incompatible, then normalized/callback legacy data. */
     fun storagePriority(featureVersion: Int): Int = when (featureVersion) {
         MotionAccumulator.CURRENT_FEATURE_VERSION -> 3
         MotionAccumulator.CADENCE_INCOMPATIBLE_FEATURE_VERSION -> 2
@@ -81,8 +81,10 @@ data class MotionMinute(
 class MotionAccumulator(plan: SamplingPlan, private val placement: Placement) {
     companion object {
         const val FEATURE_SAMPLE_PERIOD_MS = 1_000L
-        const val CURRENT_FEATURE_VERSION = 2
+        const val LEGACY_CALLBACK_FEATURE_VERSION = 1
+        const val LEGACY_FIXED_FEATURE_VERSION = 2
         const val CADENCE_INCOMPATIBLE_FEATURE_VERSION = 3
+        const val CURRENT_FEATURE_VERSION = 4
         const val MAX_CURRENT_STAGING_CADENCE_MS = 1_200L
         private const val JITTER_TOLERANCE_MS = 100L
     }
