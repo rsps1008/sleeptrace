@@ -94,8 +94,8 @@
 ## 4. 自動同步、資料完整性與重試
 
 - 現有狀態為 `PENDING`、`SYNCING`、`SYNCED`、`FAILED_RETRYABLE`、`FAILED_PERMANENT`、`SKIPPED`、`RETIRED`、`RETIRED_FAILED_PERMANENT`。舊 `FAILED` 轉成 `FAILED_RETRYABLE`；`NEEDS_REVIEW` 轉成 `PENDING`，兩者都不是執行期狀態。
-- `SleepReconcileWorker` 先重新分析，再呼叫 `HealthConnectSync.syncPendingOutcome()`；暫態錯誤回傳 retry，永久性錯誤保留 `FAILED_PERMANENT` 並回傳 failure，取消例外仍向外傳遞。永久 batch failure 會逐筆 fallback，只有單筆仍失敗的 session 才標成永久失敗。立即工作使用唯一名稱 `sleeptrace_reconcile_now`／`KEEP`；每日 recovery 為 24 小時週期、6 小時 flex、`BatteryNotLow` constraint／`UPDATE`。睡眠窗結束仍會排入一次立即整理。
-- Reconcile 只重新分析最近 48 小時的原始 Sleep API／動作資料，以及仍為 `PENDING`、`SYNCING` 或 `FAILED_RETRYABLE` 的舊 session；`FAILED_PERMANENT` 不再拉長歷史掃描範圍。只對已結束的排程睡眠窗查詢完整 UsageStats，並以該窗自己的權限狀態與 snapshot 分析；未結束窗口延後處理。
+- `SleepReconcileWorker` 先重新分析，再呼叫 `HealthConnectSync.syncPendingOutcome()`；Health Connect 退休刪除及新增寫入以程序內 Mutex 序列化，確保可能已在途的舊寫入完成後才刪除其 clientRecordId。暫態錯誤回傳 retry，永久性錯誤保留 `FAILED_PERMANENT` 並回傳 failure，取消例外仍向外傳遞。永久 batch failure 會逐筆 fallback，只有單筆仍失敗的 session 才標成永久失敗。立即工作使用唯一名稱 `sleeptrace_reconcile_now`／`KEEP`；每日 recovery 為 24 小時週期、6 小時 flex、`BatteryNotLow` constraint／`UPDATE`。睡眠窗結束仍會排入一次立即整理。
+- Reconcile 只重新分析最近 48 小時的原始 Sleep API／動作資料，以及仍為 `PENDING`、`SYNCING` 或 `FAILED_RETRYABLE` 的舊 session；`FAILED_PERMANENT` 不再拉長歷史掃描範圍。規則版本升級時，另對此近期範圍內、完整落在已結束排程睡眠窗且未手動修正的自動 session 執行撤銷核對：新版候選仍匹配者保留；不再產生且未同步者保留本機列並標成 `SKIPPED`；已同步或可能已送出的 `SYNCED`／`SYNCING`／`FAILED_RETRYABLE`／`FAILED_PERMANENT` 保留列並標成 `RETIRED`，由 Health Connect 刪除流程處理。手動修正、未結束窗口及窗口外資料不受這項撤銷影響。只對已結束的排程睡眠窗查詢完整 UsageStats，並以該窗自己的權限狀態與 snapshot 分析；未結束窗口延後處理。
 - 暫時失敗以 10 分鐘起的指數退避重試；時間受系統排程影響，不能承諾即時或精準分鐘數。App 恢復前景、健康授權回傳、時間修正及感測／Sleep API 完成事件也會排入工作。
 - 沒有健康寫入授權時保留本機紀錄，待授權後或後續工作自動繼續，不要求逐筆同意。
 - `AutomaticSyncQueue` 以 Mutex 避免同程序同步併行，只自動選取 PENDING／FAILED_RETRYABLE／中斷殘留的 SYNCING；`FAILED_PERMANENT` 不會被週期工作重新送出。權限恢復時可將永久寫入失敗恢復為 PENDING，詳情頁亦提供手動重試。取消例外必須向外傳遞，不可吞成一般失敗。
@@ -104,7 +104,7 @@
 - `SleepStore` 在外部寫入前以可檢查成功與否的同步 `commit()` 保存 ID／版本；不要改成忽略結果的非同步保存，否則中斷後可能失去去重依據。時間修正、永久失敗手動重試、Health Connect 權限恢復與 UsageStats 權限由無到有都更新 work generation／dirty flag，避免 `KEEP` 合併時遺失變更。時間修正只保存新的範圍；UsageStats 依 `(windowStart, windowEnd)` 保存為一次 snapshot，再由分析與上傳共用，不在各階段重新查詢。
 - 使用 `updateIfCurrent`，同步舊請求完成時不能覆蓋已修正的新資料。
 - `mergeSleepSessions` 保留歷史及穩定 ID；起訖／清醒／分期內容改變時遞增 `revision`，已同步紀錄回到 PENDING。內容相同不重傳；手動修正的時間不被自動分析覆蓋，但分期會依修正後區間重新計算。
-- 新候選若同時匹配多筆既有紀錄，保留一筆既有穩定 ID 並遞增版本作為新版；其餘未同步碎片直接取代，已同步碎片標記為 `RETIRED`，Health Connect 成功依 clientRecordId 移除後才繼續送出新版。刪除失敗會保留 `RETIRED` 並重試，避免留下重複遠端資料。
+- 新候選若同時匹配多筆既有紀錄，保留一筆既有穩定 ID 並遞增版本作為新版；其餘未同步碎片直接取代，已同步或可能已送出的碎片標記為 `RETIRED`，Health Connect 成功依 clientRecordId 移除後才繼續送出新版。規則升版撤銷的未同步列標為 `SKIPPED` 並保留本機歷史；已同步或可能已送出的列使用相同 `RETIRED` 刪除流程，不直接刪除本機列。刪除失敗會保留 `RETIRED` 並重試，避免留下重複遠端資料。
 - 寫入 `SleepSessionRecord`，`Metadata.clientRecordId = session.id`、`clientRecordVersion = revision`。重試保持同一 ID／版本；資料修正才增加版本。
 - `normalizedAwake` 負責裁切並合併重疊手機使用區間；`sleepParts` 將 session 切成 AWAKE／LIGHT／DEEP，舊資料沒有 stage intervals 時保留 SLEEPING fallback。Health Connect 1.1.0 支援並使用 `STAGE_TYPE_AWAKE`／`STAGE_TYPE_LIGHT`／`STAGE_TYPE_DEEP` 常數；不使用 hardcode stage 數值。本機扣除的手機使用時間與上傳階段必須一致。
 - Health Connect 系統健康資料使用說明頁與 Android 13 以下套件可見性已宣告；不是額外的 App 同意流程。
@@ -248,3 +248,5 @@ Debug APK：`app/build/outputs/apk/debug/app-debug.apk`。JVM 測試結果：`ap
 2026-09-30 migration／feature-definition 修正：將 `ALGORITHM_VERSION` 升至 3，使已標記 version 2 的裝置重新整理近期睡眠；featureVersion 4 專指 cadence-anchor 特徵，與曾使用 epoch-second bucket 的 v2 隔離。v1/v2 為 legacy、v3 為 cadence-incompatible、v4 為 current，storage priority v4 > v3 > v2 > v1。CSV session-level 統計改為每 session 預先彙總一次，欄位使用 legacy/current/cadence-incompatible 語意名稱。驗證結果另見本輪回報。
 
 2026-09-30 motion evidence／storage priority／reconcile migration 修正：安靜候選只累積 v4 BED／QUIET；v3 BED／ACTIVE 可結束動作區段或降低既有候選分數，v3 QUIET 及 v1/v2 不提供睡眠正向證據。storage priority 明確為 v4 > v3 > v2 > v1；規則版本升至 4，讓先前已標記版本 3 的裝置重新整理近期 session。全量 `testDebugUnitTest` 113 項通過，lintDebug 25 warnings／0 errors，Debug、AndroidTest APK 與 Release 建置成功；儲存／遷移 instrumentation 僅編譯，未在沒有可丟棄模擬器的環境執行。
+
+2026-09-30 規則遷移撤銷：升版整理會核對近期已完成睡眠窗內未手動修正的自動 session；新版不再產生者保留本機列，未同步列標為 `SKIPPED`，已同步或可能已送出的列標為 `RETIRED` 並走 Health Connect 刪除；手動修正、新候選匹配、未完成睡眠窗與窗口外歷史保留。新增 JVM policy／merge regression 與隔離 SQLite persistence instrumentation。117 個 JVM 測試通過，lintDebug 25 warnings／0 errors，Debug、AndroidTest APK 與 Release 建置成功；SQLite instrumentation 僅編譯，未在實體裝置執行；Health Connect 實際刪除未連服務驗證。

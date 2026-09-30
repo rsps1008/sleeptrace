@@ -92,14 +92,23 @@ class SleepStore(context: Context) {
         migrateSessions()
         eventStore.upsertSession(session)
     }
-    fun mergeCalculated(calculated: List<SleepSession>, analysisStartMillis: Long, analysisEndMillis: Long) = synchronized(sessionLock) {
+    fun mergeCalculated(
+        calculated: List<SleepSession>,
+        analysisStartMillis: Long,
+        analysisEndMillis: Long,
+        invalidatedAutomaticSessionIds: Set<String> = emptySet(),
+        expectedGenerationForInvalidation: Long? = null
+    ) = synchronized(sessionLock) {
         migrateSessions()
         val existing = eventStore.sessionsForReconciliation(
             startMillis = analysisStartMillis,
             endMillis = analysisEndMillis,
             unresolvedStates = RECONCILIATION_STATES
         )
-        val merged = mergeSleepSessions(existing, calculated)
+        val safeInvalidatedIds = if (expectedGenerationForInvalidation != null &&
+            AutomaticWorkSignals.generation(appContext) != expectedGenerationForInvalidation
+        ) emptySet() else invalidatedAutomaticSessionIds
+        val merged = mergeSleepSessions(existing, calculated, safeInvalidatedIds)
         val existingById = existing.associateBy { it.id }
         val mergedIds = merged.mapTo(mutableSetOf()) { it.id }
         val removedIds = existing.asSequence()

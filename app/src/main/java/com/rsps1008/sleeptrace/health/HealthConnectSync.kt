@@ -18,6 +18,8 @@ import com.rsps1008.sleeptrace.sleep.SleepStage
 import kotlinx.coroutines.CancellationException
 import java.io.IOException
 import com.rsps1008.sleeptrace.sleep.sleepParts
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.time.Instant
 import java.time.ZoneId
 
@@ -79,7 +81,12 @@ class HealthConnectSync(private val context: Context) {
         return syncPendingOutcome() == SyncOutcome.SUCCESS
     }
 
-    suspend fun syncPendingOutcome(): SyncOutcome {
+    suspend fun syncPendingOutcome(): SyncOutcome = syncMutex.withLock {
+        syncPendingLocked()
+    }
+
+    /** Keep retirement deletes ordered after any in-flight insert that may have created the same ID. */
+    private suspend fun syncPendingLocked(): SyncOutcome {
         val store = context.sleepDependencies().store
         // Permission needs a system grant, not approval for each sleep record. Resume after grant/on launch.
         if (!available()) return SyncOutcome.FAILURE
@@ -118,7 +125,7 @@ class HealthConnectSync(private val context: Context) {
                 store.updateIfCurrent(session, session.copy(
                     state = SyncState.SKIPPED,
                     syncError = null,
-                    reason = "已由較完整的睡眠紀錄取代，舊的 Health Connect 資料已移除"
+                    reason = "舊的 Health Connect 睡眠資料已移除"
                 ))
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -132,5 +139,10 @@ class HealthConnectSync(private val context: Context) {
             }
         }
         return SyncOutcome.SUCCESS
+    }
+
+    companion object {
+        /** WorkManager immediate and periodic work have distinct names and may otherwise overlap. */
+        private val syncMutex = Mutex()
     }
 }

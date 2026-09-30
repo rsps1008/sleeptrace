@@ -201,4 +201,42 @@ class StagingStorageRuntimeTest {
         assertFalse(AutomaticWorkSignals.isDirty(context))
         assertEquals(4, prefs.getInt("reconciled_staging_version", 0))
     }
+
+    @Test fun ruleMigrationKeepsRetirementTombstonesInsteadOfDeletingRows() = isolated { context ->
+        val store = SleepStore(context)
+        val synced = SleepSession(
+            id = "old-synced", startMillis = 1_000, endMillis = 7_201_000,
+            confidence = 50, awakeMillis = 0, state = SyncState.SYNCED, reason = "old rule"
+        )
+        val pending = synced.copy(id = "old-pending", state = SyncState.PENDING)
+        val manual = synced.copy(id = "manual", manuallyEdited = true)
+        listOf(synced, pending, manual).forEach(store::upsert)
+
+        store.mergeCalculated(
+            calculated = emptyList(),
+            analysisStartMillis = 0,
+            analysisEndMillis = 3 * 60 * 60 * 1_000L,
+            invalidatedAutomaticSessionIds = setOf(synced.id, pending.id, manual.id),
+            expectedGenerationForInvalidation = AutomaticWorkSignals.generation(context)
+        )
+
+        val saved = store.sessions().associateBy { it.id }
+        assertEquals(setOf("old-synced", "old-pending", "manual"), saved.keys)
+        assertEquals(SyncState.RETIRED, saved.getValue("old-synced").state)
+        assertEquals(SyncState.SKIPPED, saved.getValue("old-pending").state)
+        assertEquals(manual, saved.getValue("manual"))
+
+        val generationFenced = synced.copy(id = "generation-fenced")
+        store.upsert(generationFenced)
+        val capturedGeneration = AutomaticWorkSignals.generation(context)
+        AutomaticWorkSignals.markDirty(context)
+        store.mergeCalculated(
+            calculated = emptyList(),
+            analysisStartMillis = 0,
+            analysisEndMillis = 3 * 60 * 60 * 1_000L,
+            invalidatedAutomaticSessionIds = setOf(generationFenced.id),
+            expectedGenerationForInvalidation = capturedGeneration
+        )
+        assertEquals(SyncState.SYNCED, store.session(generationFenced.id)?.state)
+    }
 }

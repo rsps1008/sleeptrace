@@ -109,6 +109,16 @@ class AutomaticSyncTest {
         assertEquals(SyncState.SYNCED, repo.rows.single().state)
     }
 
+    @Test fun `retired records are not reinserted by the automatic upload queue`() = runBlocking {
+        val repo = Repository(listOf(session(SyncState.RETIRED)))
+        var writes = 0
+
+        assertTrue(AutomaticSyncQueue.drain(repo::read, repo::update) { writes++ })
+
+        assertEquals(0, writes)
+        assertEquals(SyncState.RETIRED, repo.rows.single().state)
+    }
+
     @Test fun `cancellation propagates and does not become an ordinary failure`() = runBlocking {
         val repo = Repository(listOf(session()))
         try {
@@ -204,5 +214,57 @@ class AutomaticSyncTest {
         assertEquals(SyncState.PENDING, replacement.state)
         assertEquals(first.revision + 1, replacement.revision)
         assertEquals(SyncState.RETIRED, merged.single { it.id == "second" }.state)
+    }
+
+    @Test fun `rule migration only targets automatic sessions contained in completed windows`() {
+        val window = SleepWindow(0, 3 * 60 * 60 * 1_000L)
+        val sessions = listOf(
+            session(SyncState.SYNCED).copy(id = "automatic", startMillis = 1_000, endMillis = 7_201_000),
+            session().copy(id = "manual", startMillis = 1_000, endMillis = 7_201_000, manuallyEdited = true),
+            session().copy(id = "before-window", startMillis = -1, endMillis = 7_201_000),
+            session().copy(id = "after-window", startMillis = 1_000, endMillis = window.endMillis + 1),
+            session(SyncState.SKIPPED).copy(id = "already-skipped", startMillis = 1_000, endMillis = 7_201_000),
+            session(SyncState.RETIRED).copy(id = "already-retired", startMillis = 1_000, endMillis = 7_201_000)
+        )
+
+        assertEquals(
+            setOf("automatic"),
+            automaticSessionIdsEligibleForRuleRevocation(sessions, listOf(window))
+        )
+    }
+
+    @Test fun `rule migration retains local tombstones and retires remotely possible records`() {
+        val sessions = listOf(
+            session(SyncState.SYNCED).copy(id = "synced"),
+            session(SyncState.SYNCING).copy(id = "syncing"),
+            session(SyncState.FAILED_RETRYABLE).copy(id = "retryable"),
+            session(SyncState.FAILED_PERMANENT).copy(id = "permanent"),
+            session(SyncState.PENDING).copy(id = "pending"),
+            session(SyncState.SYNCED).copy(id = "manual", manuallyEdited = true),
+            session(SyncState.SKIPPED).copy(id = "skipped")
+        )
+
+        val merged = mergeSleepSessions(sessions, emptyList(), sessions.map { it.id }.toSet())
+
+        assertEquals("No invalidated local row may be deleted", sessions.size, merged.size)
+        assertEquals(SyncState.RETIRED, merged.single { it.id == "synced" }.state)
+        assertEquals(SyncState.RETIRED, merged.single { it.id == "syncing" }.state)
+        assertEquals(SyncState.RETIRED, merged.single { it.id == "retryable" }.state)
+        assertEquals(SyncState.RETIRED, merged.single { it.id == "permanent" }.state)
+        assertEquals(SyncState.SKIPPED, merged.single { it.id == "pending" }.state)
+        assertEquals(sessions.single { it.id == "manual" }, merged.single { it.id == "manual" })
+        assertEquals(sessions.single { it.id == "skipped" }, merged.single { it.id == "skipped" })
+    }
+
+    @Test fun `new candidate match prevents migration revocation`() {
+        val old = session(SyncState.SYNCED).copy(id = "old")
+        val candidate = old.copy(id = "new", endMillis = old.endMillis + 60_000)
+
+        val merged = mergeSleepSessions(listOf(old), listOf(candidate), setOf(old.id))
+
+        assertEquals(1, merged.size)
+        assertEquals(old.id, merged.single().id)
+        assertEquals(SyncState.PENDING, merged.single().state)
+        assertEquals(old.revision + 1, merged.single().revision)
     }
 }
