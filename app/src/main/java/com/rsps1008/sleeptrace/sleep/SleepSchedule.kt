@@ -45,8 +45,13 @@ data class SleepSchedule(
             .atZone(zone).toInstant().toEpochMilli()
         val endAt = minOf(requestedEnd, nextStart)
         val nominal = SleepWindow(startAt, endAt)
-        return SleepWindow(startAt, observationEnds[nominal]?.coerceIn(startAt + 1, nextStart) ?: endAt)
+        val effectiveEnd = if (isFullDayForStartDate(date)) endAt
+            else observationEnds[nominal]?.coerceIn(startAt + 1, nextStart) ?: endAt
+        return SleepWindow(startAt, effectiveEnd)
     }
+
+    /** Configuration semantics, independent of DST duration and next-day clipping. */
+    fun isFullDayForStartDate(date: LocalDate): Boolean = startMinuteFor(date) == endMinuteFor(date)
 
     /** Returns the scheduled window containing this instant, if one is active. */
     fun windowAt(timeMillis: Long, zone: ZoneId = ZoneId.systemDefault()): SleepWindow? {
@@ -90,7 +95,7 @@ data class SleepSchedule(
     fun overlaps(startMillis: Long, endMillis: Long) = intersections(startMillis, endMillis).isNotEmpty()
 
     fun requiresWindowBoundary(): Boolean =
-        observationEnds.isNotEmpty() || startMinute != endMinute || weekendStartMinute?.let { it != weekendEndMinute } == true
+        startMinute != endMinute || weekendStartMinute?.let { it != weekendEndMinute } == true
 
     private fun rangeLabel(start: Int, end: Int): String =
         "%02d:%02d–%02d:%02d".format(start / 60, start % 60, end / 60, end % 60)

@@ -34,22 +34,25 @@ class SleepUpdateReceiver : BroadcastReceiver() {
                     val samples = SleepClassifyEvent.extractEvents(intent).map {
                         ClassificationSample(it.timestampMillis, it.confidence, it.motion, it.light)
                     }
-                    store.appendSamples(samples)
                     val dependencies = context.sleepDependencies()
-                    val schedule = if (dependencies.preferences.configured()) dependencies.preferences.schedule() else null
-                    SleepTracker.syncSubscription(context, schedule, dependencies.motionSettings.enabled, System.currentTimeMillis())
-                    SleepWindowScheduler.schedule(context,
-                        schedule.takeIf { dependencies.motionSettings.enabled && SleepTracker.hasActivityRecognition(context) })
-                    val active = MotionService.active
-                    if (active != null) {
-                        active.refreshConfiguration()
-                    } else {
-                        if (dependencies.motionSettings.enabled && schedule?.windowAt(System.currentTimeMillis()) != null) {
-                            runCatching { MotionService.start(context) }.onFailure {
-                                dependencies.motionSettings.status = "Sleep API 已回報，但系統限制背景服務啟動；開啟 App 可恢復記錄"
+                    processSleepClassifications(samples, store::appendSamples,
+                        effectiveSchedule = {
+                            if (dependencies.preferences.configured()) dependencies.preferences.schedule() else null
+                        }, updateControls = { schedule ->
+                            SleepTracker.syncSubscription(context, schedule, dependencies.motionSettings.enabled, System.currentTimeMillis())
+                            SleepWindowScheduler.schedule(context,
+                                schedule.takeIf { dependencies.motionSettings.enabled && SleepTracker.hasActivityRecognition(context) })
+                            val active = MotionService.active
+                            if (active != null) {
+                                active.refreshConfiguration()
+                            } else {
+                                if (dependencies.motionSettings.enabled && schedule?.windowAt(System.currentTimeMillis()) != null) {
+                                    runCatching { MotionService.start(context) }.onFailure {
+                                        dependencies.motionSettings.status = "Sleep API 已回報，但系統限制背景服務啟動；開啟 App 可恢復記錄"
+                                    }
+                                }
                             }
-                        }
-                    }
+                    })
                 }
                 // Classification arrives frequently. Reconcile on completed segments or the periodic worker.
                 if (SleepSegmentEvent.hasEvents(intent)) WorkScheduler.reconcileSoon(context)

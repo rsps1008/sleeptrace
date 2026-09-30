@@ -6,9 +6,9 @@ App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 And
 
 ## 自動記錄睡眠
 
-2026-09-30 起床／延長觀測規則：排程結束是重新評估的時間，不是仍在睡眠時的硬性停止點。排程後半段若先有至少早 30 分鐘的 confidence ≥ 80 睡眠證據，再連續至少 3 筆 confidence ≤ 20、跨至少 20 分鐘、相鄰不超過 15 分鐘、最後一筆距現在不超過 10 分鐘，關閉窗口於這串低分的起點並排入自動統計／同步。單次低分、夜間短醒、缺資料或完全靜止不能提早關閉。
+2026-09-30 起床／延長觀測規則（2026-10-01 修正，僅適用非全天窗口）：排程結束是重新評估的時間，不是仍在睡眠時的硬性停止點。排程後半段若先有至少早 30 分鐘的 confidence ≥ 80 睡眠證據，再連續至少 3 筆 confidence ≤ 20、跨至少 20 分鐘、相鄰不超過 15 分鐘、最後一筆距現在不超過 10 分鐘，關閉窗口於這串低分的起點並排入自動統計／同步。單次低分、夜間短醒、缺資料或完全靜止不能提早關閉。
 
-接近排程結束前 20 分鐘起，最新分類仍為 confidence ≥ 80 且距現在不超過 20 分鐘時，實際觀測結束延至該證據之後 30 分鐘；持續新睡眠回報可續延。續延需回報時間仍位於既有觀測範圍，不能用後來另一段睡眠重新打開已中斷窗口。沒有近期睡眠支持時在目前有效結束時間完成觀測，不把未知或手機靜止當成睡眠。最多延至下一個排程開始，避免平日／週末窗口重疊；下一窗可接續觀測。門檻未校準，分類延遲／漏失仍可能影響結果。
+接近排程結束前 20 分鐘起，最新分類仍為 confidence ≥ 80 且距現在不超過 20 分鐘時，實際觀測結束延至該證據之後 30 分鐘；持續新睡眠回報可續延。續延需 now 不大於目前 effectiveEnd，且回報時間仍位於既有觀測範圍；恰在有效結束時可合法續期，超過後即使窗內高分晚到也不能重新延長。沒有近期睡眠支持時在目前有效結束時間完成觀測，不把未知或手機靜止當成睡眠。最多延至下一個排程開始，避免平日／週末窗口重疊；下一窗可接續觀測。門檻未校準，分類延遲／漏失仍可能影響結果。
 
 實際窗口以原排程起訖為鍵、有效結束及 closed 標記保存於已排除備份的 sleeptrace_motion；先同步 commit 成功，再通知工作。重啟及遲到回報不重新打開已完成窗口。所有 schedule 消費端（FGS、分類訂閱、鬧鐘、motion／API 候選、分期、UsageStats snapshot、Health Connect 完成檢查）使用同一有效窗口；設定畫面仍顯示使用者指定的時間。排程變更使用新的原始起訖鍵；新窗口不能套用舊快照。未完成窗口不統計；閉合窗口仍需現有候選證據與至少 30 分鐘有效睡眠，不能僅憑判定起床生成睡眠。暫停、低電量、1 Hz 與系統背景限制照常生效。有效窗口標記保留 14 天並在讀取排程時清理。以下歷史驗證中「排程結束後才統計」是舊版行為。
 
@@ -246,3 +246,27 @@ V7 修正 V6 首次建立誤把「當前分鐘必須有新動作」當成額外�
 ### 2026-09-30 起床與延長觀測驗證
 
 使用本機 JDK 21.0.10 執行 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --no-configuration-cache`：184 個 JVM 測試通過（含 9 個新增觀測規則測試），lint 25 warnings／0 errors，Debug、AndroidTest 與 unsigned Release APK 建置成功。`.gitattributes` 固定合成回放 fixture 及 v7 報告的 LF 換行，保留 HEAD 原始位元組，解決 Windows autocrlf 導致的雜湊／文字比對失敗；未覆寫回放預期或更改分期演算法。未執行 instrumentation、實機整夜觀測／耗電、Google 真實分類回報及 Health Connect 真實寫入。
+
+### 2026-10-01 observation code review 修正
+
+Review 基準及本次起始 HEAD 為 `ad7209d11db1210918e0eefb4e86bb0744223d7e`，main 分支原先乾淨。三項修正不變更 confidence／freshness／起床持續時間、1 Hz／FIFO、耦合／分期門檻、依賴或 DB schema。
+
+- 全天判斷使用窗口開始日的原始起訖設定及週末繼承，與 DST 的 23／25 小時實際跨度無關。全天不套 observation end，也不做起床 early-close／延長；保留 nominal 及下一窗開始的截斷語意。已完成 nominal 窗口仍由既有 completedWindows、UsageStats 與 analyzer 流程分析。requiresWindowBoundary 僅由原始平日／週末設定判斷，不由 observation map 非空判斷；label 仍顯示原設定。
+- 讀取時排除全天 override；只清理開始日適用全天且精確匹配目前 nominal key 的舊 observation。其他一般排程有效紀錄與無法確認的歷史 key 保留（原有 14 天 observation retention 仍生效）。不清除 session、UsageStats snapshot、Health Connect 或其他 SharedPreferences 欄位。
+- 一般窗口在既有起床判斷之後、extension 之前檢查 `now > effectiveEnd`，關閉於原有效結束，不接受 timestamp 仍在窗內的遲到高分續期；previous=null 亦適用。`now == effectiveEnd` 的合法睡眠續期保留，closed 立即返回原值，nextStart 上限不變。
+- `SleepPreferences.schedule()` 共同入口內部 withContext(IO)；阻塞 SP／SQLite／commit 及 observation 副作用離開 Main。internal 的 Android adapter 只從此入口呼叫，純 repository 供固定 clock／zone／儲存注入測試。同一把程序內 lock 涵蓋讀取、評估、commit、通知，取得鎖後才讀 clock；不能以舊評估覆寫新 closed。成功 commit → dirty → 非同步服務 refresh／reconcile；不在鎖內等待服務回呼。保存失敗明確拋錯且不通知。SP commit 失敗可能已更新記憶體，因此只回復本次受影響 observation keys，避免下一次讀取誤認已持久化；回復失敗也明確拋錯。沒有用 apply 取代 commit，沒有吞取消例外。
+- receiver 經 `processSleepClassifications` 保持 appendSamples → 正式 preferences effective schedule → 控制端更新；測試驗證遲到事件先入庫後仍保存 closure，FGS／分類／鬧鐘／UsageStats／候選使用相同有效範圍。MotionService 仍使用原 flush／停止流程，暫停、低電量與活動辨識授權限制未更動。
+
+新增 JVM repository／preferences 測試使用固定日期、UTC／America/New_York、磁碟儲存重建實例、受控 Main 執行緒與明確並行 barrier，無 Thread.sleep。另測實際 SP adapter 的 memory-before-disk 失敗／回復行為。Android integration tests 使用真實 Main Looper／SP／SQLite，資料庫與偏好名稱隔離，且僅允許可丟棄 emulator；沒有啟動服務、要求權限或寫 Health Connect。
+
+修正前新增 4 個重現測試，13 個 policy tests 中 4 項失敗：全天污染造成午後 windowAt=null、505／500／515 遲到續延至 530、無 previous 的 480／475／485 復活、end+1ms 續期。修正後相關 36 個 JVM tests 通過。Main-safety 的舊路徑依來源確認，新增測試在正式 schedule() 強制執行查詢／保存並確認離开受控 Main；沒有宣稱已在裝置執行修正前／後 StrictMode 驗證。
+
+本次實際完整命令（JDK `C:\Program Files\Java\jdk-21.0.10`，SDK 依 local.properties）：
+
+```powershell
+.\gradlew.bat testDebugUnitTest --tests '*SleepObservation*Test' --tests '*ObservationPreferencesPersistenceTest' --tests '*SleepScheduleTest' --no-configuration-cache
+.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --no-configuration-cache
+git diff --check
+```
+
+結果：相關 36 項、完整 205 項 JVM tests 均通過，0 failure／error；lint 26 warnings／0 errors（新增 UseKtx 建議在同步回復 SP 的 editor；保留直接 commit 以檢查保存結果）。Debug、AndroidTest、unsigned Release APK 建置成功；git diff --check 通過。205 項含原有 184 項及新增 21 項 JVM regression。新增 2 項 Android integration tests 已編譯，沒有執行 instrumentation。`adb devices -l` 只有清單標題、沒有裝置，因此無可丟棄 emulator；沒有安裝 APK、沒有操作實體手機／授權／Health Connect。未驗證 Android 程序真正終止重啟、實機整夜觀測／耗電、Google 真實 callback 延遲與 Health Connect 寫入。staging fixture／replay 文件、取樣／FIFO、耦合／分期、schema／依賴皆無變更，沒有設定 replay 更新環境變數。合成／JVM 回歸不是生理準確度或實機整夜驗證。

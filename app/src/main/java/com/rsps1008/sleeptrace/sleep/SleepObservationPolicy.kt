@@ -29,6 +29,10 @@ object SleepObservationPolicy {
             ordered.any { it.confidence >= 80 && it.timeMillis <= firstLow - 30 * MINUTE }
         if (wakeConfirmed) return ObservationEnd(minOf(end, firstLow!!), true)
 
+        // Event time inside the window does not excuse a callback arriving after it expired.
+        // Equality remains renewable: the boundary alarm may assess current sleep evidence.
+        if (now > end) return ObservationEnd(end, true)
+
         val latest = ordered.lastOrNull()
         val sleeping = latest != null && latest.confidence >= 80 && now - latest.timeMillis <= SLEEP_FRESHNESS &&
             latest.timeMillis <= end

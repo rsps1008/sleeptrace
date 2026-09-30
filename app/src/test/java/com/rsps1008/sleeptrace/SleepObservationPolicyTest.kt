@@ -8,6 +8,28 @@ import java.time.LocalDate
 import java.time.ZoneId
 
 class SleepObservationPolicyTest {
+    @Test fun `late in-window high cannot renew expired extension`() {
+        assertEquals(ObservationEnd(at(505), true), resolve(listOf(sample(500, 90)), 515, ObservationEnd(at(505), false)))
+    }
+
+    @Test fun `late in-window high cannot reopen nominal window`() {
+        assertEquals(ObservationEnd(at(480), true), resolve(listOf(sample(475, 90)), 485))
+    }
+
+    @Test fun `one millisecond after effective end cannot renew but equality can`() {
+        val previous = ObservationEnd(at(505), false)
+        assertEquals(ObservationEnd(at(530), false), resolve(listOf(sample(500, 90)), 505, previous))
+        assertEquals(ObservationEnd(at(505), true), SleepObservationPolicy.resolve(window, previous,
+            listOf(sample(500, 90)), at(505) + 1, at(1440)))
+    }
+
+    @Test fun `legacy all-day override cannot disable afternoon or create alarm boundaries`() {
+        val midnight = LocalDate.of(2026, 9, 30).atStartOfDay(zone).toInstant().toEpochMilli()
+        val nominal = SleepWindow(midnight, midnight + 1440 * minute)
+        val schedule = SleepSchedule(0, 0, observationEnds = mapOf(nominal to midnight + 730 * minute))
+        assertNotNull(schedule.windowAt(midnight + 900 * minute, zone))
+        assertFalse(schedule.requiresWindowBoundary())
+    }
     private val zone = ZoneId.of("UTC")
     private val start = LocalDate.of(2026, 9, 29).atTime(23, 0).atZone(zone).toInstant().toEpochMilli()
     private val minute = 60_000L
@@ -52,6 +74,10 @@ class SleepObservationPolicyTest {
     @Test fun `persistent closure survives delayed reports and cannot reopen`() {
         val closed = resolve(woke, 420)
         assertEquals(closed, resolve(woke + sample(475, 90), 480, closed))
+        repeat(3) {
+            assertEquals(closed, resolve(listOf(sample(500, 90)), 515, closed))
+            assertEquals(closed, resolve(listOf(sample(520, 90)), 520, closed))
+        }
     }
 
     @Test fun `extension stops at next scheduled start`() {
