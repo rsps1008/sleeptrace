@@ -176,8 +176,8 @@ v4 維持固定 cadence 的相容 RMS 路徑；v1／v2 不提供深淺正向證�
 
 沿用首頁日期匯出。沒有 motion 的 session 分析分鐘也列出，量測欄位空白；不發起新的 UsageStats 查詢，也不觸發重算寫回。主時間線分段／本地統計／Health Connect 都來自 `sleepParts`；CSV 的 computed 表示當下離線推算，stored 表示已保存結果，不能混作同一版本結果。
 
-- `reason_codes` 保存多個原因；`primary_reason` 按固定順序取主要原因，缺品質時不讓 onset guard 掩蓋缺資料。包括 NO_SLEEP_EVIDENCE、PHONE_IN_USE、ONSET_GUARD、MISSING_MOTION、INSUFFICIENT_COVERAGE、COUPLING_INSUFFICIENT／EXPIRED、BASELINE_INSUFFICIENT、LOW_SIGNAL_DIFFERENTIATION、WINDOW_TOO_SHORT、ACTIVITY_TOO_HIGH、ENTER／MAINTAIN_DEEP、EXIT_SUSTAINED_ACTIVITY／COUPLING_LOST、SAFETY_CAP、LEGACY_FEATURE_LIMITATION。
-- `can_stage`、`can_enter_deep`、`can_maintain_deep`，coupling_state／age／invalidation，以及新特徵可追到每個分析窗口；舊 `staging_event` 只補充轉換，不再是唯一原因。
+- `reason_codes` 保存多個原因；`primary_reason` 按固定順序取主要原因，缺品質時不讓 onset guard 掩蓋缺資料。包括 NO_SLEEP_EVIDENCE、PHONE_IN_USE、ONSET_GUARD、MISSING_MOTION、INSUFFICIENT_COVERAGE、COUPLING_INSUFFICIENT／EXPIRED、BASELINE_INSUFFICIENT、LOW_SIGNAL_DIFFERENTIATION、WINDOW_TOO_SHORT、RECENT_WINDOW_INCOMPLETE、MINOR_GAP_BUDGET_EXCEEDED、ACTIVITY_TOO_HIGH、ENTER／MAINTAIN_DEEP、EXIT_SUSTAINED_ACTIVITY／COUPLING_LOST、SAFETY_CAP、LEGACY_FEATURE_LIMITATION。
+- `can_stage`、`can_enter_deep`、`can_maintain_deep` 與 `prior_deep`、`current_eligibility`、entry／maintenance decision、formal action／stage、回填／safety-cap 標記、window blocker／interval、coupling_state／age／invalidation 可追到每個分析窗口；舊 `staging_event` 只補充轉換，不再是唯一原因。
 - `phone_use_overlap_ms` 是精確重疊；`exact_computed_parts`／`exact_stored_parts` 以 `起點epoch ms:終點epoch ms:stage` 分號列出該分鐘內子區間。分鐘 computed_stage 不將幾秒使用擴大成整分鐘 Awake。
 - `valid_motion_minute_percent` 是睡眠遮罩內符合 cadence／45 秒覆蓋的分鐘比例；`sensor_coverage_percent`／`span_motion_coverage` 改為整個分析跨度的感測覆蓋，分母包含已知清醒。`stageable_sleep_coverage` 是同一睡眠遮罩內可細分時間／睡眠時間。partial minute 與使用相交處的 sensor 覆蓋仍是按時間比例近似，不能還原未保存的逐秒覆蓋分布。
 - `first_motion_delay_minutes` 是首筆現存 motion 摘要／事件的延遲；`first_valid_motion_delay_ms` 是第一次完成 15 分鐘連續品質窗口的時間，與入睡證據無關。無有效窗口輸出空白，不輸出 0。`night_longest_gap_ms`、`undetermined_reasons_ms` 彙總缺口及未判定主要原因時長。
@@ -203,13 +203,13 @@ adb.exe -s <序號> shell am broadcast -n com.rsps1008.sleeptrace/.motion.Captur
 
 ### 本輪實際驗證及未完成範圍
 
-2026-09-30 從 HEAD `dc92433` 乾淨工作區整合。Java 21 執行：
+2026-09-30 從 HEAD `0ee7451859569f62d805e81dd580f5b439a41260` 乾淨工作區整合。Java 21 執行：
 
 ```powershell
 .\gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease --no-configuration-cache
 ```
 
-146 個 JVM 測試、0 failure／error；lint 25 warnings、0 errors；Debug／AndroidTest／unsigned Release APK 全部建置成功。沒有刪除重要既有測試；缺資料 LIGHT、跨缺口 entry、UNKNOWN 無記憶 grace 與平坦雜訊 Deep 的舊預期改為 v5 未判定／連續品質語意，另保留正向 Deep、翻身維持、活動退出、穩定 ID、時間守恆、版本邊界及 FIFO／取樣率 regression。新增 v2 motion→schema 3、v10 session→schema 11、null 特徵、重複 batch 防重及 provenance 實際 SQLite instrumentation 案例，已編譯，但未執行。
+167 個 JVM 測試、0 failure／error；lint 25 warnings、0 errors；Debug／AndroidTest／unsigned Release APK 全部建置成功。沒有刪除重要既有測試；缺資料 LIGHT、跨缺口 entry、UNKNOWN 無記憶 grace 與平坦雜訊 Deep 的舊預期改為 v5 未判定／連續品質語意，另保留正向 Deep、翻身維持、活動退出、穩定 ID、時間守恆、版本邊界及 FIFO／取樣率 regression。新增 formal decision／maintenance 一致性、合法／超預算缺口、回填／safety-cap provenance 與 fixture bytes hash regression；SQLite instrumentation 案例已編譯但未執行。
 
 只找到既有合成 `real_night_style.csv`，沒有真實整晚 raw CSV；沒有虛構實機那一晚結果。凍結 HEAD 的 algorithm 4 對照 algorithm 5（報告 `docs/staging-v5-replay.txt`）：329 分鐘合成跨度，Deep 132→104、Light 197→42、未判定 0→183、Awake 0→0；切換 8→11、<5 分鐘睡眠片段 1→1。有效分鐘覆蓋兩版均 89.6657%；新版跨度感測覆蓋 89.7568%，可細分睡眠覆蓋 44.3769%；未判定主要原因為缺 motion 33 分鐘、覆蓋不足 1 分鐘、耦合不足 149 分鐘。這是工程回歸，不是真實生理準確度、深眠比例優化或與原生／醫療演算法等價的證明。
 
@@ -221,4 +221,12 @@ V7 修正 V6 首次建立誤把「當前分鐘必須有新動作」當成額外�
 分期仍只在已接受的睡眠 session 內進行。缺口例外只可用於完整 60 秒 v5 桶：累積未覆蓋時間以 `60,000 - coveredMillis` 判定，單一 2 秒最長缺口不能掩蓋同分鐘四次漏樣的 8 秒總缺漏；部分桶、遺失資訊或 `covered=60,000` 卻宣稱有缺口的矛盾摘要都走嚴格路徑。容許的短缺口是診斷資訊而非進入阻擋原因；缺口分鐘本身仍為 `SLEEPING`，最近五分鐘必須完整。沒有耦合、耦合失效、缺資料、基準不足或必要特徵時仍保留 `SLEEPING`，不假設 `LIGHT`。
 
 回放說明見 [`docs/staging-v7-replay.txt`](docs/staging-v7-replay.txt)；其矩陣與差異 CSV 由同一 JVM 回放物件生成，檢查命令不覆寫已提交文件。原 CSV 是 estimator-only，沒有跑 AUTO，且合成回放不是醫療或 PSG 驗證。演算法版本為 7，感測 featureVersion 維持 5。
+
+### V7 診斷一致性修正
+
+本輪只修正診斷與正式狀態機的共用判定，不調整正式分期門檻，也不升版。`SleepStageEstimator.evaluateFormalDecision()` 是每分鐘唯一正式決策入口；狀態更新與 `MinuteDiagnostic` 共用 `priorState`、`currentEligibility`、`entryDecision`、`maintenanceDecision`、`action`、`transitionReason` 及高活動窗口計數。正式維持會使用與退出相同的密集事件、3/5 active、耦合失效及連續 rolling motion 遲滯；孤立活動仍可維持，低訊號差異、版本／錄製邊界與硬中斷不能報告可維持。
+
+短缺口的 `RECENT_WINDOW_INCOMPLETE`、`WINDOW_CONTAINS_GAP`、`MINOR_GAP_BUDGET_EXCEEDED` 與阻擋區間由同一 entry decision 生成。`window_blocking_intervals` 使用 `start..(end-1)` 的 inclusive `LongRange` 表示半開 `[start,end)` 分鐘；合法缺口離開最近五分鐘後只列 `ALLOWED_MINOR_GAP`，不再列為阻擋。`formal_stage`、`was_backfilled`、`safety_cap_adjusted`、`final_stage` 區分當時決策與後續回填／安全上限，不用最終 stage 反推當時維持資格。
+
+回放 fixture 的 SHA-256 由本次讀取的原始 classpath bytes 計算，再以同一份 bytes 用 UTF-8 解析；沒有手動 hash 常數。`StagingReplayTest` 預設只檢查 `build/reports` 與已提交 `docs/`，不覆寫文件；只有明確設定 `SLEEPTRACE_UPDATE_REPLAY_DOCS=true` 才更新。修正前失敗案例與來源驗證說明見 [`docs/staging-v7-diagnostic-baseline.md`](docs/staging-v7-diagnostic-baseline.md) 與 [`docs/staging-v7-changes.md`](docs/staging-v7-changes.md)。
 

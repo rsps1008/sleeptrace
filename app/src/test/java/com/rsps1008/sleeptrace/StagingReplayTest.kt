@@ -8,12 +8,8 @@ import org.junit.Test
 class StagingReplayTest {
     @Test fun `frozen v4 versus v7 estimator-only fixture reports aligned transitions without accuracy claims`() {
         val base = 20_000L * MINUTE_MS
-        val rows = requireNotNull(javaClass.getResourceAsStream("/staging/real_night_style.csv"))
-            .bufferedReader().useLines { lines -> lines.drop(1).map { line ->
-                val v = line.split(','); val covered = (v[1].toDouble() * 1000).toLong(); val rms = v[3].toDouble()
-                MotionMinute(base + v[0].toLong() * MINUTE_MS, covered, (v[2].toDouble() * 1000).toLong(),
-                    rms * rms * covered, 60, Placement.valueOf(v[4]), 4)
-            }.toList() }
+        val fixture = StagingReplayFixtureReader.read(base)
+        val rows = fixture.rows
         val s = SleepSession(startMillis=base,endMillis=base+329*MINUTE_MS,confidence=60,awakeMillis=0,state=SyncState.PENDING,reason="synthetic")
         val segments = listOf(SleepSegment(base,s.endMillis,60))
         val old = FrozenStageV4.analyze(s,rows,emptyList(),emptyList(),segments,SleepSchedule(0,0))
@@ -40,7 +36,7 @@ class StagingReplayTest {
                 "transitions=${(intervals.size-1).coerceAtLeast(0)}, fragments_under_5min=$fragments"
         }
         val text = "SYNTHETIC fixture, not an actual recorded night or physiological accuracy evidence.\n" +
-            "fixture_sha256=0b1426d1fe5836c2a5cc3d726899e08045b9c94faad677bee362eb64addbfef5\n" +
+            "fixture_sha256=${fixture.sha256}\n" +
             summary("frozen dc92433 algorithm 4",old.intervals) + "\n" + summary("algorithm 7",next.intervals) + "\n" +
             "old_valid_motion_ratio=${old.motionCoverageRatio}, new_valid_motion_ratio=${next.motionCoverageRatio}, " +
             "new_span_motion_coverage=${next.sensorCoverageRatio}, new_stageable_sleep_coverage=${next.stageableCoverageRatio}\n" +
@@ -48,12 +44,12 @@ class StagingReplayTest {
             matrix.entries.joinToString("\n") { "${it.key.first}->${it.key.second}=${it.value}" } + "\n"
         println(text)
         val output = java.io.File("build/reports/staging-replay.txt")
-        output.parentFile?.mkdirs(); output.writeText(text)
+        output.parentFile?.mkdirs(); output.writeText(text, Charsets.UTF_8)
         val matrixCsv = "from_stage,to_stage,duration_ms\n" +
             matrix.entries.joinToString("\n") { "${it.key.first},${it.key.second},${it.value}" } + "\n"
-        java.io.File("build/reports/staging-transition-matrix.csv").writeText(matrixCsv)
+        java.io.File("build/reports/staging-transition-matrix.csv").writeText(matrixCsv, Charsets.UTF_8)
         val diffCsv = "relative_start_ms,relative_end_ms,old_stage,new_stage,duration_ms\n" + diffs.joinToString("\n") + "\n"
-        java.io.File("build/reports/staging-diff-intervals.csv").writeText(diffCsv)
+        java.io.File("build/reports/staging-diff-intervals.csv").writeText(diffCsv, Charsets.UTF_8)
         assertTrue(next.durations.deep > 0)
         assertTrue(next.durations.light > 0)
         assertTrue(next.durations.sleeping > 0)
@@ -67,11 +63,20 @@ class StagingReplayTest {
         }
         assertEquals(diffs.sumOf { it.substringAfterLast(',').toLong() },
             matrix.filterKeys { it.first != it.second }.values.sum())
-        // Unit tests run with app/ as user.dir; this check reads committed
-        // sources only, so it can detect (rather than overwrite) stale reports.
-        assertEquals(text, java.io.File("../docs/staging-v7-replay.txt").readText())
-        assertEquals(matrixCsv, java.io.File("../docs/staging-v7-transition-matrix.csv").readText())
-        assertEquals(diffCsv, java.io.File("../docs/staging-v7-diff-intervals.csv").readText())
+        // Default mode is check-only: it never overwrites committed docs. An
+        // explicit SLEEPTRACE_UPDATE_REPLAY_DOCS=true run is the only update
+        // mode, used after reviewing the generated build/reports output.
+        val docs = listOf(
+            java.io.File("../docs/staging-v7-replay.txt") to text,
+            java.io.File("../docs/staging-v7-transition-matrix.csv") to matrixCsv,
+            java.io.File("../docs/staging-v7-diff-intervals.csv") to diffCsv
+        )
+        if (System.getenv("SLEEPTRACE_UPDATE_REPLAY_DOCS").equals("true", ignoreCase = true)) {
+            docs.forEach { (file, content) -> file.writeText(content, Charsets.UTF_8) }
+        } else {
+            docs.forEach { (file, content) -> assertEquals(content, file.readText(Charsets.UTF_8)) }
+        }
+        assertEquals(fixture.sha256, StagingReplayFixtureReader.sha256(fixture.bytes))
         assertEquals(next, SleepStageEstimator.analyze(s,rows,emptyList(),emptyList(),segments,SleepSchedule(0,0)))
     }
 }

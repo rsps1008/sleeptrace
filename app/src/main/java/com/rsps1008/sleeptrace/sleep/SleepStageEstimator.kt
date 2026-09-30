@@ -36,8 +36,39 @@ object SleepStageEstimator {
         COUPLING_INSUFFICIENT, COUPLING_EXPIRED, BASELINE_INSUFFICIENT, LOW_SIGNAL_DIFFERENTIATION,
         WINDOW_TOO_SHORT, ACTIVITY_TOO_HIGH, ENTER_DEEP, MAINTAIN_DEEP, EXIT_SUSTAINED_ACTIVITY,
         EXIT_COUPLING_LOST, SAFETY_CAP, LEGACY_FEATURE_LIMITATION, WINDOW_CONTAINS_GAP,
-        RECORDING_BOUNDARY, COUPLING_INVALIDATED, LEGACY_PLACEMENT_UNKNOWN, ALLOWED_MINOR_GAP
+        RECORDING_BOUNDARY, COUPLING_INVALIDATED, LEGACY_PLACEMENT_UNKNOWN, ALLOWED_MINOR_GAP,
+        RECENT_WINDOW_INCOMPLETE, MINOR_GAP_BUDGET_EXCEEDED
     }
+    enum class Action { ENTER, MAINTAIN, EXIT, NONE }
+    data class Decision(
+        val applicable: Boolean,
+        val allowed: Boolean,
+        val reasons: List<Reason> = emptyList()
+    )
+
+    private data class EntryEvaluation(
+        val decision: Decision,
+        val windowReasons: List<Reason>,
+        val blockingIndices: Set<Int>,
+        val nonBlockingReasons: List<Reason>
+    )
+
+    private data class FormalDecision(
+        val priorState: Boolean,
+        val currentEligibility: Boolean,
+        val currentEligibilityReasons: List<Reason>,
+        val baselineReasons: List<Reason>,
+        val entryDecision: Decision,
+        val windowBlockingReasons: List<Reason>,
+        val windowBlockingIndices: Set<Int>,
+        val nonBlockingReasons: List<Reason>,
+        val maintenanceDecision: Decision,
+        val action: Action,
+        val transitionReason: String?,
+        val highMotionWindowsBefore: Int,
+        val highMotionWindowsCandidate: Int,
+        val highMotionWindowsAfter: Int
+    )
     data class NightlyBaseline(
         val p25: Double, val p35: Double, val p50: Double,
         val p65: Double, val p70: Double, val p75: Double,
@@ -71,7 +102,20 @@ object SleepStageEstimator {
         /** Informational evidence which did not block the formal decision. */
         val nonBlockingReasons: List<Reason> = emptyList(),
         val baselineReasons: List<Reason> = emptyList(),
-        val transitionReason: String? = event
+        val transitionReason: String? = event,
+        /** The state before later backfill and safety-cap post-processing. */
+        val priorState: Boolean = false,
+        val currentEligibility: Boolean = canStage,
+        val entryDecision: Decision = Decision(true, canEnterDeep),
+        val maintenanceDecision: Decision = Decision(false, canMaintainDeep),
+        val action: Action = Action.NONE,
+        val formalStage: SleepStage = stage,
+        val wasBackfilled: Boolean = false,
+        val safetyCapAdjusted: Boolean = false,
+        val finalStage: SleepStage = stage,
+        val highMotionWindowsBefore: Int = 0,
+        val highMotionWindowsCandidate: Int = 0,
+        val highMotionWindowsAfter: Int = 0
     ) {
         val primaryReason: Reason? get() = if (Reason.SAFETY_CAP in reasons) Reason.SAFETY_CAP
             else if (canStage) reasons.firstOrNull() else reasons.firstOrNull {
@@ -181,62 +225,59 @@ object SleepStageEstimator {
         val rolling = timeline.indices.map { rollingFeatures(timeline, maxOf(0, it - DEEP_WINDOW_MINUTES + 1)..it) }
         fun canStage(minute: MinuteSignal): Boolean = minute.stageEligible && baseline != null &&
             !baseline.narrowDistribution && minute.motion?.featureVersion == baseline.featureVersion
-        val stages = MutableList(timeline.size) { if (canStage(timeline[it])) SleepStage.LIGHT else SleepStage.SLEEPING }
+        val stages = MutableList(timeline.size) { SleepStage.SLEEPING }
+        val formalStages = MutableList(timeline.size) { SleepStage.SLEEPING }
+        val wasBackfilled = BooleanArray(timeline.size)
+        val safetyCapAdjusted = BooleanArray(timeline.size)
         val events = arrayOfNulls<String>(timeline.size)
+        val formalDecisions = arrayOfNulls<FormalDecision>(timeline.size)
         var deep = false
         var highMotionWindows = 0
         timeline.indices.forEach { index ->
             val minute = timeline[index]
-            if (minute.hardBreak || !canStage(minute) || baseline == null) {
-                if (deep) events[index] = when {
-                    minute.inPhoneUse -> "exit_phone_use"
-                    minute.inOnsetGuard -> "exit_onset_guard"
-                    minute.coverageMotion?.placement == Placement.BEDSIDE -> "exit_bedside"
-                    minute.coverageMotion != null && !minute.coverageMotion.supportsCurrentStaging -> "exit_legacy_or_incompatible_feature"
-                    !minute.validMotion -> "exit_missing_motion"
-                    else -> "exit_no_sleep_evidence_or_schedule"
-                }
-                deep = false; highMotionWindows = 0
-                return@forEach
-            }
-            val recent = maxOf(0, index - 4)..index
-            val short = rollingFeatures(timeline, recent)
-            var exited = false
-            if (deep) {
-                val high = short.validMinutes == 5 && short.medianRms!! > baseline.p70
-                highMotionWindows = if (high) highMotionWindows + 1 else 0
-                val exitReason = when {
-                    short.activeMinutes >= 3 -> "exit_active_3_in_5"
-                    recent.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS -> "exit_dense_events"
-                    !minute.couplingSupported -> "exit_coupling_lost"
-                    highMotionWindows >= 3 -> "exit_sustained_rolling_motion"
-                    else -> null
-                }
-                if (exitReason != null) {
+            val decision = evaluateFormalDecision(index, timeline, rolling, baseline, evidenceStart, deep, highMotionWindows, ::canStage)
+            formalDecisions[index] = decision
+            highMotionWindows = decision.highMotionWindowsAfter
+            when (decision.action) {
+                Action.EXIT -> {
                     // Sustained activity cannot remain a Deep bridge; isolated turns are retained.
-                    if (short.activeMinutes >= 3) {
+                    if (decision.maintenanceDecision.reasons.contains(Reason.EXIT_SUSTAINED_ACTIVITY) &&
+                        rollingFeatures(timeline, maxOf(0, index - 4)..index).activeMinutes >= 3) {
+                        val recent = maxOf(0, index - 4)..index
                         val firstActive = recent.first { timeline[it].motion?.level == MotionLevel.ACTIVE }
-                        for (i in firstActive..index) stages[i] = if (canStage(timeline[i])) SleepStage.LIGHT else SleepStage.SLEEPING
+                        for (i in firstActive..index) {
+                            stages[i] = if (canStage(timeline[i])) SleepStage.LIGHT else SleepStage.SLEEPING
+                        }
                     }
-                    events[index] = exitReason
-                    deep = false; highMotionWindows = 0
-                    exited = true
+                    events[index] = decision.transitionReason
+                    deep = false
                 }
-            }
-            if (!deep && !exited && canEnterDeep(index, timeline, rolling[index], baseline, evidenceStart)) {
-                deep = true; highMotionWindows = 0
-                events[index] = "enter_stable_window"
-                // At most seven proven stable minutes. Never cross any guard, gap or weak placement.
-                for (i in index - 1 downTo maxOf(0, index - DEEP_BACKFILL_MINUTES)) {
-                    val previous = timeline[i]
-                    if (!previous.bed || !previous.quiet || !previous.validMotion || !previous.currentFeature || previous.motion!!.rms > baseline.p70 ||
-                        previous.start < maxOf(session.startMillis, evidenceStart ?: session.startMillis) + MIN_SESSION_AGE_FOR_DEEP) break
-                    stages[i] = SleepStage.DEEP
+                Action.ENTER -> {
+                    deep = true
+                    events[index] = decision.transitionReason
+                    // At most seven proven stable minutes. Never cross any guard, gap or weak placement.
+                    for (i in index - 1 downTo maxOf(0, index - DEEP_BACKFILL_MINUTES)) {
+                        val previous = timeline[i]
+                        if (!previous.bed || !previous.quiet || !previous.validMotion || !previous.currentFeature || previous.motion!!.rms > baseline!!.p70 ||
+                            previous.start < maxOf(session.startMillis, evidenceStart ?: session.startMillis) + MIN_SESSION_AGE_FOR_DEEP) break
+                        stages[i] = SleepStage.DEEP
+                        wasBackfilled[i] = true
+                    }
                 }
+                Action.MAINTAIN -> deep = true
+                Action.NONE -> if (!decision.priorState) deep = false
             }
-            if (deep) stages[index] = SleepStage.DEEP
+            val formalStage = if (canStage(minute) && decision.action in setOf(Action.ENTER, Action.MAINTAIN)) {
+                SleepStage.DEEP
+            } else if (canStage(minute)) {
+                SleepStage.LIGHT
+            } else {
+                SleepStage.SLEEPING
+            }
+            formalStages[index] = formalStage
+            stages[index] = formalStage
         }
-        applySafetyBound(timeline, rolling, stages, events, baseline,
+        applySafetyBound(timeline, rolling, stages, events, safetyCapAdjusted, baseline,
             session.endMillis - session.startMillis - phoneUse.sumOf { it.endMillis - it.startMillis })
         val merged = timeline.indices.map {
             SleepStageInterval(timeline[it].start, timeline[it].end, stages[it])
@@ -261,52 +302,70 @@ object SleepStageEstimator {
         val normalized = sleepParts(session.copy(stageIntervals = merged, awakeIntervals = phoneUse))
         val finalIntervals = normalized.map { SleepStageInterval(it.start, it.end, it.stage) }
         val durations = stageDurations(session.copy(stageIntervals = finalIntervals, awakeIntervals = phoneUse))
-        fun reasons(i: Int): List<Reason> = buildList {
-            val m = timeline[i]
-            if (m.beforeEvidence || !m.inSchedule) add(Reason.NO_SLEEP_EVIDENCE)
-            if (m.inPhoneUse) add(Reason.PHONE_IN_USE)
-            if (m.inOnsetGuard || m.start < (evidenceStart ?: session.startMillis) + MIN_SESSION_AGE_FOR_DEEP) add(Reason.ONSET_GUARD)
-            if (m.motion == null) add(Reason.MISSING_MOTION)
-            else {
-                if (!m.validMotion || (m.motion.longestGapMillis ?: 0) > 0L) add(Reason.INSUFFICIENT_COVERAGE)
-                if (!m.currentFeature || !m.hasRequiredFeatures || (baseline != null && m.motion.featureVersion != baseline.featureVersion)) add(Reason.LEGACY_FEATURE_LIMITATION)
-                if (!m.couplingSupported) add(when {
-                    m.motion.coupling?.reason == "COUPLING_EXPIRED" -> Reason.COUPLING_EXPIRED
-                    m.motion.coupling?.reason?.contains("HANDLING") == true || m.motion.coupling?.reason?.contains("PHONE") == true -> Reason.COUPLING_INVALIDATED
-                    m.motion.coupling?.reason == "LEGACY_PLACEMENT" -> Reason.LEGACY_PLACEMENT_UNKNOWN
-                    else -> Reason.COUPLING_INSUFFICIENT
-                })
-            }
-            if (baseline == null) add(Reason.BASELINE_INSUFFICIENT)
-            if (baseline?.narrowDistribution == true) add(Reason.LOW_SIGNAL_DIFFERENTIATION)
-            if (rolling[i].validMinutes < DEEP_WINDOW_MINUTES) add(Reason.WINDOW_TOO_SHORT)
-            if (rolling[i].activeMinutes > 1 ||
-                (maxOf(0, i - DEEP_WINDOW_MINUTES + 1)..i).sumOf { timeline[it].motion?.movementEvents ?: 0 } > ENTER_MAX_EVENTS ||
-                (m.motion?.longestActiveMillis ?: 0) >= MAX_CONTINUOUS_ACTIVE_MILLIS ||
-                (baseline != null && (rolling[i].medianRms ?: 0.0) > baseline.p50)) add(Reason.ACTIVITY_TOO_HIGH)
-            when {
-                events[i]?.startsWith("safety_cap") == true -> add(Reason.SAFETY_CAP)
-                events[i] == "enter_stable_window" -> add(Reason.ENTER_DEEP)
-                events[i]?.startsWith("exit_active") == true || events[i] == "exit_dense_events" || events[i] == "exit_sustained_rolling_motion" -> add(Reason.EXIT_SUSTAINED_ACTIVITY)
-                events[i]?.startsWith("exit_") == true && !m.couplingSupported -> add(Reason.EXIT_COUPLING_LOST)
-                stages[i] == SleepStage.DEEP -> add(Reason.MAINTAIN_DEEP)
-            }
+        fun reasons(i: Int): List<Reason> {
+            val decision = requireNotNull(formalDecisions[i])
+            return buildList {
+                addAll(decision.currentEligibilityReasons)
+                addAll(decision.baselineReasons)
+                addAll(decision.windowBlockingReasons)
+                if (decision.maintenanceDecision.applicable && !decision.maintenanceDecision.allowed) {
+                    addAll(decision.maintenanceDecision.reasons)
+                }
+                when (decision.action) {
+                    Action.ENTER -> add(Reason.ENTER_DEEP)
+                    Action.MAINTAIN -> add(Reason.MAINTAIN_DEEP)
+                    else -> Unit
+                }
+                if (safetyCapAdjusted[i]) add(Reason.SAFETY_CAP)
+                addAll(decision.nonBlockingReasons)
+            }.distinct()
         }
         val diagnostic = timeline.indices.map { i ->
             val m = timeline[i]
-            MinuteDiagnostic(m.start, (m.motion ?: m.coverageMotion)?.placement, (m.motion ?: m.coverageMotion)?.level,
-                rolling[i].medianRms, if (awakeOverlap(m.start, m.end) == m.end - m.start) SleepStage.AWAKE else stages[i], events[i], canStage(m),
-                if (canStage(m)) null else reasons(i).firstOrNull()?.name,
-                if (canStage(m)) "full" else stagingRole(m), m.end, reasons(i), canStage(m),
-                baseline?.let { canEnterDeep(i, timeline, rolling[i], it, evidenceStart) } == true,
-                canMaintainDeep(i, timeline, baseline), awakeOverlap(m.start, m.end), m.inOnsetGuard, !m.beforeEvidence,
-                m.motion ?: m.coverageMotion,
-                currentEligibilityReasons = reasons(i),
-                windowBlockingReasons = windowBlockingReasons(i, timeline, baseline),
-                windowBlockingIntervals = windowBlockingIntervals(i, timeline),
-                nonBlockingReasons = if ((maxOf(0, i - DEEP_WINDOW_MINUTES + 1)..i).any { timeline[it].minorObservedGap } &&
-                    windowBlockingReasons(i, timeline, baseline).none { it == Reason.WINDOW_CONTAINS_GAP }) listOf(Reason.ALLOWED_MINOR_GAP) else emptyList(),
-                baselineReasons = listOfNotNull(if (baseline == null) Reason.BASELINE_INSUFFICIENT else null, if (baseline?.narrowDistribution == true) Reason.LOW_SIGNAL_DIFFERENTIATION else null))
+            val decision = requireNotNull(formalDecisions[i])
+            val finalStage = if (awakeOverlap(m.start, m.end) == m.end - m.start) SleepStage.AWAKE else stages[i]
+            val formalStage = if (awakeOverlap(m.start, m.end) == m.end - m.start) SleepStage.AWAKE else formalStages[i]
+            val diagnosticReasons = reasons(i)
+            MinuteDiagnostic(
+                startMillis = m.start,
+                placement = (m.motion ?: m.coverageMotion)?.placement,
+                level = (m.motion ?: m.coverageMotion)?.level,
+                rollingMedianRms = rolling[i].medianRms,
+                stage = finalStage,
+                event = events[i],
+                stagingMotionUsable = canStage(m),
+                stagingMotionExclusionReason = if (canStage(m)) null else diagnosticReasons.firstOrNull()?.name,
+                stagingMotionRole = if (canStage(m)) "full" else stagingRole(m),
+                endMillis = m.end,
+                reasons = diagnosticReasons,
+                canStage = canStage(m),
+                canEnterDeep = decision.entryDecision.allowed,
+                canMaintainDeep = decision.maintenanceDecision.allowed,
+                phoneUseMillis = awakeOverlap(m.start, m.end),
+                inOnsetGuard = m.inOnsetGuard,
+                hasSleepEvidence = !m.beforeEvidence,
+                motion = m.motion ?: m.coverageMotion,
+                currentEligibilityReasons = decision.currentEligibilityReasons,
+                windowBlockingReasons = decision.windowBlockingReasons,
+                windowBlockingIntervals = decision.windowBlockingIndices.map { blocked ->
+                    timeline[blocked].start..(timeline[blocked].end - 1)
+                },
+                nonBlockingReasons = decision.nonBlockingReasons,
+                baselineReasons = decision.baselineReasons,
+                transitionReason = decision.transitionReason,
+                priorState = decision.priorState,
+                currentEligibility = decision.currentEligibility,
+                entryDecision = decision.entryDecision,
+                maintenanceDecision = decision.maintenanceDecision,
+                action = decision.action,
+                formalStage = formalStage,
+                wasBackfilled = wasBackfilled[i],
+                safetyCapAdjusted = safetyCapAdjusted[i],
+                finalStage = finalStage,
+                highMotionWindowsBefore = decision.highMotionWindowsBefore,
+                highMotionWindowsCandidate = decision.highMotionWindowsCandidate,
+                highMotionWindowsAfter = decision.highMotionWindowsAfter
+            )
         }
         var gapRun = 0L; var longestGap = 0L
         timeline.forEach { m ->
@@ -361,70 +420,220 @@ object SleepStageEstimator {
             usable.count { it.bed }, usable.count { it.motion?.placement != Placement.BED })
     }
 
-    private fun canEnterDeep(
-        index: Int, timeline: List<MinuteSignal>, features: RollingFeatures,
-        baseline: NightlyBaseline, evidenceStart: Long?
-    ): Boolean {
-        if (index < DEEP_WINDOW_MINUTES - 1 || evidenceStart == null || baseline.narrowDistribution) return false
-        val minute = timeline[index]
-        if (!minute.bed || !minute.quiet ||
-            minute.start < maxOf(timeline.first().start, evidenceStart) + MIN_SESSION_AGE_FOR_DEEP) return false
-        val range = index - DEEP_WINDOW_MINUTES + 1..index
-        // A single explicitly measured v5 short gap may contribute context only.
-        // It remains SLEEPING itself; all other minutes need full quality.
-        val gaps = range.filter { timeline[it].minorObservedGap }
-        if (gaps.size > MAX_MINOR_GAP_MINUTES_IN_WINDOW ||
-            gaps.sumOf { timeline[it].fullBucketMissingMillis ?: Long.MAX_VALUE } > MAX_MINOR_GAP_TOTAL_MILLIS ||
-            (index - 4..index).any { !timeline[it].observedQuality } ||
-            range.any { (!timeline[it].observedQuality && !timeline[it].minorObservedGap) || !timeline[it].couplingSupported ||
-                timeline[it].motion?.featureVersion != baseline.featureVersion ||
-                timeline[it].motion?.recordingId != minute.motion?.recordingId || (timeline[it].coverageMotion?.let { motion -> !motion.supportsCurrentStaging } == true) || timeline[it].inPhoneUse || timeline[it].inOnsetGuard ||
-                timeline[it].beforeEvidence || !timeline[it].inSchedule ||
-                timeline[it].coverageMotion?.placement == Placement.BEDSIDE }) return false
-        val short = rollingFeatures(timeline, index - 4..index)
-        if ((short.medianRms ?: Double.MAX_VALUE) > baseline.p70 || short.activeMinutes >= 3) return false
-        return features.validMinutes >= DEEP_WINDOW_MINUTES - MAX_MINOR_GAP_MINUTES_IN_WINDOW && features.bedMinutes >= (if (baseline.narrowDistribution) 12 else 10) &&
-            features.quietMinutes.toDouble() / features.validMinutes >= 0.80 &&
-            features.activeMinutes <= 1 && features.medianRms!! <= baseline.p50 &&
-            range.sumOf { timeline[it].motion?.movementEvents ?: 0 } <= ENTER_MAX_EVENTS &&
-            range.none { (timeline[it].motion?.longestActiveMillis ?: 0) >= MAX_CONTINUOUS_ACTIVE_MILLIS }
-    }
-
-    /** Current evidence to retain an established Deep run; this is not final-stage output. */
-    private fun canMaintainDeep(index: Int, timeline: List<MinuteSignal>, baseline: NightlyBaseline?): Boolean {
-        val minute = timeline[index]
-        // The state machine deliberately tolerates isolated activity.  This
-        // diagnostic must describe that same maintenance rule rather than
-        // treating a non-quiet current minute as an immediate exit.
-        if (baseline == null || !minute.stageEligible) return false
-        val recent = maxOf(0, index - 4)..index
-        val features = rollingFeatures(timeline, recent)
-        return features.validMinutes == recent.count() && features.activeMinutes < 3 &&
-            (features.medianRms ?: Double.MAX_VALUE) <= baseline.p70
-    }
-
-    private fun windowBlockingReasons(index: Int, timeline: List<MinuteSignal>, baseline: NightlyBaseline?): List<Reason> {
-        if (index < DEEP_WINDOW_MINUTES - 1) return listOf(Reason.WINDOW_TOO_SHORT)
-        val range = index - DEEP_WINDOW_MINUTES + 1..index
-        return buildList {
-            if (range.any { it < 0 }) add(Reason.WINDOW_TOO_SHORT)
-            // A measured, full-bucket minor gap is informational if it passes
-            // the same budget used by canEnterDeep.  It is not a blocker.
-            val gaps = range.filter { timeline[it].minorObservedGap }
-            if (range.any { !timeline[it].observedQuality && !timeline[it].minorObservedGap } ||
-                gaps.size > MAX_MINOR_GAP_MINUTES_IN_WINDOW ||
-                gaps.sumOf { timeline[it].fullBucketMissingMillis ?: Long.MAX_VALUE } > MAX_MINOR_GAP_TOTAL_MILLIS) add(Reason.WINDOW_CONTAINS_GAP)
-            if (range.any { !timeline[it].couplingSupported }) add(Reason.COUPLING_INSUFFICIENT)
-            if (range.any { timeline[it].recordingBoundary }) add(Reason.RECORDING_BOUNDARY)
-            if (baseline == null) add(Reason.BASELINE_INSUFFICIENT)
+    private fun currentEligibilityReasons(minute: MinuteSignal, baseline: NightlyBaseline?): List<Reason> = buildList {
+        if (minute.beforeEvidence || !minute.inSchedule) add(Reason.NO_SLEEP_EVIDENCE)
+        if (minute.inPhoneUse) add(Reason.PHONE_IN_USE)
+        if (minute.inOnsetGuard) add(Reason.ONSET_GUARD)
+        if (minute.motion == null) add(Reason.MISSING_MOTION)
+        else {
+            if (!minute.validMotion || (minute.motion.longestGapMillis ?: 0L) > 0L) add(Reason.INSUFFICIENT_COVERAGE)
+            if (!minute.currentFeature || !minute.hasRequiredFeatures ||
+                (baseline != null && minute.motion.featureVersion != baseline.featureVersion)) add(Reason.LEGACY_FEATURE_LIMITATION)
+            if (!minute.couplingSupported) add(couplingReason(minute.motion))
         }
+        if (minute.recordingBoundary) add(Reason.RECORDING_BOUNDARY)
+    }.distinct()
+
+    private fun baselineReasons(baseline: NightlyBaseline?): List<Reason> = listOfNotNull(
+        if (baseline == null) Reason.BASELINE_INSUFFICIENT else null,
+        if (baseline?.narrowDistribution == true) Reason.LOW_SIGNAL_DIFFERENTIATION else null
+    )
+
+    private fun couplingReason(motion: MotionMinute): Reason = when {
+        motion.coupling?.reason == "COUPLING_EXPIRED" -> Reason.COUPLING_EXPIRED
+        motion.coupling?.reason?.contains("HANDLING") == true || motion.coupling?.reason?.contains("PHONE") == true -> Reason.COUPLING_INVALIDATED
+        motion.coupling?.reason == "LEGACY_PLACEMENT" -> Reason.LEGACY_PLACEMENT_UNKNOWN
+        else -> Reason.COUPLING_INSUFFICIENT
     }
 
-    private fun windowBlockingIntervals(index: Int, timeline: List<MinuteSignal>): List<LongRange> {
-        if (index < DEEP_WINDOW_MINUTES - 1) return emptyList()
-        return (index - DEEP_WINDOW_MINUTES + 1..index).filter {
-            !timeline[it].observedQuality || !timeline[it].couplingSupported || timeline[it].recordingBoundary
-        }.map { timeline[it].start..(timeline[it].end - 1) }
+    private fun evaluateFormalDecision(
+        index: Int,
+        timeline: List<MinuteSignal>,
+        rolling: List<RollingFeatures>,
+        baseline: NightlyBaseline?,
+        evidenceStart: Long?,
+        priorState: Boolean,
+        highMotionWindowsBefore: Int,
+        canStage: (MinuteSignal) -> Boolean
+    ): FormalDecision {
+        val minute = timeline[index]
+        val currentReasons = currentEligibilityReasons(minute, baseline)
+        val baselineReasons = baselineReasons(baseline)
+        val currentEligibility = canStage(minute)
+        val entry = evaluateEntry(
+            index, timeline, rolling[index], baseline, evidenceStart,
+            currentEligibility, currentReasons, baselineReasons
+        )
+        val currentBreak = minute.hardBreak || !currentEligibility || baseline == null
+
+        if (currentBreak) {
+            val maintenance = if (priorState) {
+                Decision(true, false, maintenanceBreakReasons(minute, baseline, currentReasons, baselineReasons))
+            } else {
+                Decision(false, false)
+            }
+            return FormalDecision(
+                priorState, currentEligibility, currentReasons, baselineReasons,
+                entry.decision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
+                maintenance, if (priorState) Action.EXIT else Action.NONE,
+                if (priorState) hardBreakTransition(minute) else null,
+                highMotionWindowsBefore, 0, 0
+            )
+        }
+
+        if (priorState) {
+            val recent = maxOf(0, index - 4)..index
+            val short = rollingFeatures(timeline, recent)
+            val highCandidate = if (short.validMinutes == 5 && (short.medianRms ?: Double.MAX_VALUE) > baseline!!.p70) {
+                highMotionWindowsBefore + 1
+            } else {
+                0
+            }
+            val maintenanceReasons = buildList {
+                if (short.activeMinutes >= 3) add(Reason.EXIT_SUSTAINED_ACTIVITY)
+                if (recent.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS) add(Reason.EXIT_SUSTAINED_ACTIVITY)
+                if (!minute.couplingSupported) add(Reason.EXIT_COUPLING_LOST)
+                if (highCandidate >= 3) add(Reason.EXIT_SUSTAINED_ACTIVITY)
+            }.distinct()
+            val maintenance = Decision(true, maintenanceReasons.isEmpty(), maintenanceReasons)
+            val action = if (maintenance.allowed) Action.MAINTAIN else Action.EXIT
+            val transition = if (maintenance.allowed) null else when {
+                short.activeMinutes >= 3 -> "exit_active_3_in_5"
+                recent.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS -> "exit_dense_events"
+                !minute.couplingSupported -> "exit_coupling_lost"
+                highCandidate >= 3 -> "exit_sustained_rolling_motion"
+                else -> "exit_sustained_activity"
+            }
+            return FormalDecision(
+                priorState, currentEligibility, currentReasons, baselineReasons,
+                entry.decision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
+                maintenance, action, transition, highMotionWindowsBefore, highCandidate,
+                if (maintenance.allowed) highCandidate else 0
+            )
+        }
+
+        val action = if (entry.decision.allowed) Action.ENTER else Action.NONE
+        return FormalDecision(
+            priorState, currentEligibility, currentReasons, baselineReasons,
+            entry.decision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
+            Decision(false, false), action, if (action == Action.ENTER) "enter_stable_window" else null,
+            highMotionWindowsBefore, 0, 0
+        )
+    }
+
+    private fun evaluateEntry(
+        index: Int,
+        timeline: List<MinuteSignal>,
+        features: RollingFeatures,
+        baseline: NightlyBaseline?,
+        evidenceStart: Long?,
+        currentEligibility: Boolean,
+        currentReasons: List<Reason>,
+        baselineReasons: List<Reason>
+    ): EntryEvaluation {
+        val windowReasons = linkedSetOf<Reason>()
+        val blockingIndices = linkedSetOf<Int>()
+        val nonBlockingReasons = linkedSetOf<Reason>()
+        val range = if (index >= DEEP_WINDOW_MINUTES - 1) index - DEEP_WINDOW_MINUTES + 1..index else 0..index
+        fun block(reason: Reason, indices: Iterable<Int>) {
+            windowReasons += reason
+            blockingIndices += indices
+        }
+        fun blockCurrent(reason: Reason) = block(reason, listOf(index))
+
+        if (index < DEEP_WINDOW_MINUTES - 1) {
+            block(Reason.WINDOW_TOO_SHORT, range)
+        } else {
+            val gaps = range.filter { timeline[it].minorObservedGap }
+            val incomplete = range.filter { !timeline[it].observedQuality && !timeline[it].minorObservedGap }
+            val missingMillis = gaps.sumOf { timeline[it].fullBucketMissingMillis ?: Long.MAX_VALUE }
+            if (incomplete.isNotEmpty()) block(Reason.WINDOW_CONTAINS_GAP, incomplete)
+            if (gaps.size > MAX_MINOR_GAP_MINUTES_IN_WINDOW || missingMillis > MAX_MINOR_GAP_TOTAL_MILLIS) {
+                val overBudget = gaps.ifEmpty { incomplete }
+                block(Reason.MINOR_GAP_BUDGET_EXCEEDED, overBudget)
+                block(Reason.WINDOW_CONTAINS_GAP, overBudget)
+            }
+            val recentIncomplete = (index - 4..index).filter { !timeline[it].observedQuality }
+            if (recentIncomplete.isNotEmpty()) block(Reason.RECENT_WINDOW_INCOMPLETE, recentIncomplete)
+            if (range.any { !timeline[it].couplingSupported }) {
+                block(Reason.COUPLING_INSUFFICIENT, range.filter { !timeline[it].couplingSupported })
+            }
+            if (range.any { timeline[it].recordingBoundary }) {
+                block(Reason.RECORDING_BOUNDARY, range.filter { timeline[it].recordingBoundary })
+            }
+            if (range.any { it != index && timeline[it].motion?.featureVersion != baseline?.featureVersion }) {
+                block(Reason.LEGACY_FEATURE_LIMITATION, range.filter { timeline[it].motion?.featureVersion != baseline?.featureVersion })
+            }
+            val phone = range.filter { timeline[it].inPhoneUse }
+            if (phone.isNotEmpty()) block(Reason.PHONE_IN_USE, phone)
+            // The formal V7 entry rule protects the current minute's onset age;
+            // older minutes in the 15-minute context are not retroactively
+            // rejected merely because they preceded the age threshold.
+            val onset = range.filter { timeline[it].inOnsetGuard }
+            if (onset.isNotEmpty()) block(Reason.ONSET_GUARD, onset)
+            val noEvidence = range.filter { timeline[it].beforeEvidence || !timeline[it].inSchedule }
+            if (noEvidence.isNotEmpty()) block(Reason.NO_SLEEP_EVIDENCE, noEvidence)
+            val bedside = range.filter { timeline[it].coverageMotion?.placement == Placement.BEDSIDE }
+            if (bedside.isNotEmpty()) block(Reason.LEGACY_PLACEMENT_UNKNOWN, bedside)
+        }
+
+        if (baseline != null && evidenceStart != null && index >= DEEP_WINDOW_MINUTES - 1) {
+            val minute = timeline[index]
+            if (!minute.bed || !minute.quiet) blockCurrent(Reason.ACTIVITY_TOO_HIGH)
+            if (minute.start < maxOf(timeline.first().start, evidenceStart) + MIN_SESSION_AGE_FOR_DEEP) {
+                blockCurrent(Reason.ONSET_GUARD)
+            }
+            val short = rollingFeatures(timeline, index - 4..index)
+            if ((short.medianRms ?: Double.MAX_VALUE) > baseline.p70 || short.activeMinutes >= 3) {
+                block(Reason.ACTIVITY_TOO_HIGH, index - 4..index)
+            }
+            if (features.bedMinutes < 10 || features.quietMinutes.toDouble() / features.validMinutes.coerceAtLeast(1) < 0.80 ||
+                features.activeMinutes > 1 || (features.medianRms ?: Double.MAX_VALUE) > baseline.p50 ||
+                range.sumOf { timeline[it].motion?.movementEvents ?: 0 } > ENTER_MAX_EVENTS ||
+                range.any { (timeline[it].motion?.longestActiveMillis ?: 0L) >= MAX_CONTINUOUS_ACTIVE_MILLIS }) {
+                block(Reason.ACTIVITY_TOO_HIGH, range)
+            }
+        }
+
+        val allReasons = (currentReasons + baselineReasons + windowReasons).distinct()
+        if (range.any { timeline[it].minorObservedGap } &&
+            range.filter { timeline[it].minorObservedGap }.size <= MAX_MINOR_GAP_MINUTES_IN_WINDOW &&
+            range.filter { timeline[it].minorObservedGap }.sumOf { timeline[it].fullBucketMissingMillis ?: Long.MAX_VALUE } <= MAX_MINOR_GAP_TOTAL_MILLIS) {
+            nonBlockingReasons += Reason.ALLOWED_MINOR_GAP
+        }
+        return EntryEvaluation(
+            Decision(true, allReasons.isEmpty(), allReasons),
+            windowReasons.toList(), blockingIndices,
+            nonBlockingReasons.toList()
+        )
+    }
+
+    private fun maintenanceBreakReasons(
+        minute: MinuteSignal,
+        baseline: NightlyBaseline?,
+        currentReasons: List<Reason>,
+        baselineReasons: List<Reason>
+    ): List<Reason> = buildList {
+        if (minute.inPhoneUse) add(Reason.PHONE_IN_USE)
+        if (minute.inOnsetGuard) add(Reason.ONSET_GUARD)
+        if (minute.coverageMotion?.placement == Placement.BEDSIDE) add(Reason.EXIT_COUPLING_LOST)
+        if (minute.coverageMotion != null && !minute.coverageMotion.supportsCurrentStaging) add(Reason.LEGACY_FEATURE_LIMITATION)
+        if (!minute.validMotion) add(Reason.INSUFFICIENT_COVERAGE)
+        if (!minute.inSchedule || minute.beforeEvidence) add(Reason.NO_SLEEP_EVIDENCE)
+        if (!minute.couplingSupported) add(Reason.EXIT_COUPLING_LOST)
+        addAll(currentReasons.filter { it !in setOf(Reason.ONSET_GUARD, Reason.PHONE_IN_USE) })
+        addAll(baselineReasons)
+        if (isEmpty() && baseline == null) add(Reason.BASELINE_INSUFFICIENT)
+    }.distinct()
+
+    private fun hardBreakTransition(minute: MinuteSignal): String = when {
+        minute.inPhoneUse -> "exit_phone_use"
+        minute.inOnsetGuard -> "exit_onset_guard"
+        minute.coverageMotion?.placement == Placement.BEDSIDE -> "exit_bedside"
+        minute.coverageMotion != null && !minute.coverageMotion.supportsCurrentStaging -> "exit_legacy_or_incompatible_feature"
+        !minute.validMotion -> "exit_missing_motion"
+        !minute.couplingSupported -> "exit_coupling_lost"
+        else -> "exit_no_sleep_evidence_or_schedule"
     }
 
     private fun stagingRole(minute: MinuteSignal): String {
@@ -444,7 +653,7 @@ object SleepStageEstimator {
 
     private fun applySafetyBound(
         timeline: List<MinuteSignal>, rolling: List<RollingFeatures>, stages: MutableList<SleepStage>,
-        events: Array<String?>, baseline: NightlyBaseline?, sleepDuration: Long
+        events: Array<String?>, safetyCapAdjusted: BooleanArray, baseline: NightlyBaseline?, sleepDuration: Long
     ) {
         if (baseline == null) return
         val limit = (sleepDuration * if (baseline.narrowDistribution) 0.35 else 0.55).toLong()
@@ -465,7 +674,11 @@ object SleepStageEstimator {
             if (deepDuration <= limit) break
             val duration = indices.sumOf { timeline[it].end - timeline[it].start }
             if (deepDuration - duration >= limit || duration <= deepDuration - limit) {
-                indices.forEach { i -> stages[i] = SleepStage.SLEEPING; events[i] = "safety_cap_low_differentiation" }
+                indices.forEach { i ->
+                    stages[i] = SleepStage.SLEEPING
+                    safetyCapAdjusted[i] = true
+                    events[i] = "safety_cap_low_differentiation"
+                }
                 deepDuration -= duration
             } else {
                 // If no full run fits the remaining excess, trim the weakest boundary minute(s)
@@ -478,6 +691,7 @@ object SleepStageEstimator {
                     val lastStrength = rolling[last].medianRms ?: Double.MAX_VALUE
                     val i = if (lastStrength >= firstStrength) last else first
                     stages[i] = SleepStage.SLEEPING
+                    safetyCapAdjusted[i] = true
                     events[i] = "safety_cap_low_differentiation"
                     deepDuration -= timeline[i].end - timeline[i].start
                     remaining.remove(i)
