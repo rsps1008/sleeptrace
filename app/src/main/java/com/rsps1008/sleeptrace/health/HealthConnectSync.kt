@@ -52,14 +52,15 @@ internal fun toHealthRecord(session: SleepSession): SleepSessionRecord {
                 SleepStage.AWAKE -> SleepSessionRecord.STAGE_TYPE_AWAKE
                 SleepStage.LIGHT -> SleepSessionRecord.STAGE_TYPE_LIGHT
                 SleepStage.DEEP -> SleepSessionRecord.STAGE_TYPE_DEEP
-                SleepStage.SLEEPING -> SleepSessionRecord.STAGE_TYPE_SLEEPING
+                // Legacy rows are normalized by sleepParts(); retain this defensive mapping.
+                SleepStage.SLEEPING -> SleepSessionRecord.STAGE_TYPE_LIGHT
             })
     }
     return SleepSessionRecord(
             startTime = start, startZoneOffset = zone.getOffset(start),
             endTime = end, endZoneOffset = zone.getOffset(end),
             title = "眠迹 SleepTrace",
-            notes = "以手機推估；非醫療睡眠分期；深淺未判定以 SLEEPING 保存；規則 ${session.stageAlgorithmVersion ?: "舊版來源不明"} / 特徵 ${session.stageFeatureVersion ?: "來源不明"}；${session.reason}",
+            notes = "以手機推估；非醫療睡眠分期；證據不足區間回退為 LIGHT，不代表生理淺眠；規則 ${session.stageAlgorithmVersion ?: "舊版來源不明"} / 特徵 ${session.stageFeatureVersion ?: "來源不明"}；${session.reason}",
             stages = stages,
             metadata = Metadata.autoRecorded(
                 clientRecordId = session.id,

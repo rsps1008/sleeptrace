@@ -6,7 +6,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class StagingReplayTest {
-    @Test fun `frozen v4 versus v7 estimator-only fixture reports aligned transitions without accuracy claims`() {
+    @Test fun `frozen v4 versus current estimator-only fixture reports aligned transitions without accuracy claims`() {
         val base = 20_000L * MINUTE_MS
         val fixture = StagingReplayFixtureReader.read(base)
         val rows = fixture.rows
@@ -37,10 +37,12 @@ class StagingReplayTest {
         }
         val text = "SYNTHETIC fixture, not an actual recorded night or physiological accuracy evidence.\n" +
             "fixture_sha256=${fixture.sha256}\n" +
-            summary("frozen dc92433 algorithm 4",old.intervals) + "\n" + summary("algorithm 7",next.intervals) + "\n" +
+            summary("frozen dc92433 algorithm 4",old.intervals) + "\n" +
+                summary("algorithm ${SleepStageEstimator.ALGORITHM_VERSION}",next.intervals) + "\n" +
             "old_valid_motion_ratio=${old.motionCoverageRatio}, new_valid_motion_ratio=${next.motionCoverageRatio}, " +
             "new_span_motion_coverage=${next.sensorCoverageRatio}, new_stageable_sleep_coverage=${next.stageableCoverageRatio}\n" +
             "new_undetermined_primary_reason_ms=${next.undeterminedReasonsMillis}\n" +
+            "new_fallback_light_primary_reason_ms=${next.fallbackLightReasonsMillis}\n" +
             matrix.entries.joinToString("\n") { "${it.key.first}->${it.key.second}=${it.value}" } + "\n"
         println(text)
         val output = java.io.File("build/reports/staging-replay.txt")
@@ -52,7 +54,8 @@ class StagingReplayTest {
         java.io.File("build/reports/staging-diff-intervals.csv").writeText(diffCsv, Charsets.UTF_8)
         assertTrue(next.durations.deep > 0)
         assertTrue(next.durations.light > 0)
-        assertTrue(next.durations.sleeping > 0)
+        assertEquals(0, next.durations.sleeping)
+        assertTrue(next.intervals.none { it.stage == SleepStage.SLEEPING })
         assertEquals(329*MINUTE_MS,next.durations.span)
         assertEquals(329 * MINUTE_MS, matrix.values.sum())
         stageOrder.forEach { stage ->
@@ -67,9 +70,9 @@ class StagingReplayTest {
         // explicit SLEEPTRACE_UPDATE_REPLAY_DOCS=true run is the only update
         // mode, used after reviewing the generated build/reports output.
         val docs = listOf(
-            java.io.File("../docs/staging-v7-replay.txt") to text,
-            java.io.File("../docs/staging-v7-transition-matrix.csv") to matrixCsv,
-            java.io.File("../docs/staging-v7-diff-intervals.csv") to diffCsv
+            java.io.File("../docs/staging-v9-replay.txt") to text,
+            java.io.File("../docs/staging-v9-transition-matrix.csv") to matrixCsv,
+            java.io.File("../docs/staging-v9-diff-intervals.csv") to diffCsv
         )
         if (System.getenv("SLEEPTRACE_UPDATE_REPLAY_DOCS").equals("true", ignoreCase = true)) {
             docs.forEach { (file, content) -> file.writeText(content, Charsets.UTF_8) }

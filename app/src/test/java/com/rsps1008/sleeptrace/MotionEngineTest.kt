@@ -12,17 +12,47 @@ class MotionEngineTest {
     private val schedule = SleepSchedule(23 * 60, 7 * 60)
     private val window = requireNotNull(schedule.windowAt(start))
     private val end = window.end
+    private fun legacyPlan(fifo: Int = 1000) = SamplingPlan.choose(
+        fifo,
+        targetPeriodUs = SamplingPlan.LEGACY_ONE_HZ_TARGET_PERIOD_US
+    )
     private fun minute(index: Int, level: MotionLevel = MotionLevel.QUIET, placement: Placement = Placement.BED) = MotionMinute(
         start + index * MINUTE_MS, if (level == MotionLevel.UNKNOWN) 10_000 else MINUTE_MS,
         if (level == MotionLevel.ACTIVE) MINUTE_MS else 0, if (level == MotionLevel.ACTIVE) 60_000.0 else 0.0, 300, placement
     )
 
-    @Test fun `sampling stays at one hertz and batches to FIFO capacity`() {
-        assertEquals(SamplingPlan(1_000_000, 800_000_000), SamplingPlan.choose(1000))
-        assertEquals(SamplingPlan(1_000_000, 16_000_000), SamplingPlan.choose(20))
-        assertEquals(SamplingPlan(1_000_000, 0), SamplingPlan.choose(0))
+    @Test fun `formal sampling requests ten hertz and batches to FIFO capacity`() {
+        assertEquals(SamplingPlan(100_000, 80_000_000), SamplingPlan.choose(1000))
+        assertEquals(SamplingPlan(100_000, 1_600_000), SamplingPlan.choose(20))
+        assertEquals(SamplingPlan(100_000, 0), SamplingPlan.choose(0))
         assertEquals(1_500_000, SamplingPlan.choose(100, 1_500_000).periodUs)
-        assertEquals(Int.MAX_VALUE, SamplingPlan.choose(10_000).latencyUs)
+        assertEquals(800_000_000, SamplingPlan.choose(10_000).latencyUs)
+        assertEquals(
+            Int.MAX_VALUE,
+            SamplingPlan.choose(Int.MAX_VALUE, minDelayUs = Int.MAX_VALUE).latencyUs
+        )
+    }
+
+    @Test fun `sensor max delay sizes reserved FIFO without changing registered period`() {
+        val plan = SamplingPlan.choose(
+            fifoMaxEventCount = 10_000,
+            maxDelayUs = 40_000,
+            fifoReservedEventCount = 100
+        )
+
+        assertEquals(100_000, plan.targetPeriodUs)
+        assertEquals(100_000, plan.periodUs)
+        assertEquals(3_200_000, plan.latencyUs)
+
+        val experiment = capturePlan(
+            CaptureExperiment.EARLY_2HZ,
+            fifoMaxEventCount = 10_000,
+            maxDelayUs = 40_000,
+            fifoReservedEventCount = 100
+        )
+        assertEquals(500_000, experiment.targetPeriodUs)
+        assertEquals(500_000, experiment.periodUs)
+        assertEquals(3_200_000, experiment.latencyUs)
     }
 
     @Test fun `recent classification from the lead-in can start capture at window start`() {
@@ -46,7 +76,7 @@ class MotionEngineTest {
 
     @Test fun `a delayed batch keeps sample time and complete coverage`() {
         val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
-        for (offset in 0L..120_000L step 1_000) engine.add(start + offset, 0.0, 0.0, 9.81)
+        for (offset in 0L..120_000L step 100) engine.add(start + offset, 0.0, 0.0, 9.81)
         val rows = engine.drain(start + 120_000)
         assertEquals(2, rows.size)
         assertEquals(start, rows.first().startMillis)
@@ -54,15 +84,101 @@ class MotionEngineTest {
         assertTrue(engine.drain(start + 120_000).isEmpty())
     }
 
+    @Test fun `one second interval within jitter stays coverage after cadence anchor advances`() {
+        val engine = MotionAccumulator(legacyPlan(), Placement.BED)
+        // The first long interval leaves the cadence anchor 7 ms after the representative point.
+        // The next 1.007 s interval used to be marked as a gap because integer math reported one
+        // skipped anchor slot even though the adjacent representative samples are within tolerance.
+        engine.add(start + 57_007, 0.0, 0.0, 9.81)
+        engine.add(start + 60_000, 0.0, 0.0, 9.81)
+        engine.add(start + 61_007, 0.0, 0.0, 9.81)
+
+        val row = engine.drain(start + 120_000).single { it.startMillis == start + MINUTE_MS }
+        assertEquals(1_007L, row.coveredMillis)
+        assertEquals(0L, row.longestGapMillis)
+    }
+
+    @Test fun `sustained sub-second cadence drift does not create periodic gaps`() {
+        listOf(900L, 993L).forEach { cadenceMillis ->
+            val engine = MotionAccumulator(legacyPlan(), Placement.BED)
+            var offset = 0L
+            while (offset <= 4 * MINUTE_MS) {
+                engine.add(start + offset, 0.0, 0.0, 9.81)
+                offset += cadenceMillis
+            }
+
+            val rows = engine.drain(start + 4 * MINUTE_MS)
+            assertEquals("cadence=$cadenceMillis", 4, rows.size)
+            assertTrue("cadence=$cadenceMillis", rows.all { it.longestGapMillis == 0L })
+            assertTrue(
+                "cadence=$cadenceMillis",
+                rows.all { it.coveredMillis >= 53_000L && it.level == MotionLevel.QUIET }
+            )
+        }
+    }
+
+    @Test fun `two second representative interval remains a real gap`() {
+        val engine = MotionAccumulator(legacyPlan(), Placement.BED)
+        engine.add(start, 0.0, 0.0, 9.81)
+        engine.add(start + 2_000, 0.0, 0.0, 9.81)
+
+        val row = engine.drain(start + MINUTE_MS).single()
+        assertEquals(0L, row.coveredMillis)
+        assertEquals(2_000L, row.longestGapMillis)
+    }
+
+    @Test fun `v7 supersedes v6 and v5 while all remain staging compatible`() {
+        assertTrue(MotionFeaturePolicy.storagePriority(MotionAccumulator.CURRENT_FEATURE_VERSION) >
+            MotionFeaturePolicy.storagePriority(MotionAccumulator.ONE_HZ_FEATURE_VERSION))
+        assertTrue(MotionFeaturePolicy.storagePriority(MotionAccumulator.ONE_HZ_FEATURE_VERSION) >
+            MotionFeaturePolicy.storagePriority(MotionAccumulator.STRICT_CADENCE_FEATURE_VERSION))
+        assertTrue(MotionFeaturePolicy.storagePriority(MotionAccumulator.STRICT_CADENCE_FEATURE_VERSION) >
+            MotionFeaturePolicy.storagePriority(MotionAccumulator.CADENCE_ANCHOR_FEATURE_VERSION))
+
+        val v5 = minute(0).copy(featureVersion = MotionAccumulator.STRICT_CADENCE_FEATURE_VERSION)
+        assertTrue(v5.supportsCurrentStaging)
+        assertTrue(MotionFeaturePolicy.supportsSleepConflictEvidence(v5.featureVersion, MotionLevel.QUIET))
+    }
+
     @Test fun `rotation is detected even when vector magnitude is constant`() {
         val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
-        for (index in 0..60) engine.add(start + index * 1_000L, if (index % 2 == 0) 9.81 else 0.0, 0.0, if (index % 2 == 0) 0.0 else 9.81)
+        for (index in 0..600) engine.add(start + index * 100L, if (index % 2 == 0) 9.81 else 0.0, 0.0, if (index % 2 == 0) 0.0 else 9.81)
         assertEquals(MotionLevel.ACTIVE, engine.drain(start + MINUTE_MS).single().level)
+    }
+
+    @Test fun `ten Hz features retain a subsecond pulse that one Hz sampling misses`() {
+        fun capture(plan: SamplingPlan): MotionMinute {
+            val engine = MotionAccumulator(plan, Placement.BED)
+            for (offset in 0L..2_000L step 20L) {
+                val pulse = if (offset in 440L..560L) 1.0 else 0.0
+                engine.add(start + offset, pulse, 0.0, 9.81)
+            }
+            return engine.drain(Long.MAX_VALUE, includePartial = true).single()
+        }
+
+        val tenHertz = capture(SamplingPlan.choose(0))
+        val oneHertz = capture(legacyPlan(0))
+        assertEquals(MotionAccumulator.CURRENT_FEATURE_VERSION, tenHertz.featureVersion)
+        assertEquals(MotionAccumulator.ONE_HZ_FEATURE_VERSION, oneHertz.featureVersion)
+        assertTrue((tenHertz.maxDelta ?: 0.0) >= 0.9)
+        assertTrue((oneHertz.maxDelta ?: 0.0) < 0.1)
+    }
+
+    @Test fun `one ten Hz pulse produces one movement event without a one second lag echo`() {
+        val engine = MotionAccumulator(SamplingPlan.choose(0), Placement.BED)
+        for (offset in 0L..2_500L step 100L) {
+            engine.add(start + offset, if (offset == 500L) .3 else 0.0, 0.0, 9.81)
+        }
+
+        val minute = engine.drain(Long.MAX_VALUE, includePartial = true).single()
+        assertEquals(MotionAccumulator.CURRENT_FEATURE_VERSION, minute.featureVersion)
+        assertEquals(1, minute.movementEvents)
+        assertTrue((minute.maxDelta ?: 0.0) >= .3)
     }
 
     @Test fun `suspend gaps duplicate and out of order events are not quiet coverage`() {
         val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
-        for (offset in 0L..10_000L step 1_000) engine.add(start + offset, 0.0, 0.0, 9.81)
+        for (offset in 0L..10_000L step 100) engine.add(start + offset, 0.0, 0.0, 9.81)
         engine.add(start, 500.0, 0.0, 0.0)
         engine.add(start + 10_000, 500.0, 0.0, 0.0)
         engine.add(start + 60_000, 0.0, 0.0, 9.81)

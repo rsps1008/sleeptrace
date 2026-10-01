@@ -65,7 +65,7 @@ class MotionRuntimeTest {
             }
             MotionService.active!!.onSleepClassifications(listOf(ClassificationSample(System.currentTimeMillis(), 90, 0, 0)))
             await("Foreground service did not register sensor after sleep classification: ${settings.status}") {
-                settings.status.contains("Google 已判斷入睡") && settings.status.contains("1 Hz")
+                settings.status.contains("Google 已判斷入睡") && settings.status.contains("10.00 Hz")
             }
             fun descendants(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { descendants(view.getChildAt(it)) } else emptyList()
             await("Home did not render") {

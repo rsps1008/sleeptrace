@@ -27,7 +27,7 @@ class MotionSettings(context: Context) {
 }
 
 /** Stores minute features only; no raw accelerometer stream. Inserts are batched in one transaction. */
-class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 3) {
+class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContext, "motion.db", null, 4) {
     private val appContext = context.applicationContext
     private val maintenancePrefs = appContext.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
     init {
@@ -49,15 +49,28 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
             FEATURE_COLUMNS.forEach { (name, type) -> db.execSQL("ALTER TABLE minutes ADD COLUMN $name $type") }
             createCaptureTable(db)
         }
+        if (oldVersion in 3 until 4) {
+            db.execSQL("ALTER TABLE capture_runs ADD COLUMN targetPeriodUs INTEGER")
+            // These capabilities were not persisted by v3. Keep them NULL rather
+            // than presenting a synthetic zero as a measured sensor property.
+            db.execSQL("ALTER TABLE capture_runs ADD COLUMN sensorMinDelayUs INTEGER")
+            db.execSQL("ALTER TABLE capture_runs ADD COLUMN sensorMaxDelayUs INTEGER")
+            db.execSQL("ALTER TABLE capture_runs ADD COLUMN fifoReservedEventCount INTEGER")
+            // The policy target is recoverable from the isolated experiment trigger;
+            // periodUs remains the actual argument passed to registerListener.
+            db.execSQL("UPDATE capture_runs SET targetPeriodUs = CASE WHEN trigger = 'EARLY_2HZ' THEN 500000 ELSE 1000000 END WHERE targetPeriodUs IS NULL")
+        }
     }
 
-    private fun createCaptureTable(db: SQLiteDatabase) = db.execSQL("CREATE TABLE IF NOT EXISTS capture_runs (id INTEGER PRIMARY KEY, windowStart INTEGER NOT NULL, registeredAt INTEGER NOT NULL, trigger TEXT NOT NULL, periodUs INTEGER NOT NULL, latencyUs INTEGER NOT NULL, fifoCount INTEGER NOT NULL, wakeUp INTEGER NOT NULL, firstEvent INTEGER, rawEvents INTEGER NOT NULL, rejectedEvents INTEGER NOT NULL, meanInterval REAL, maxInterval INTEGER)")
+    private fun createCaptureTable(db: SQLiteDatabase) = db.execSQL("CREATE TABLE IF NOT EXISTS capture_runs (id INTEGER PRIMARY KEY, windowStart INTEGER NOT NULL, registeredAt INTEGER NOT NULL, trigger TEXT NOT NULL, targetPeriodUs INTEGER NOT NULL, periodUs INTEGER NOT NULL, latencyUs INTEGER NOT NULL, sensorMinDelayUs INTEGER NOT NULL, sensorMaxDelayUs INTEGER NOT NULL, fifoReservedEventCount INTEGER NOT NULL, fifoCount INTEGER NOT NULL, wakeUp INTEGER NOT NULL, firstEvent INTEGER, rawEvents INTEGER NOT NULL, rejectedEvents INTEGER NOT NULL, meanInterval REAL, maxInterval INTEGER)")
 
     fun saveCapture(run: CaptureDiagnostics) {
         writableDatabase.insertWithOnConflict("capture_runs", null, ContentValues().apply {
             put("id", run.id); put("windowStart", run.windowStart); put("registeredAt", run.registeredAt)
-            put("trigger", run.trigger); put("periodUs", run.periodUs); put("latencyUs", run.latencyUs)
-            put("fifoCount", run.fifoCount); put("wakeUp", if (run.wakeUp) 1 else 0); put("firstEvent", run.firstEvent)
+            put("trigger", run.trigger); put("targetPeriodUs", run.targetPeriodUs); put("periodUs", run.periodUs)
+            put("latencyUs", run.latencyUs); put("sensorMinDelayUs", run.sensorMinDelayUs)
+            put("sensorMaxDelayUs", run.sensorMaxDelayUs); put("fifoReservedEventCount", run.fifoReservedEventCount)
+            put("fifoCount", run.fifoMaxEventCount); put("wakeUp", if (run.wakeUp) 1 else 0); put("firstEvent", run.firstEvent)
             put("rawEvents", run.rawEvents); put("rejectedEvents", run.rejectedEvents)
             put("meanInterval", run.meanIntervalMillis); put("maxInterval", run.maxIntervalMillis)
         }, SQLiteDatabase.CONFLICT_REPLACE)
@@ -65,10 +78,13 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
     fun captures(start: Long, end: Long): List<CaptureDiagnostics> = readableDatabase.query("capture_runs", null,
         "registeredAt < ? AND registeredAt >= ?", arrayOf(end.toString(), (start - 24 * 60 * MINUTE_MS).toString()),
         null, null, "registeredAt ASC").use { c -> buildList {
-            while (c.moveToNext()) add(CaptureDiagnostics(c.getLong(0), c.getLong(1), c.getLong(2), c.getString(3),
-                c.getInt(4), c.getInt(5), c.getInt(6), c.getInt(7) != 0, c.nullLong("firstEvent"),
-                c.getLong(9), c.getLong(10), c.nullDouble("meanInterval"), c.nullLong("maxInterval")))
+            while (c.moveToNext()) add(c.readCapture())
         } }
+
+    /** Last persisted capture summary for the read-only homepage frequency diagnostic. */
+    fun latestCapture(): CaptureDiagnostics? = readableDatabase.query(
+        "capture_runs", null, null, null, null, null, "registeredAt DESC", "1"
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.readCapture() else null }
 
     @Synchronized
     fun append(minutes: List<MotionMinute>, now: Long = System.currentTimeMillis()) {
@@ -138,6 +154,34 @@ class MotionStore(context: Context) : SQLiteOpenHelper(context.applicationContex
 
     private fun android.database.Cursor.nullLong(name: String): Long? = getColumnIndexOrThrow(name).let { if (isNull(it)) null else getLong(it) }
     private fun android.database.Cursor.nullDouble(name: String): Double? = getColumnIndexOrThrow(name).let { if (isNull(it)) null else getDouble(it) }
+    private fun android.database.Cursor.int(name: String): Int = getInt(getColumnIndexOrThrow(name))
+    private fun android.database.Cursor.long(name: String): Long = getLong(getColumnIndexOrThrow(name))
+    private fun android.database.Cursor.string(name: String): String = getString(getColumnIndexOrThrow(name))
+    private fun android.database.Cursor.readCapture(): CaptureDiagnostics {
+        val periodUs = int("periodUs")
+        val trigger = string("trigger")
+        return CaptureDiagnostics(
+            id = long("id"),
+            windowStart = long("windowStart"),
+            registeredAt = long("registeredAt"),
+            trigger = trigger,
+            targetPeriodUs = nullLong("targetPeriodUs")?.toInt()
+                ?: if (trigger == CaptureExperiment.EARLY_2HZ.name) 500_000
+                else SamplingPlan.LEGACY_ONE_HZ_TARGET_PERIOD_US,
+            periodUs = periodUs,
+            latencyUs = int("latencyUs"),
+            sensorMinDelayUs = nullLong("sensorMinDelayUs")?.toInt(),
+            sensorMaxDelayUs = nullLong("sensorMaxDelayUs")?.toInt(),
+            fifoReservedEventCount = nullLong("fifoReservedEventCount")?.toInt(),
+            fifoMaxEventCount = int("fifoCount"),
+            wakeUp = int("wakeUp") != 0,
+            firstEvent = nullLong("firstEvent"),
+            rawEvents = long("rawEvents"),
+            rejectedEvents = long("rejectedEvents"),
+            meanIntervalMillis = nullDouble("meanInterval"),
+            maxIntervalMillis = nullLong("maxInterval")
+        )
+    }
     private fun android.database.Cursor.readMinute() = MotionMinute(
         getLong(0), getLong(1), getLong(2), getDouble(3), getInt(4), Placement.valueOf(getString(5)),
         getInt(getColumnIndexOrThrow("featureVersion")),

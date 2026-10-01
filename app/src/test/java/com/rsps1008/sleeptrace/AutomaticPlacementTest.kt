@@ -23,9 +23,36 @@ class AutomaticPlacementTest {
     @Test fun `separated brief movements provide bed evidence without manual settings`() {
         val resolved = AutomaticPlacement.resolve(rows(setOf(5, 15, 25, 35, 45, 55)), emptyList())
         assertTrue(resolved.take(25).none { it.placement == Placement.BED }); assertTrue(resolved.drop(25).all { it.placement == Placement.BED })
+        assertEquals(CouplingBasis.FAST, resolved[25].coupling?.basis)
         val sleep = MotionSleepEstimator.estimate(resolved, emptyList(), SleepSchedule(0, 60), start + 60 * MINUTE_MS)
         assertEquals(35 * MINUTE_MS, sleep.single().durationMillis)
         assertEquals(SyncState.PENDING, sleep.single().state)
+    }
+
+    @Test fun `three sparse movements establish only through the sixty minute path`() {
+        // No thirty-minute window contains all three movements. The sparse
+        // proof remains causal and starts only on the third positive minute.
+        val resolved = AutomaticPlacement.resolve(rows(setOf(5, 11, 46), 70), emptyList())
+        assertTrue(resolved.take(46).all { it.placement == Placement.UNKNOWN })
+        val established = resolved[46].coupling!!
+        assertEquals(CouplingState.SUPPORTED, established.state)
+        assertEquals(CouplingBasis.SPARSE, established.basis)
+        assertEquals(3, requireNotNull(established.sparseStats).qualifyingMovements)
+        assertEquals(41 * MINUTE_MS, established.sparseStats?.movementSpanMillis)
+        assertTrue(requireNotNull(established.fastStats).qualifyingMovements < CouplingPolicy.MIN_MOVEMENTS)
+    }
+
+    @Test fun `sparse path still rejects two movements, clustered movements, and overlong spacing`() {
+        val cases = listOf(
+            rows(setOf(5, 46), 70),
+            rows(setOf(5, 6, 7), 70),
+            rows(setOf(5, 40, 70), 90)
+        )
+        cases.forEach { input ->
+            assertTrue(AutomaticPlacement.resolve(input, emptyList()).all {
+                it.coupling?.state == CouplingState.INSUFFICIENT && it.placement == Placement.UNKNOWN
+            })
+        }
     }
 
     @Test fun `single vibration or brief sample cannot establish bed placement`() {
@@ -50,8 +77,10 @@ class AutomaticPlacementTest {
         val resolved = AutomaticPlacement.resolve(rows(setOf(5, 15, 25), 120), emptyList())
         assertEquals(Placement.UNKNOWN, resolved[10].placement)
         assertEquals(Placement.BED, resolved[55].placement)
+        assertEquals("COUPLING_EXPIRED", resolved[71].coupling?.reason)
         assertEquals(Placement.UNKNOWN, resolved[100].placement)
-        assertEquals("COUPLING_EXPIRED", resolved[100].coupling?.reason)
+        assertEquals("COUPLING_INSUFFICIENT", resolved[100].coupling?.reason)
+        assertEquals("COUPLING_EXPIRED", resolved[100].coupling?.lastResetReason)
     }
 
     @Test fun `live coupling renews on one new qualifying movement without rebuilding initial history`() {
@@ -81,6 +110,86 @@ class AutomaticPlacementTest {
         val afterOneMovement = AutomaticPlacement.resolve(rows(setOf(5, 15, 25, 80), 90), emptyList())
         assertEquals(CouplingState.INSUFFICIENT, afterOneMovement[80].coupling?.state)
         assertEquals(Placement.UNKNOWN, afterOneMovement[80].placement)
+        assertEquals(1, afterOneMovement[80].coupling?.sparseStats?.qualifyingMovements)
+        assertEquals("COUPLING_EXPIRED", afterOneMovement[80].coupling?.lastResetReason)
+    }
+
+    @Test fun `hard resets discard sparse history before a later third movement`() {
+        val source = rows(setOf(5, 11, 46), 70)
+        val nextMidnight = LocalDate.of(2026, 9, 29).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val acrossDailyBoundary = source.mapIndexed { i, row ->
+            row.copy(startMillis = nextMidnight - 30 * MINUTE_MS + i * MINUTE_MS)
+        }
+        data class Case(
+            val name: String,
+            val rows: List<MotionMinute>,
+            val usage: List<UsageInterval> = emptyList(),
+            val schedule: SleepSchedule? = null
+        )
+        val cases = listOf(
+            Case("phone", source, listOf(UsageInterval(start + 30 * MINUTE_MS, start + 31 * MINUTE_MS))),
+            Case("handling", source.mapIndexed { i, row -> if (i == 30) row.copy(maxDelta = 2.0) else row }),
+            Case("gap", source.mapIndexed { i, row -> if (i == 30) row.copy(longestGapMillis = 3_000) else row }),
+            Case("recording", source.mapIndexed { i, row -> row.copy(recordingId = if (i < 30) 1 else 2) }),
+            Case("feature", source.mapIndexed { i, row -> if (i < 30) row else row.copy(featureVersion = MotionAccumulator.CADENCE_ANCHOR_FEATURE_VERSION) }),
+            Case("missing minute", source.filterIndexed { i, _ -> i != 30 }),
+            Case("schedule", acrossDailyBoundary, schedule = SleepSchedule(0, 0))
+        )
+        cases.forEach { case ->
+            val resolved = AutomaticPlacement.resolve(case.rows, case.usage, case.schedule)
+            assertTrue(case.name, resolved.none { it.placement == Placement.BED })
+        }
+    }
+
+    @Test fun `current blocker clears while the last reset reason remains diagnostic history`() {
+        val input = rows(count = 50).mapIndexed { i, row ->
+            if (i == 0) row.copy(coveredMillis = 1_000) else row
+        }
+        val resolved = AutomaticPlacement.resolve(input, emptyList())
+        assertEquals("MISSING_MOTION", resolved[0].coupling?.currentBlocker)
+        assertEquals("MISSING_MOTION", resolved[0].coupling?.reason)
+        assertNull(resolved[1].coupling?.currentBlocker)
+        assertEquals("COUPLING_INSUFFICIENT", resolved[1].coupling?.reason)
+        assertEquals("MISSING_MOTION", resolved[1].coupling?.lastResetReason)
+    }
+
+    @Test fun `unevaluated coupling windows stay null instead of reporting measured zero`() {
+        val invalid = rows(count = 1).single().copy(coveredMillis = 1_000)
+        val invalidEvidence = requireNotNull(AutomaticPlacement.resolve(listOf(invalid), emptyList()).single().coupling)
+        assertNull(invalidEvidence.fastStats)
+        assertNull(invalidEvidence.sparseStats)
+
+        val legacy = rows(count = 1).single().copy(placement = Placement.BED)
+        val legacyEvidence = requireNotNull(AutomaticPlacement.resolve(listOf(legacy), emptyList()).single().coupling)
+        assertNull(legacyEvidence.fastStats)
+        assertNull(legacyEvidence.sparseStats)
+
+        val evaluated = requireNotNull(AutomaticPlacement.resolve(rows(count = 1), emptyList()).single().coupling)
+        assertEquals(0, requireNotNull(evaluated.fastStats).qualifyingMovements)
+        assertEquals(0, requireNotNull(evaluated.sparseStats).qualifyingMovements)
+    }
+
+    @Test fun `reset diagnostics distinguish timeline feature recording and schedule boundaries`() {
+        fun blocker(input: List<MotionMinute>, schedule: SleepSchedule? = null) =
+            AutomaticPlacement.resolve(input, emptyList(), schedule).last().coupling?.currentBlocker
+
+        val first = rows(count = 1).single().copy(recordingId = 1)
+        assertEquals("TIMELINE_GAP", blocker(listOf(first, first.copy(startMillis = first.startMillis + 2 * MINUTE_MS))))
+        assertEquals("FEATURE_BOUNDARY", blocker(listOf(first, first.copy(
+            startMillis = first.startMillis + MINUTE_MS,
+            featureVersion = MotionAccumulator.CADENCE_ANCHOR_FEATURE_VERSION
+        ))))
+        assertEquals("RECORDING_BOUNDARY", blocker(listOf(first, first.copy(
+            startMillis = first.startMillis + MINUTE_MS,
+            recordingId = 2
+        ))))
+
+        val midnight = LocalDate.of(2026, 9, 29).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val before = first.copy(startMillis = midnight - MINUTE_MS)
+        assertEquals(
+            "SCHEDULE_BOUNDARY",
+            blocker(listOf(before, before.copy(startMillis = midnight)), SleepSchedule(0, 0))
+        )
     }
 
     @Test fun `recording boundary handling minute is not allowed into fresh evidence history`() {
@@ -91,6 +200,8 @@ class AutomaticPlacementTest {
         val resolved = AutomaticPlacement.resolve(input, emptyList())
         assertEquals(Placement.UNKNOWN, resolved[30].placement)
         assertTrue(resolved[30].coupling?.reason?.contains("HANDLING") == true)
+        assertTrue(resolved[30].coupling?.currentBlocker?.contains("RECORDING_BOUNDARY") == true)
+        assertTrue(resolved[30].coupling?.currentBlocker?.contains("HANDLING") == true)
         assertTrue(resolved.drop(31).none { it.placement == Placement.BED })
     }
 
@@ -112,6 +223,42 @@ class AutomaticPlacementTest {
         val resolved = AutomaticPlacement.resolve(raw, emptyList())
         assertTrue(resolved.any { it.coupling?.state == CouplingState.SUPPORTED })
         assertTrue(resolved.drop(25).any { it.placement == Placement.BED })
+    }
+
+    @Test fun `ten Hz and legacy one Hz preserve coupling for the same smooth bed movement`() {
+        val movementMinutes = setOf(5, 20, 35)
+        fun capture(plan: SamplingPlan, stepMillis: Long): List<MotionMinute> {
+            val accumulator = MotionAccumulator(plan, Placement.AUTO, 66)
+            val duration = 45 * MINUTE_MS
+            for (offset in 0L..duration step stepMillis) {
+                val minute = (offset / MINUTE_MS).toInt()
+                val within = offset % MINUTE_MS
+                val x = if (minute in movementMinutes) when (within) {
+                    in 20_000L..21_000L -> .3 * (within - 20_000L) / 1_000.0
+                    in 21_001L..22_000L -> .3 * (22_000L - within) / 1_000.0
+                    else -> 0.0
+                } else 0.0
+                accumulator.add(start + offset, x, 0.0, 9.81)
+            }
+            return accumulator.drain(start + duration)
+        }
+
+        val tenHertz = capture(SamplingPlan.choose(1_000), 100L)
+        val oneHertz = capture(
+            SamplingPlan.choose(1_000, targetPeriodUs = SamplingPlan.LEGACY_ONE_HZ_TARGET_PERIOD_US),
+            1_000L
+        )
+        listOf(tenHertz, oneHertz).forEach { minutes ->
+            movementMinutes.forEach { index ->
+                assertTrue("version=${minutes[index].featureVersion} index=$index rms=${minutes[index].rms}",
+                    minutes[index].rms >= CouplingPolicy.MIN_MOVEMENT_RMS)
+                assertTrue(minutes[index].activeMillis >= CouplingPolicy.MIN_ACTIVE_MILLIS)
+            }
+            val resolved = AutomaticPlacement.resolve(minutes, emptyList())
+            assertEquals(CouplingState.SUPPORTED, resolved[35].coupling?.state)
+            assertEquals(CouplingBasis.FAST, resolved[35].coupling?.basis)
+            assertEquals(Placement.BED, resolved[35].placement)
+        }
     }
 
     @Test fun `end to end accumulator AUTO and staging retain supported evidence but reject flat signal`() {
@@ -139,7 +286,9 @@ class AutomaticPlacementTest {
         val flat = stages(capture(emptySet()))
         assertTrue(flat.minutes.all { it.motion?.placement != Placement.BED })
         assertEquals(0L, flat.durations.deep)
-        assertTrue(flat.intervals.all { it.stage == SleepStage.SLEEPING })
+        assertTrue(flat.intervals.all { it.stage == SleepStage.LIGHT })
+        assertTrue(flat.minutes.all { !it.canStage })
+        assertTrue(flat.minutes.all { SleepStageEstimator.Reason.COUPLING_INSUFFICIENT in it.reasons })
     }
 
     @Test fun `legacy minute placement remains readable but cannot spread into new records`() {

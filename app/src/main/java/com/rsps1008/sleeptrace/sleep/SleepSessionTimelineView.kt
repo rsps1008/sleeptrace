@@ -33,7 +33,7 @@ class SleepSessionTimelineView(context: Context, private val session: SleepSessi
     private val clip = Path()
 
     init {
-        contentDescription = "清醒、推估淺眠、推估深眠、深淺未判定時間軸；依手機活動與 Google Sleep API 推估，非醫療睡眠分期"
+        contentDescription = "清醒、推估淺眠、推估深眠時間軸；證據不足的已接受睡眠片段回退顯示為淺眠，非醫療睡眠分期"
         minimumHeight = (70 * density).toInt()
     }
 
@@ -57,27 +57,23 @@ class SleepSessionTimelineView(context: Context, private val session: SleepSessi
                 SleepStage.AWAKE -> awakeColor
                 SleepStage.LIGHT -> lightColor
                 SleepStage.DEEP -> deepColor
-                SleepStage.SLEEPING -> trackColor
+                // Legacy persisted values are never exposed as a fourth stage.
+                SleepStage.SLEEPING -> lightColor
             }
             val start = left + (part.start - session.startMillis).toFloat() / span * track.width()
             val end = left + (part.end - session.startMillis).toFloat() / span * track.width()
             canvas.drawRect(max(left, start), top, min(right, end), bottom, paint)
-            if (part.stage == SleepStage.SLEEPING) {
-                paint.color = primaryColor; paint.strokeWidth = density
-                var x = max(left, start)
-                while (x < min(right, end)) {
-                    canvas.drawLine(x, bottom, minOf(x + 8 * density, end), top, paint)
-                    x += 8 * density
-                }
-            }
         }
         canvas.restore()
         canvas.drawText("入睡", left, 12 * density, labelPaint)
         val endLabel = "醒來"
         canvas.drawText(endLabel, right - labelPaint.measureText(endLabel), 12 * density, labelPaint)
         val legendY = bottom + 22 * density
-        val legend = listOf("清醒" to awakeColor, "淺眠" to lightColor,
-            "深眠" to deepColor, "未判定／斜線" to trackColor)
+        val legend = listOf(
+            "清醒" to awakeColor,
+            "淺眠" to lightColor,
+            "深眠" to deepColor
+        )
         val sectionWidth = track.width() / legend.size
         legend.forEachIndexed { index, (label, color) ->
             val markerX = left + sectionWidth * index

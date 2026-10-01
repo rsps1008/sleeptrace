@@ -225,7 +225,13 @@ class MotionService : Service(), SensorEventListener2 {
         }
         val activeWindow = requireNotNull(window)
         val selected = sensor!!
-        val next = capturePlan(experiment, selected.fifoMaxEventCount, selected.minDelay)
+        val next = capturePlan(
+            experiment = experiment,
+            fifoMaxEventCount = selected.fifoMaxEventCount,
+            minDelayUs = selected.minDelay,
+            maxDelayUs = selected.maxDelay,
+            fifoReservedEventCount = selected.fifoReservedEventCount
+        )
         val offset = now - SystemClock.elapsedRealtime()
         if (!modeChanged && plan == next && kotlin.math.abs(clockOffset - offset) < 2_000 && pendingChange == null) return
         transition {
@@ -240,19 +246,35 @@ class MotionService : Service(), SensorEventListener2 {
                 plan = next
                 val registeredAt = System.currentTimeMillis()
                 lastPersistElapsedRealtime = SystemClock.elapsedRealtime()
-                capture = CaptureDiagnostics(captureId, activeWindow.start, registeredAt,
-                    when {
+                capture = CaptureDiagnostics(
+                    id = captureId,
+                    windowStart = activeWindow.start,
+                    registeredAt = registeredAt,
+                    trigger = when {
                         settings.experiment != CaptureExperiment.OFF -> settings.experiment.name
                         fallbackWindowStart == activeWindow.start -> "SCREEN_OFF_2H_BACKUP"
                         else -> "GOOGLE_CLASSIFICATION"
-                    }, next.periodUs, next.latencyUs, selected.fifoMaxEventCount, selected.isWakeUpSensor)
-                capture?.let { runCatching { store.saveCapture(it) } }
+                    },
+                    targetPeriodUs = next.targetPeriodUs,
+                    periodUs = next.periodUs,
+                    latencyUs = next.latencyUs,
+                    sensorMinDelayUs = selected.minDelay,
+                    sensorMaxDelayUs = selected.maxDelay,
+                    fifoReservedEventCount = selected.fifoReservedEventCount,
+                    fifoMaxEventCount = selected.fifoMaxEventCount,
+                    wakeUp = selected.isWakeUpSensor
+                )
+                capture?.let { diagnostics ->
+                    runCatching { store.saveCapture(diagnostics) }
+                        .onSuccess { CaptureUpdates.notifyPersisted() }
+                }
                 val batching = if (next.latencyUs > 0) "批次上限 ${next.latencyUs / 1_000_000} 秒" else "無硬體 FIFO"
                 val sleepHint = if (!selected.isWakeUpSensor) "；休眠時可能缺資料" else ""
                 val source = if (fallbackWindowStart == activeWindow.start) {
-                    "Google 分類延遲時的低頻備援"
+                    "Google 分類延遲時的動作備援"
                 } else "Google 已判斷入睡"
-                publish("$source · ${1_000_000 / next.periodUs} Hz · $batching$sleepHint")
+                val requestedHz = String.format(java.util.Locale.US, "%.2f", 1_000_000.0 / next.periodUs)
+                publish("$source · 要求 $requestedHz Hz · $batching$sleepHint")
             }
         }
     }
@@ -300,7 +322,10 @@ class MotionService : Service(), SensorEventListener2 {
             rejectedEvents = engine.rejectedEvents,
             meanIntervalMillis = if (engine.rawEventCount > 1) engine.intervalSumMillis.toDouble() / (engine.rawEventCount - 1) else null,
             maxIntervalMillis = if (engine.rawEventCount > 1) engine.intervalMaxMillis else null) }
-        capture?.let { runCatching { store.saveCapture(it) } }
+        capture?.let { diagnostics ->
+            runCatching { store.saveCapture(diagnostics) }
+                .onSuccess { CaptureUpdates.notifyPersisted() }
+        }
         if (pendingMinutes.isEmpty()) return
         try { store.append(pendingMinutes.toList()); pendingMinutes.clear() }
         catch (_: RuntimeException) {

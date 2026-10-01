@@ -13,9 +13,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
-import com.rsps1008.sleeptrace.sleep.SleepStage
 import com.rsps1008.sleeptrace.sleep.SleepSessionTimelineView
-import com.rsps1008.sleeptrace.sleep.sleepParts
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
@@ -108,20 +106,36 @@ object SleepDialogHelper {
         session: SleepSession,
         formatDuration: (Long) -> String,
         onEdit: () -> Unit,
-        onRetry: (() -> Unit)? = null
+        onRetry: (() -> Unit)? = null,
+        stagingExplanation: String? = null
     ) {
         val detail = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(context, 24), 0, dp(context, 24), 0)
             addView(TextView(context).apply {
                 val totals = com.rsps1008.sleeptrace.sleep.stageDurations(session)
+                // SLEEPING is retained only as a legacy storage value. A valid session
+                // presents every non-Awake/non-Deep span as the configured Light fallback.
+                val displayedLight = totals.light + totals.sleeping
                 text = buildString {
                     append(context.getString(R.string.sleep_detail_total, formatDuration(totals.sleep)))
-                    if (totals.light + totals.deep == 0L) append(context.getString(R.string.sleep_detail_unknown, formatDuration(totals.sleeping)))
-                    else append(context.getString(R.string.sleep_detail_stages, formatDuration(totals.light), formatDuration(totals.deep), formatDuration(totals.sleeping)))
-                    append(context.getString(R.string.sleep_detail_footer, formatDuration(totals.awake),
-                        formatDuration(totals.light + totals.deep), session.stageAlgorithmVersion?.toString()
-                            ?: context.getString(R.string.sleep_legacy_version), session.confidence, session.reason))
+                    append(context.getString(
+                        R.string.sleep_detail_stages,
+                        formatDuration(displayedLight),
+                        formatDuration(totals.deep)
+                    ))
+                    append(context.getString(R.string.sleep_detail_fallback_notice))
+                    stagingExplanation?.takeIf { it.isNotBlank() }?.let {
+                        append(context.getString(R.string.sleep_detail_evidence, it))
+                    }
+                    append(context.getString(
+                        R.string.sleep_detail_footer,
+                        formatDuration(totals.awake),
+                        session.stageAlgorithmVersion?.toString()
+                            ?: context.getString(R.string.sleep_legacy_version),
+                        session.confidence,
+                        session.reason
+                    ))
                     session.syncError?.let { append(context.getString(R.string.sleep_detail_sync_error, it)) }
                 }
                 setTextColor(ContextCompat.getColor(context, R.color.text_secondary))

@@ -1,5 +1,12 @@
 # Replay checks compare fixture bytes and generated report text across platforms.
 app/src/test/resources/staging/real_night_style.csv text eol=lf
+app/src/test/resources/staging/sparse_coupling_night_redacted.csv text eol=lf
 docs/staging-v7-replay.txt text eol=lf
 docs/staging-v7-transition-matrix.csv text eol=lf
 docs/staging-v7-diff-intervals.csv text eol=lf
+docs/staging-v8-replay.txt text eol=lf
+docs/staging-v8-transition-matrix.csv text eol=lf
+docs/staging-v8-diff-intervals.csv text eol=lf
+docs/staging-v9-replay.txt text eol=lf
+docs/staging-v9-transition-matrix.csv text eol=lf
+docs/staging-v9-diff-intervals.csv text eol=lf

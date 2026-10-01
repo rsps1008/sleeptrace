@@ -109,6 +109,29 @@ class StagingStorageRuntimeTest {
         }
     }
 
+    @Test fun v3CaptureMigrationReconstructsPolicyTargetWithoutInventingSensorCapabilities() = isolated { context ->
+        context.openOrCreateDatabase("motion.db", Context.MODE_PRIVATE, null).use { db ->
+            db.execSQL("CREATE TABLE capture_runs (id INTEGER PRIMARY KEY, windowStart INTEGER NOT NULL, registeredAt INTEGER NOT NULL, trigger TEXT NOT NULL, periodUs INTEGER NOT NULL, latencyUs INTEGER NOT NULL, fifoCount INTEGER NOT NULL, wakeUp INTEGER NOT NULL, firstEvent INTEGER, rawEvents INTEGER NOT NULL, rejectedEvents INTEGER NOT NULL, meanInterval REAL, maxInterval INTEGER)")
+            db.execSQL("INSERT INTO capture_runs VALUES (1,0,100,'GOOGLE_CLASSIFICATION',1500000,0,10000,0,NULL,100,0,44.0,50)")
+            db.execSQL("INSERT INTO capture_runs VALUES (2,0,200,'EARLY_2HZ',750000,0,10000,0,NULL,200,0,40.0,45)")
+            db.version = 3
+        }
+
+        MotionStore(context).use { store ->
+            val captures = store.captures(0, 1_000)
+            assertEquals(2, captures.size)
+            assertEquals(1_000_000, captures[0].targetPeriodUs)
+            assertEquals(1_500_000, captures[0].periodUs)
+            assertEquals(500_000, captures[1].targetPeriodUs)
+            assertEquals(750_000, captures[1].periodUs)
+            captures.forEach {
+                assertNull(it.sensorMinDelayUs)
+                assertNull(it.sensorMaxDelayUs)
+                assertNull(it.fifoReservedEventCount)
+            }
+        }
+    }
+
     @Test fun motionStoreUsesSemanticPriorityAndNeverAddsDifferentFeatures() = isolated { context ->
         MotionStore(context).use { store ->
             fun put(start: Long, version: Int, covered: Long, active: Long, squared: Double, samples: Int) =
@@ -231,16 +254,16 @@ class StagingStorageRuntimeTest {
         assertEquals(1,store.sessions().size)
     }
 
-    @Test fun algorithmVersionFourMigratesPreviouslyReconciledVersionThree() = isolated { context ->
+    @Test fun algorithmVersionNineMigratesPreviouslyReconciledVersionEight() = isolated { context ->
         val prefs = context.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
         prefs.edit().putLong("reconcile_generation", 5L).putLong("reconciled_generation", 5L)
-            .putInt("reconciled_staging_version", 3).commit()
-        assertEquals(4, SleepStageEstimator.ALGORITHM_VERSION)
+            .putInt("reconciled_staging_version", 8).commit()
+        assertEquals(9, SleepStageEstimator.ALGORITHM_VERSION)
         assertTrue(AutomaticWorkSignals.isDirty(context))
         val migrationGeneration = AutomaticWorkSignals.generation(context)
         AutomaticWorkSignals.markReconciled(context, migrationGeneration)
         assertFalse(AutomaticWorkSignals.isDirty(context))
-        assertEquals(4, prefs.getInt("reconciled_staging_version", 0))
+        assertEquals(9, prefs.getInt("reconciled_staging_version", 0))
     }
 
     @Test fun ruleMigrationKeepsRetirementTombstonesInsteadOfDeletingRows() = isolated { context ->

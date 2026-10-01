@@ -11,22 +11,24 @@ import com.rsps1008.sleeptrace.motion.CouplingState
 /** Offline engineering estimates inside an accepted session; never a clinical sleep stage. */
 object SleepStageEstimator {
     // This version also gates automatic reconciliation-rule migrations.
-    const val ALGORITHM_VERSION = 7
+    const val ALGORITHM_VERSION = 9
     const val SLEEP_ONSET_GUARD_MILLIS = 15 * MINUTE_MS
     const val MINIMUM_BASELINE_MINUTES = 10
     const val DEEP_WINDOW_MINUTES = 15
     const val MIN_SESSION_AGE_FOR_DEEP = 20 * MINUTE_MS
-    const val UNKNOWN_DEEP_GRACE_MINUTES = 5
     private const val DEEP_BACKFILL_MINUTES = 7
+    private const val MIN_DEEP_RUN_MILLIS = 2 * MINUTE_MS
+    /** New 10 Hz evidence must form a durable bout; this filter never pads a short run. */
+    private const val TEN_HZ_MIN_DEEP_RUN_MILLIS = 10 * MINUTE_MS
     private const val MINUTE_COVERAGE_MILLIS = 45_000L
     private const val MINIMUM_SLEEP_API_CONFIDENCE = 80
-    // Uncalibrated v5 engineering limits, not physiological Deep probabilities.
+    // Uncalibrated engineering limits, not physiological Deep probabilities.
     private const val MIN_SIGNAL_RANGE = 0.0005
     private const val MIN_RELATIVE_SIGNAL_RANGE = 0.25
     private const val ENTER_MAX_EVENTS = 6
     private const val EXIT_DENSE_EVENTS = 8
     private const val MAX_CONTINUOUS_ACTIVE_MILLIS = 12_000L
-    /** V6 short-gap policy: an observed v5 gap can bridge entry context, never be staged. */
+    /** A recorded v5/v6 short gap can bridge entry context, never be staged itself. */
     private const val MINOR_GAP_MAX_MILLIS = 2_000L
     private const val MAX_MINOR_GAP_MINUTES_IN_WINDOW = 1
     private const val MAX_MINOR_GAP_TOTAL_MILLIS = 2_000L
@@ -37,12 +39,14 @@ object SleepStageEstimator {
         WINDOW_TOO_SHORT, ACTIVITY_TOO_HIGH, ENTER_DEEP, MAINTAIN_DEEP, EXIT_SUSTAINED_ACTIVITY,
         EXIT_ACTIVE_3_IN_5, EXIT_DENSE_EVENTS, EXIT_SUSTAINED_ROLLING_MOTION,
         EXIT_COUPLING_LOST, SAFETY_CAP, LEGACY_FEATURE_LIMITATION, WINDOW_CONTAINS_GAP,
-        RECORDING_BOUNDARY, COUPLING_INVALIDATED, LEGACY_PLACEMENT_UNKNOWN, ALLOWED_MINOR_GAP,
-        RECENT_WINDOW_INCOMPLETE, MINOR_GAP_BUDGET_EXCEEDED
+        RECORDING_BOUNDARY, COUPLING_INVALIDATED, LEGACY_PLACEMENT_UNKNOWN, PLACEMENT_NOT_BED, ALLOWED_MINOR_GAP,
+        RECENT_WINDOW_INCOMPLETE, MINOR_GAP_BUDGET_EXCEEDED, RELATIVE_QUIET_ENTRY,
+        RELATIVE_QUIET_CONFIRMED,
+        SHORT_DEEP_RUN
     }
     enum class Action { ENTER, MAINTAIN, EXIT, NONE }
     /** Independent provenance for a stage changed after its formal minute decision. */
-    enum class PostProcessReason { SUSTAINED_ACTIVITY_REWRITE }
+    enum class PostProcessReason { SUSTAINED_ACTIVITY_REWRITE, SHORT_DEEP_RUN_FILTER }
     data class Decision(
         val applicable: Boolean,
         val allowed: Boolean,
@@ -53,7 +57,9 @@ object SleepStageEstimator {
         val decision: Decision,
         val windowReasons: List<Reason>,
         val blockingIndices: Set<Int>,
-        val nonBlockingReasons: List<Reason>
+        val nonBlockingReasons: List<Reason>,
+        val transitionReason: String?,
+        val relativeQuietSupportIndices: Set<Int>
     )
 
     private data class FormalDecision(
@@ -68,6 +74,7 @@ object SleepStageEstimator {
         val maintenanceDecision: Decision,
         val action: Action,
         val transitionReason: String?,
+        val relativeQuietSupportIndices: Set<Int>,
         val highMotionWindowsBefore: Int,
         val highMotionWindowsCandidate: Int,
         val highMotionWindowsAfter: Int
@@ -123,8 +130,13 @@ object SleepStageEstimator {
         val highMotionWindowsCandidate: Int = 0,
         val highMotionWindowsAfter: Int = 0
     ) {
+        /** Final Light produced because full Deep evidence was unavailable or later withdrawn. */
+        val isFallbackLight: Boolean get() = finalStage == SleepStage.LIGHT &&
+            (!canStage || safetyCapAdjusted || retroactiveAdjustmentReason == PostProcessReason.SHORT_DEEP_RUN_FILTER)
+
         val primaryReason: Reason? get() = when {
             Reason.SAFETY_CAP in reasons -> Reason.SAFETY_CAP
+            Reason.SHORT_DEEP_RUN in reasons -> Reason.SHORT_DEEP_RUN
             action == Action.ENTER -> Reason.ENTER_DEEP
             action == Action.MAINTAIN -> Reason.MAINTAIN_DEEP
             canStage -> reasons.firstOrNull()
@@ -147,7 +159,10 @@ object SleepStageEstimator {
         val stageableCoverageRatio: Double = 0.0,
         val longestGapMillis: Long = 0,
         val durations: StageDurations = StageDurations(0, 0, 0, 0),
-        val undeterminedReasonsMillis: Map<Reason, Long> = emptyMap()
+        /** Retained for append-only CSV compatibility; rule 9 never emits SLEEPING. */
+        val undeterminedReasonsMillis: Map<Reason, Long> = emptyMap(),
+        /** Reasons for accepted sleep minutes shown as fallback Light without full stage evidence. */
+        val fallbackLightReasonsMillis: Map<Reason, Long> = emptyMap()
     )
     private data class MinuteSignal(
         val start: Long, val end: Long, val motion: MotionMinute?, val coverageMotion: MotionMinute?,
@@ -174,12 +189,32 @@ object SleepStageEstimator {
             ?: (it.placement == Placement.BED) } == true
         val hasRequiredFeatures: Boolean get() = motion?.let { it.featureVersion == MotionAccumulator.CADENCE_ANCHOR_FEATURE_VERSION ||
             (it.maxDelta != null && it.movementEvents != null && it.longestActiveMillis != null && it.quietTailMillis != null && it.longestGapMillis != null) } == true
-        val observedQuality: Boolean get() = validMotion && currentFeature && hasRequiredFeatures && !recordingBoundary && (motion?.longestGapMillis ?: 0) == 0L
-        val minorObservedGap: Boolean get() = validMotion && currentFeature && hasRequiredFeatures && !recordingBoundary &&
-            motion?.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION &&
-            (motion.longestGapMillis ?: 0) in 1..MINOR_GAP_MAX_MILLIS &&
-            fullBucketMissingMillis != null
-        val stageEligible: Boolean get() = !inPhoneUse && inSchedule && !beforeEvidence && observedQuality && couplingSupported
+        val observedQuality: Boolean get() {
+            if (!validMotion || !currentFeature || !hasRequiredFeatures || recordingBoundary) return false
+            val gap = motion?.longestGapMillis ?: 0L
+            if (motion?.featureVersion != MotionAccumulator.CURRENT_FEATURE_VERSION) return gap == 0L
+            // At 10 Hz, one missing 100 ms slot must not discard an otherwise
+            // observed minute. Keep both per-gap and cumulative loss bounded.
+            val missing = fullBucketMissingMillis ?: return gap == 0L
+            return gap <= 500L && missing <= 1_000L
+        }
+        val minorObservedGap: Boolean get() = motion?.let { candidate ->
+            validMotion && currentFeature && hasRequiredFeatures && !recordingBoundary &&
+                candidate.featureVersion in setOf(
+                    MotionAccumulator.CURRENT_FEATURE_VERSION,
+                    MotionAccumulator.ONE_HZ_FEATURE_VERSION,
+                    MotionAccumulator.STRICT_CADENCE_FEATURE_VERSION
+                ) &&
+                (candidate.longestGapMillis ?: 0) in 1..MINOR_GAP_MAX_MILLIS &&
+                fullBucketMissingMillis != null &&
+                (candidate.featureVersion != MotionAccumulator.CURRENT_FEATURE_VERSION ||
+                    ((candidate.longestGapMillis ?: 0L) <= 500L && fullBucketMissingMillis!! <= 1_000L))
+        } == true
+        // Coupling says the signal is still plausibly connected to the bed, while
+        // placement records the resolver's minute-level conclusion.  Require both:
+        // malformed/legacy UNKNOWN+HELD rows must not maintain Deep indefinitely.
+        val stageEligible: Boolean get() = !inPhoneUse && inSchedule && !beforeEvidence &&
+            observedQuality && couplingSupported && motion?.placement == Placement.BED
         val hardBreak: Boolean get() = inPhoneUse || inOnsetGuard || !inSchedule ||
             beforeEvidence || !observedQuality || !couplingSupported
         val usable: Boolean get() = !hardBreak
@@ -238,8 +273,8 @@ object SleepStageEstimator {
         val rolling = timeline.indices.map { rollingFeatures(timeline, maxOf(0, it - DEEP_WINDOW_MINUTES + 1)..it) }
         fun canStage(minute: MinuteSignal): Boolean = minute.stageEligible && baseline != null &&
             !baseline.narrowDistribution && minute.motion?.featureVersion == baseline.featureVersion
-        val stages = MutableList(timeline.size) { SleepStage.SLEEPING }
-        val formalStages = MutableList(timeline.size) { SleepStage.SLEEPING }
+        val stages = MutableList(timeline.size) { SleepStage.LIGHT }
+        val formalStages = MutableList(timeline.size) { SleepStage.LIGHT }
         val wasBackfilled = BooleanArray(timeline.size)
         val safetyCapAdjusted = BooleanArray(timeline.size)
         val retroactivelyAdjusted = BooleanArray(timeline.size)
@@ -249,18 +284,24 @@ object SleepStageEstimator {
         val formalDecisions = arrayOfNulls<FormalDecision>(timeline.size)
         var deep = false
         var highMotionWindows = 0
+        var lastSustainedMotionExitIndex = -1
         timeline.indices.forEach { index ->
             val minute = timeline[index]
-            val decision = evaluateFormalDecision(index, timeline, rolling, baseline, evidenceStart, deep, highMotionWindows, ::canStage)
+            val decision = evaluateFormalDecision(
+                index, timeline, rolling, baseline, evidenceStart, deep,
+                highMotionWindows, lastSustainedMotionExitIndex, ::canStage
+            )
             formalDecisions[index] = decision
             highMotionWindows = decision.highMotionWindowsAfter
+            if (decision.action == Action.EXIT &&
+                Reason.EXIT_SUSTAINED_ACTIVITY in decision.maintenanceDecision.reasons) {
+                lastSustainedMotionExitIndex = index
+            }
             val formalStage = if (canStage(minute) && decision.action in setOf(Action.ENTER, Action.MAINTAIN)) {
                 SleepStage.DEEP
             } else if (canStage(minute)) {
                 SleepStage.LIGHT
-            } else {
-                SleepStage.SLEEPING
-            }
+            } else SleepStage.LIGHT
             // Set the current minute before post-processing so a rewrite range
             // can include its confirmation minute without making that minute
             // look retroactively changed.
@@ -274,7 +315,7 @@ object SleepStageEstimator {
                         val recent = maxOf(0, index - 4)..index
                         val firstActive = recent.first { timeline[it].motion?.level == MotionLevel.ACTIVE }
                         for (i in firstActive..index) {
-                            val rewritten = if (canStage(timeline[i])) SleepStage.LIGHT else SleepStage.SLEEPING
+                            val rewritten = SleepStage.LIGHT
                             if (stages[i] != rewritten) {
                                 stages[i] = rewritten
                                 retroactivelyAdjusted[i] = true
@@ -289,13 +330,34 @@ object SleepStageEstimator {
                 Action.ENTER -> {
                     deep = true
                     events[index] = decision.transitionReason
-                    // At most seven proven stable minutes. Never cross any guard, gap or weak placement.
-                    for (i in index - 1 downTo maxOf(0, index - DEEP_BACKFILL_MINUTES)) {
-                        val previous = timeline[i]
-                        if (!previous.bed || !previous.quiet || !previous.validMotion || !previous.currentFeature || previous.motion!!.rms > baseline!!.p70 ||
-                            previous.start < maxOf(session.startMillis, evidenceStart ?: session.startMillis) + MIN_SESSION_AGE_FOR_DEEP) break
-                        stages[i] = SleepStage.DEEP
-                        wasBackfilled[i] = true
+                    // Relative entry is confirmed by at least two independent
+                    // eligible low-RMS observations. Backfill only the observed
+                    // support points themselves: a higher-RMS quiet minute between
+                    // them was not positive Deep evidence and must remain Light.
+                    decision.relativeQuietSupportIndices.forEach { supportIndex ->
+                        val support = timeline[supportIndex]
+                        if (canStage(support) && support.bed && support.quiet &&
+                            stages[supportIndex] != SleepStage.DEEP) {
+                            stages[supportIndex] = SleepStage.DEEP
+                            wasBackfilled[supportIndex] = true
+                        }
+                    }
+                    // The legacy seven-minute reconstruction belongs only to a
+                    // fully satisfied strict window. Relative entry backfills the
+                    // explicitly corroborating observations above and nothing else.
+                    if (decision.transitionReason == "enter_stable_window" &&
+                        baseline?.featureVersion != MotionAccumulator.CURRENT_FEATURE_VERSION) {
+                        var backfillMovementEvents = 0
+                        val lowerBound = maxOf(0, index - DEEP_BACKFILL_MINUTES, lastSustainedMotionExitIndex + 1)
+                        for (i in index - 1 downTo lowerBound) {
+                            val previous = timeline[i]
+                            backfillMovementEvents += previous.motion?.movementEvents ?: 0
+                            if (!canStage(previous) || !previous.quiet || previous.motion!!.rms > baseline!!.p70 ||
+                                backfillMovementEvents >= EXIT_DENSE_EVENTS || previous.inOnsetGuard ||
+                                previous.start < maxOf(session.startMillis, evidenceStart ?: session.startMillis) + MIN_SESSION_AGE_FOR_DEEP) break
+                            stages[i] = SleepStage.DEEP
+                            wasBackfilled[i] = true
+                        }
                     }
                 }
                 Action.MAINTAIN -> deep = true
@@ -304,6 +366,11 @@ object SleepStageEstimator {
         }
         applySafetyBound(timeline, rolling, stages, events, safetyCapAdjusted, baseline,
             session.endMillis - session.startMillis - phoneUse.sumOf { it.endMillis - it.startMillis })
+        filterShortDeepRuns(
+            timeline, stages, events, retroactivelyAdjusted,
+            retroactiveAdjustmentReason, retroactiveAdjustmentSourceMillis,
+            wasBackfilled, formalDecisions
+        )
         val merged = timeline.indices.map {
             SleepStageInterval(timeline[it].start, timeline[it].end, stages[it])
         }.mergeAdjacentStages()
@@ -336,8 +403,10 @@ object SleepStageEstimator {
                 // to the entry evaluation.  Keep them in their dedicated
                 // diagnostic columns, but expose them as formal reasons only
                 // when entry is the state machine's applicable branch.
-                if (decision.entryDecision.applicable) {
+                if (decision.entryDecision.applicable && !decision.entryDecision.allowed) {
                     addAll(decision.windowBlockingReasons)
+                }
+                if (decision.entryDecision.applicable) {
                     addAll(decision.nonBlockingReasons)
                 }
                 if (decision.maintenanceDecision.applicable && !decision.maintenanceDecision.allowed) {
@@ -349,6 +418,9 @@ object SleepStageEstimator {
                     else -> Unit
                 }
                 if (safetyCapAdjusted[i]) add(Reason.SAFETY_CAP)
+                if (retroactiveAdjustmentReason[i] == PostProcessReason.SHORT_DEEP_RUN_FILTER) {
+                    add(Reason.SHORT_DEEP_RUN)
+                }
             }.distinct()
         }
         val diagnostic = timeline.indices.map { i ->
@@ -422,14 +494,15 @@ object SleepStageEstimator {
             stageableCoverageRatio = if (sleepMillis == 0L) 0.0 else timeline.filter { canStage(it) }
                 .sumOf { it.end - it.start - awakeOverlap(it.start, it.end) }.toDouble() / sleepMillis,
             longestGapMillis = longestGap, durations = durations,
-            undeterminedReasonsMillis = diagnostic.filter { it.stage == SleepStage.SLEEPING }
+            undeterminedReasonsMillis = emptyMap(),
+            fallbackLightReasonsMillis = diagnostic.filter { it.isFallbackLight }
                 .groupBy { it.primaryReason ?: Reason.BASELINE_INSUFFICIENT }
                 .mapValues { (_, rows) -> rows.sumOf { it.endMillis - it.startMillis - it.phoneUseMillis } }
         )
     }
 
     private fun nightlyBaseline(timeline: List<MinuteSignal>): NightlyBaseline? {
-        // BED-only baseline: UNKNOWN can maintain established Deep briefly, never establish it alone.
+        // BED-only baseline: UNKNOWN/BEDSIDE never establish or maintain Deep.
         val eligible = timeline.filter { it.bed && it.currentFeature }
         val version = eligible.groupBy { it.motion!!.featureVersion }.filterValues { it.size >= MINIMUM_BASELINE_MINUTES }
             .keys.maxOrNull() ?: return null
@@ -459,10 +532,15 @@ object SleepStageEstimator {
         if (minute.inPhoneUse) add(Reason.PHONE_IN_USE)
         if (minute.motion == null) add(Reason.MISSING_MOTION)
         else {
-            if (!minute.validMotion || (minute.motion.longestGapMillis ?: 0L) > 0L) add(Reason.INSUFFICIENT_COVERAGE)
+            if (!minute.validMotion ||
+                (minute.currentFeature && minute.hasRequiredFeatures &&
+                    !minute.recordingBoundary && !minute.observedQuality)) {
+                add(Reason.INSUFFICIENT_COVERAGE)
+            }
             if (!minute.currentFeature || !minute.hasRequiredFeatures ||
                 (baseline != null && minute.motion.featureVersion != baseline.featureVersion)) add(Reason.LEGACY_FEATURE_LIMITATION)
             if (!minute.couplingSupported) add(couplingReason(minute.motion))
+            if (minute.motion.placement != Placement.BED) add(Reason.PLACEMENT_NOT_BED)
         }
         if (minute.recordingIdBoundary) add(Reason.RECORDING_BOUNDARY)
         if (minute.featureBoundary) add(Reason.LEGACY_FEATURE_LIMITATION)
@@ -488,6 +566,7 @@ object SleepStageEstimator {
         evidenceStart: Long?,
         priorState: Boolean,
         highMotionWindowsBefore: Int,
+        lastSustainedMotionExitIndex: Int,
         canStage: (MinuteSignal) -> Boolean
     ): FormalDecision {
         val minute = timeline[index]
@@ -496,7 +575,8 @@ object SleepStageEstimator {
         val currentEligibility = canStage(minute)
         val entry = evaluateEntry(
             index, timeline, rolling[index], baseline, evidenceStart,
-            currentEligibility, currentReasons, baselineReasons
+            currentEligibility, currentReasons, baselineReasons,
+            lastSustainedMotionExitIndex
         )
         // Retain the entry evaluation for diagnostic context, but mark only the
         // decision branch selected by the formal state machine as applicable.
@@ -514,6 +594,7 @@ object SleepStageEstimator {
                 entryDecision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
                 maintenance, if (priorState) Action.EXIT else Action.NONE,
                 if (priorState) transitionReasonFor(maintenance.reasons, hardBreak = true) else null,
+                entry.relativeQuietSupportIndices,
                 highMotionWindowsBefore, 0, 0
             )
         }
@@ -547,7 +628,8 @@ object SleepStageEstimator {
             return FormalDecision(
                 priorState, currentEligibility, currentReasons, baselineReasons,
                 entryDecision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
-                maintenance, action, transition, highMotionWindowsBefore, highCandidate,
+                maintenance, action, transition, entry.relativeQuietSupportIndices,
+                highMotionWindowsBefore, highCandidate,
                 if (maintenance.allowed) highCandidate else 0
             )
         }
@@ -556,7 +638,8 @@ object SleepStageEstimator {
         return FormalDecision(
             priorState, currentEligibility, currentReasons, baselineReasons,
             entryDecision, entry.windowReasons, entry.blockingIndices, entry.nonBlockingReasons,
-            Decision(false, false), action, if (action == Action.ENTER) "enter_stable_window" else null,
+            Decision(false, false), action, if (action == Action.ENTER) entry.transitionReason else null,
+            entry.relativeQuietSupportIndices,
             highMotionWindowsBefore, 0, 0
         )
     }
@@ -569,7 +652,8 @@ object SleepStageEstimator {
         evidenceStart: Long?,
         currentEligibility: Boolean,
         currentReasons: List<Reason>,
-        baselineReasons: List<Reason>
+        baselineReasons: List<Reason>,
+        lastSustainedMotionExitIndex: Int
     ): EntryEvaluation {
         val windowReasons = linkedSetOf<Reason>()
         val blockingIndices = linkedSetOf<Int>()
@@ -601,8 +685,12 @@ object SleepStageEstimator {
             if (range.any { timeline[it].recordingIdBoundary }) {
                 block(Reason.RECORDING_BOUNDARY, range.filter { timeline[it].recordingIdBoundary })
             }
-            if (range.any { it != index && timeline[it].motion?.featureVersion != baseline?.featureVersion }) {
-                block(Reason.LEGACY_FEATURE_LIMITATION, range.filter { timeline[it].motion?.featureVersion != baseline?.featureVersion })
+            // A missing nightly baseline is its own formal failure.  Comparing a
+            // valid current feature with `null` used to mislabel almost the whole
+            // night as legacy in diagnostics, even when every measured row was
+            // produced by the current collector.
+            if (baseline != null && range.any { it != index && timeline[it].motion?.featureVersion != baseline.featureVersion }) {
+                block(Reason.LEGACY_FEATURE_LIMITATION, range.filter { timeline[it].motion?.featureVersion != baseline.featureVersion })
             }
             val phone = range.filter { timeline[it].inPhoneUse }
             if (phone.isNotEmpty()) block(Reason.PHONE_IN_USE, phone)
@@ -641,10 +729,76 @@ object SleepStageEstimator {
             range.filter { timeline[it].minorObservedGap }.sumOf { timeline[it].fullBucketMissingMillis ?: Long.MAX_VALUE } <= MAX_MINOR_GAP_TOTAL_MILLIS) {
             nonBlockingReasons += Reason.ALLOWED_MINOR_GAP
         }
+        // A strict 15-minute window remains the preferred entry path. Real phones can,
+        // however, produce sparse high-quality BED observations separated by collector
+        // gaps. The alternative treats an observed value at or below nightly p70 as a
+        // provisional relative-quiet entry. It becomes durable either through a second
+        // prior low observation or by naturally lasting for at least two minutes; the
+        // short-run post-filter removes an otherwise isolated entry. This adds no duration
+        // quota and no fixture-specific threshold. Missing, UNKNOWN and BEDSIDE minutes
+        // still fall back to Light and immediately exit Deep.
+        val current = timeline[index]
+        val sparseHardReset = range.any {
+            it != index && (timeline[it].inPhoneUse || timeline[it].beforeEvidence ||
+                !timeline[it].inSchedule || timeline[it].recordingBoundary)
+        }
+        // A brief turn should not poison the full sparse 15-minute context. Reuse
+        // the five-minute maintenance horizon to reject only recent dense activity.
+        val relativeActivityRange = maxOf(0, index - 4)..index
+        val relativeActivity = rollingFeatures(timeline, relativeActivityRange)
+        val sparseActivityBlocked = relativeActivity.activeMinutes >= 3 ||
+            relativeActivityRange.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS ||
+            relativeActivityRange.any { (timeline[it].motion?.longestActiveMillis ?: 0L) >= MAX_CONTINUOUS_ACTIVE_MILLIS }
+        // Find corroborating, independently stage-eligible low-RMS BED observations in
+        // the existing 15-minute horizon. The current point may enter provisionally at
+        // p70; corroboration is recorded separately so only actual low observations may
+        // survive as a short confirmed run. This never targets a nightly duration.
+        val relativeQuietSupportIndices = if (baseline == null || evidenceStart == null) emptySet() else range.filterTo(linkedSetOf()) { candidateIndex ->
+            candidateIndex != index && timeline[candidateIndex].let { candidate ->
+                val candidateRecent = maxOf(0, candidateIndex - 4)..candidateIndex
+                val candidateActivityBlocked = rollingFeatures(timeline, candidateRecent).activeMinutes >= 3 ||
+                    candidateRecent.sumOf { timeline[it].motion?.movementEvents ?: 0 } >= EXIT_DENSE_EVENTS ||
+                    candidateRecent.any { (timeline[it].motion?.longestActiveMillis ?: 0L) >= MAX_CONTINUOUS_ACTIVE_MILLIS }
+                candidateIndex > lastSustainedMotionExitIndex &&
+                candidate.stageEligible && candidate.motion?.featureVersion == baseline.featureVersion &&
+                    !candidate.inOnsetGuard &&
+                    candidate.start >= maxOf(timeline.first().start, evidenceStart) + MIN_SESSION_AGE_FOR_DEEP &&
+                    candidate.quiet && candidate.bed && candidate.motion.rms <= baseline.p70 &&
+                    (candidate.motion.movementEvents ?: Int.MAX_VALUE) <= ENTER_MAX_EVENTS &&
+                    !candidateActivityBlocked
+            }
+        }
+        // Sparse relative entry remains a compatibility path for legacy 1 Hz
+        // summaries. New 10 Hz evidence has enough temporal resolution to require
+        // the strict continuous 15-minute entry window instead.
+        val provisionalRelativeQuiet = baseline != null &&
+            baseline.featureVersion != MotionAccumulator.CURRENT_FEATURE_VERSION &&
+            current.motion?.rms?.let { it <= baseline.p70 } == true
+        val confirmedRelativeQuiet = provisionalRelativeQuiet && relativeQuietSupportIndices.isNotEmpty()
+        val relativeQuietEntry = baseline != null && evidenceStart != null && currentEligibility &&
+            !current.inOnsetGuard &&
+            current.start >= maxOf(timeline.first().start, evidenceStart) + MIN_SESSION_AGE_FOR_DEEP &&
+            current.bed && current.quiet && provisionalRelativeQuiet &&
+            !sparseHardReset && !sparseActivityBlocked &&
+            (current.motion.movementEvents ?: Int.MAX_VALUE) <= ENTER_MAX_EVENTS &&
+            (current.motion.longestActiveMillis ?: Long.MAX_VALUE) < MAX_CONTINUOUS_ACTIVE_MILLIS
+        if (allReasons.isNotEmpty() && relativeQuietEntry) {
+            nonBlockingReasons += Reason.RELATIVE_QUIET_ENTRY
+            if (confirmedRelativeQuiet) nonBlockingReasons += Reason.RELATIVE_QUIET_CONFIRMED
+        }
+        val strictEntry = allReasons.isEmpty()
         return EntryEvaluation(
-            Decision(true, allReasons.isEmpty(), allReasons),
+            Decision(true, strictEntry || relativeQuietEntry, if (strictEntry || relativeQuietEntry) emptyList() else allReasons),
             windowReasons.toList(), blockingIndices,
-            nonBlockingReasons.toList()
+            nonBlockingReasons.toList(),
+            when {
+                strictEntry -> "enter_stable_window"
+                relativeQuietEntry -> "enter_relative_quiet"
+                else -> null
+            },
+            relativeQuietSupportIndices.takeIf {
+                !strictEntry && relativeQuietEntry && confirmedRelativeQuiet
+            } ?: emptySet()
         )
     }
 
@@ -675,6 +829,7 @@ object SleepStageEstimator {
                 Reason.COUPLING_INSUFFICIENT, Reason.EXIT_COUPLING_LOST,
                 Reason.LEGACY_PLACEMENT_UNKNOWN
             ) } -> "exit_coupling_lost"
+            Reason.PLACEMENT_NOT_BED in reasons -> "exit_placement_not_bed"
             reasons.any { it in setOf(Reason.MISSING_MOTION, Reason.INSUFFICIENT_COVERAGE) } -> "exit_missing_motion"
             Reason.NO_SLEEP_EVIDENCE in reasons -> "exit_no_sleep_evidence"
             Reason.EXIT_ACTIVE_3_IN_5 in reasons -> "exit_active_3_in_5"
@@ -695,7 +850,6 @@ object SleepStageEstimator {
         motion == null -> "excluded"
         motion.coveredMillis < MINUTE_COVERAGE_MILLIS || motion.level == MotionLevel.UNKNOWN -> "excluded"
         motion.placement == Placement.BEDSIDE -> "excluded"
-        minute.motion?.placement == Placement.UNKNOWN && minute.quiet -> "stay_only"
         minute.bed -> "full"
         else -> "excluded"
         }
@@ -725,7 +879,7 @@ object SleepStageEstimator {
             val duration = indices.sumOf { timeline[it].end - timeline[it].start }
             if (deepDuration - duration >= limit || duration <= deepDuration - limit) {
                 indices.forEach { i ->
-                    stages[i] = SleepStage.SLEEPING
+                    stages[i] = SleepStage.LIGHT
                     safetyCapAdjusted[i] = true
                     events[i] = "safety_cap_low_differentiation"
                 }
@@ -740,7 +894,7 @@ object SleepStageEstimator {
                     val firstStrength = rolling[first].medianRms ?: Double.MAX_VALUE
                     val lastStrength = rolling[last].medianRms ?: Double.MAX_VALUE
                     val i = if (lastStrength >= firstStrength) last else first
-                    stages[i] = SleepStage.SLEEPING
+                    stages[i] = SleepStage.LIGHT
                     safetyCapAdjusted[i] = true
                     events[i] = "safety_cap_low_differentiation"
                     deepDuration -= timeline[i].end - timeline[i].start
@@ -748,6 +902,55 @@ object SleepStageEstimator {
                 }
             }
         }
+    }
+
+    /**
+     * An isolated Deep minute is not enough temporal evidence for a Deep bout.
+     * This filter only removes Deep; it never fills Light/gap minutes or targets
+     * a nightly duration.
+     */
+    private fun filterShortDeepRuns(
+        timeline: List<MinuteSignal>,
+        stages: MutableList<SleepStage>,
+        events: Array<String?>,
+        retroactivelyAdjusted: BooleanArray,
+        retroactiveAdjustmentReason: Array<PostProcessReason?>,
+        retroactiveAdjustmentSourceMillis: Array<Long?>,
+        wasBackfilled: BooleanArray,
+        formalDecisions: Array<FormalDecision?>
+    ) {
+        var runStart: Int? = null
+        fun finishRun(endExclusive: Int) {
+            val start = runStart ?: return
+            val duration = (start until endExclusive).sumOf { timeline[it].end - timeline[it].start }
+            val tenHertzRun = (start until endExclusive).any { index ->
+                timeline[index].motion?.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION
+            }
+            val minimumDuration = if (tenHertzRun) TEN_HZ_MIN_DEEP_RUN_MILLIS else MIN_DEEP_RUN_MILLIS
+            val independentlyConfirmed = !tenHertzRun && (start until endExclusive).any { index ->
+                wasBackfilled[index] ||
+                    formalDecisions[index]?.nonBlockingReasons?.contains(Reason.RELATIVE_QUIET_CONFIRMED) == true
+            }
+            if (duration < minimumDuration && !independentlyConfirmed) {
+                val source = timeline[endExclusive - 1].end
+                for (index in start until endExclusive) {
+                    stages[index] = SleepStage.LIGHT
+                    events[index] = "short_deep_run_fallback"
+                    retroactivelyAdjusted[index] = true
+                    retroactiveAdjustmentReason[index] = PostProcessReason.SHORT_DEEP_RUN_FILTER
+                    retroactiveAdjustmentSourceMillis[index] = source
+                }
+            }
+            runStart = null
+        }
+        timeline.indices.forEach { index ->
+            if (stages[index] == SleepStage.DEEP) {
+                if (runStart == null) runStart = index
+            } else {
+                finishRun(index)
+            }
+        }
+        finishRun(timeline.size)
     }
 
     fun lastMeaningfulPhoneUseBefore(timeMillis: Long, intervals: List<UsageInterval>): Long? =

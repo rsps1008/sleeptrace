@@ -16,7 +16,7 @@ fun normalizedAwake(start: Long, end: Long, input: List<UsageInterval>): List<Us
     return result
 }
 
-/** SLEEPING means accepted sleep without enough evidence to distinguish Light/Deep. */
+/** SLEEPING is retained only to decode legacy stored rows; effective rule-9 output normalizes it to Light. */
 enum class SleepStage { AWAKE, LIGHT, DEEP, SLEEPING }
 
 data class SleepPart(val start: Long, val end: Long, val stage: SleepStage) {
@@ -44,9 +44,14 @@ fun sleepParts(session: SleepSession): List<SleepPart> {
         if (end <= start) return@forEach
         val awake = awakeIntervals.any { it.startMillis <= start && it.endMillis >= end }
         val matching = stageIntervals.filter { it.startMillis <= start && it.endMillis >= end }.map { it.stage }.distinct()
-        // Contradictory sleep labels are unknown; actual Awake evidence always wins.
-        val stage = if (awake || SleepStage.AWAKE in matching) SleepStage.AWAKE
-            else matching.singleOrNull() ?: SleepStage.SLEEPING
+        // Actual Awake evidence always wins. Missing, contradictory and legacy generic-sleep
+        // labels are accepted-session fallback Light, not a fourth user-facing stage.
+        val selected = matching.singleOrNull()
+        val stage = if (awake || SleepStage.AWAKE in matching) SleepStage.AWAKE else when (selected) {
+            SleepStage.DEEP -> SleepStage.DEEP
+            SleepStage.LIGHT, SleepStage.SLEEPING, null -> SleepStage.LIGHT
+            SleepStage.AWAKE -> SleepStage.AWAKE
+        }
         val previous = parts.lastOrNull()
         if (previous != null && previous.end == start && previous.stage == stage) {
             parts[parts.lastIndex] = previous.copy(end = end)

@@ -81,7 +81,7 @@ class SleepStageEstimatorTest {
         assertTrue(deep.endMillis >= base + 37 * MINUTE_MS)
     }
 
-    @Test fun `Deep uses the night relative P35 motion level`() {
+    @Test fun `Deep uses night-relative motion thresholds`() {
         val session = session(base, 60)
         val rows = (0 until 60).map { index ->
             val rms = (index + 1) * 0.001
@@ -119,36 +119,73 @@ class SleepStageEstimatorTest {
         assertEquals(SleepStage.DEEP, stageAt(stages, use.endMillis + 30 * MINUTE_MS))
     }
 
-    @Test fun `missing motion coverage is never treated as quiet`() {
+    @Test fun `missing motion coverage falls back to Light and is never treated as Deep evidence`() {
         val session = session(base, 70)
         val rows = motion(base, 70).filterNot { it.startMillis == base + 40 * MINUTE_MS }
         val stages = estimate(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
 
-        assertEquals(SleepStage.SLEEPING, stageAt(stages, base + 40 * MINUTE_MS))
+        assertEquals(SleepStage.LIGHT, stageAt(stages, base + 40 * MINUTE_MS))
         assertFalse(stages.any { it.stage == SleepStage.DEEP && it.startMillis < base + 41 * MINUTE_MS && it.endMillis > base + 40 * MINUTE_MS })
     }
 
-    @Test fun `one explicit short v5 gap stays Sleeping but later complete minutes may re-enter Deep`() {
+    @Test fun `one explicit short v5 gap falls back to Light but later complete minutes may re-enter Deep`() {
         val session = session(base, 80)
         val rows = (0 until 80).map { index ->
             val rms = if (index < 56) 0.010 + (index % 6) * .001 else .040
             MotionMinute(base + index * MINUTE_MS, 60_000, 0, rms * rms * 60_000, 60, Placement.BED,
-                featureVersion = MotionAccumulator.CURRENT_FEATURE_VERSION, maxDelta = .02, movementEvents = 0,
+                featureVersion = MotionAccumulator.STRICT_CADENCE_FEATURE_VERSION, maxDelta = .02, movementEvents = 0,
                 longestActiveMillis = 0, quietTailMillis = 60_000, longestGapMillis = if (index == 40) 1_000 else 0,
                 postureDelta = .01, recordingId = 7, coupling = CouplingEvidence(CouplingState.HELD, MINUTE_MS, null))
         }
         val stages = estimate(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
-        assertEquals(SleepStage.SLEEPING, stageAt(stages, base + 40 * MINUTE_MS))
+        assertEquals(SleepStage.LIGHT, stageAt(stages, base + 40 * MINUTE_MS))
         assertEquals(SleepStage.DEEP, stageAt(stages, base + 55 * MINUTE_MS))
         val result = SleepStageEstimator.analyze(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)), schedule)
         assertTrue(result.minutes[41].windowBlockingReasons.contains(SleepStageEstimator.Reason.WINDOW_CONTAINS_GAP))
     }
 
-    @Test fun `unknown placement with no coupling never becomes Light or Deep`() {
+    @Test fun `one missing ten Hz slot remains stageable without a false coverage blocker`() {
+        val session = session(base, 80)
+        val rows = motion(base, 80).mapIndexed { index, minute ->
+            val current = minute.copy(
+                sampleCount = 600,
+                featureVersion = MotionAccumulator.CURRENT_FEATURE_VERSION,
+                maxDelta = .04,
+                movementEvents = 0,
+                longestActiveMillis = 0,
+                quietTailMillis = MINUTE_MS,
+                longestGapMillis = 0,
+                postureDelta = .01,
+                recordingId = 9,
+                coupling = CouplingEvidence(CouplingState.HELD, MINUTE_MS, null)
+            )
+            if (index == 40) current.copy(
+                coveredMillis = 59_800,
+                sampleCount = 598,
+                longestGapMillis = 200
+            ) else current
+        }
+
+        val result = SleepStageEstimator.analyze(
+            session, rows, emptyList(), emptyList(),
+            listOf(SleepSegment(base, session.endMillis, 95)), schedule
+        )
+        val minute = result.minutes[40]
+        assertTrue(minute.canStage)
+        assertFalse(SleepStageEstimator.Reason.INSUFFICIENT_COVERAGE in minute.currentEligibilityReasons)
+        assertTrue(SleepStageEstimator.Reason.ALLOWED_MINOR_GAP in minute.nonBlockingReasons)
+    }
+
+    @Test fun `unknown placement with no coupling falls back to Light and never becomes Deep`() {
         val session = session(base, 60)
         val rows = motion(base, 60, Placement.UNKNOWN)
         val stages = estimate(session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
-        assertTrue(stages.all { it.stage == SleepStage.SLEEPING })
+        assertTrue(stages.all { it.stage == SleepStage.LIGHT })
+        val result = SleepStageEstimator.analyze(
+            session, rows, emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)), schedule
+        )
+        assertTrue(result.minutes.all { !it.canStage })
+        assertTrue(result.minutes.all { SleepStageEstimator.Reason.COUPLING_INSUFFICIENT in it.reasons })
     }
 
     @Test fun `bedside and unknown placement never infer Deep from phone stillness`() {
@@ -160,13 +197,18 @@ class SleepStageEstimatorTest {
         }
     }
 
-    @Test fun `Sleep API session without motion is undetermined rather than Light`() {
+    @Test fun `Sleep API session without motion falls back to Light without manufacturing Deep`() {
         val session = session(base, 60)
         val stages = estimate(session, emptyList(), emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)))
 
         assertTrue(stages.isNotEmpty())
-        assertTrue(stages.all { it.stage == SleepStage.SLEEPING })
+        assertTrue(stages.all { it.stage == SleepStage.LIGHT })
         assertFalse(stages.any { it.stage == SleepStage.DEEP })
+        val result = SleepStageEstimator.analyze(
+            session, emptyList(), emptyList(), emptyList(), listOf(SleepSegment(base, session.endMillis, 95)), schedule
+        )
+        assertTrue(result.minutes.all { !it.canStage })
+        assertTrue(result.minutes.all { SleepStageEstimator.Reason.MISSING_MOTION in it.reasons })
     }
 
     @Test fun `last meaningful phone use ends at the last interaction interval`() {

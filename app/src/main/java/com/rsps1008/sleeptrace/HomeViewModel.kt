@@ -8,6 +8,8 @@ import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.motion.SleepWindowScheduler
+import com.rsps1008.sleeptrace.motion.CaptureDiagnostics
+import com.rsps1008.sleeptrace.motion.CaptureUpdates
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -22,6 +24,7 @@ data class HomeSnapshot(
     val schedule: SleepSchedule?,
     val sessions: List<SleepSession>,
     val latestClassification: ClassificationSample?,
+    val latestCapture: CaptureDiagnostics?,
     val healthGranted: Boolean,
     val recordingEnabled: Boolean,
     val backgroundRestricted: Boolean,
@@ -53,6 +56,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             schedule = schedule,
                             sessions = store.sessions(limit = HOME_SESSION_LIMIT, includeAwakeIntervals = false),
                             latestClassification = store.latestSample(),
+                            latestCapture = dependencies.motionStore.latestCapture(),
                             healthGranted = healthSync.hasWritePermission(),
                             recordingEnabled = motionSettings.enabled,
                             backgroundRestricted = backgroundAccess.restricted,
@@ -68,6 +72,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     Log.w(TAG, "首頁資料刷新失敗", error)
                 }
             }
+        }
+        viewModelScope.launch {
+            CaptureUpdates.updates.collect { refreshRequests.trySend(Unit) }
         }
     }
 

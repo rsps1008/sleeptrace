@@ -1,10 +1,14 @@
 package com.rsps1008.sleeptrace
 
 import com.rsps1008.sleeptrace.health.AutomaticSyncQueue
+import com.rsps1008.sleeptrace.health.toHealthRecord
 import com.rsps1008.sleeptrace.sleep.*
+import androidx.health.connect.client.records.SleepSessionRecord
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import java.io.IOException
+import java.time.LocalDate
+import java.time.ZoneId
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -154,6 +158,39 @@ class AutomaticSyncTest {
         assertEquals(SyncState.PENDING, revised.state)
     }
 
+    @Test fun `rule nine stage-only migration replaces legacy Sleeping with Light on the same identity`() {
+        val old = session(SyncState.SYNCED).copy(
+            id = "stable-rule-id",
+            revision = 4,
+            stageAlgorithmVersion = 8,
+            stageIntervals = listOf(
+                SleepStageInterval(1_000, 7_201_000, SleepStage.SLEEPING)
+            )
+        )
+        val ruleNine = old.copy(
+            id = "recomputed-id",
+            state = SyncState.PENDING,
+            stageAlgorithmVersion = 9,
+            stageIntervals = listOf(
+                SleepStageInterval(1_000, 7_201_000, SleepStage.LIGHT)
+            )
+        )
+
+        val mergedRows = mergeSleepSessions(listOf(old), listOf(ruleNine))
+        assertEquals(1, mergedRows.size)
+        val migrated = mergedRows.single()
+        assertEquals(old.id, migrated.id)
+        assertEquals(old.revision + 1, migrated.revision)
+        assertEquals(SyncState.PENDING, migrated.state)
+        assertEquals(9, migrated.stageAlgorithmVersion)
+        assertEquals(listOf(SleepStage.LIGHT), migrated.stageIntervals.map { it.stage })
+        assertTrue(mergedRows.none { it.state == SyncState.RETIRED })
+
+        val payload = toHealthRecord(migrated)
+        assertEquals(listOf(SleepSessionRecord.STAGE_TYPE_LIGHT), payload.stages.map { it.stage })
+        assertTrue(payload.stages.none { it.stage == SleepSessionRecord.STAGE_TYPE_SLEEPING })
+    }
+
     @Test fun `optional manual correction is retained while upload remains automatic`() {
         val manual = session().copy(manuallyEdited = true)
         assertEquals(manual, mergeSleepSessions(listOf(manual), listOf(session().copy(endMillis = 10_000_000))).single())
@@ -231,6 +268,23 @@ class AutomaticSyncTest {
             setOf("automatic"),
             automaticSessionIdsEligibleForRuleRevocation(sessions, listOf(window))
         )
+    }
+
+    @Test fun `reconcile cutoff keeps full overlapping session and sparse coupling lookback`() {
+        val zone = ZoneId.of("Asia/Taipei")
+        val schedule = SleepSchedule(23 * 60, 7 * 60)
+        val window = schedule.windowForStartDate(LocalDate.of(2026, 10, 1), zone)
+        val sessionStart = window.startMillis
+
+        listOf(
+            window.startMillis + 30 * 60_000L,
+            window.startMillis + 5 * 60 * 60_000L
+        ).forEach { cutoff ->
+            assertEquals(
+                window.startMillis - com.rsps1008.sleeptrace.motion.CouplingPolicy.SPARSE_EVIDENCE_WINDOW_MILLIS,
+                reconciliationEvidenceStart(cutoff, listOf(sessionStart), schedule, window.endMillis, zone)
+            )
+        }
     }
 
     @Test fun `rule migration retains local tombstones and retires remotely possible records`() {

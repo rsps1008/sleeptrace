@@ -46,9 +46,13 @@ import com.rsps1008.sleeptrace.sleep.SleepTracker
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageMonitor
 import com.rsps1008.sleeptrace.sleep.SleepStageEstimator
+import com.rsps1008.sleeptrace.sleep.normalizedAwake
 import com.rsps1008.sleeptrace.sleep.stageUsageFor
+import com.rsps1008.sleeptrace.sleep.stagingAvailability
 import com.rsps1008.sleeptrace.work.WorkScheduler
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.filterNotNull
@@ -68,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private val backgroundAccess get() = dependencies.backgroundAccess
     private var permissionFlowComplete = false
     private var backgroundSettingsOpen = false
+    private var sessionDetailJob: Job? = null
     private val batterySettingsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         backgroundSettingsOpen = false
         ensureAutomaticRecording()
@@ -106,7 +111,8 @@ class MainActivity : AppCompatActivity() {
                         it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT)
                     }
                     val schedule = preferences.schedule()
-                    val contextStart = minOf(start, sessions.minOfOrNull { it.startMillis } ?: start) - 30 * MINUTE_MS
+                    val contextStart = minOf(start, sessions.minOfOrNull { it.startMillis } ?: start) -
+                        CouplingPolicy.SPARSE_EVIDENCE_WINDOW_MILLIS
                     val contextEnd = maxOf(end, sessions.maxOfOrNull { it.endMillis } ?: end) + 30 * MINUTE_MS
                     val usage = schedule.windowsBetween(contextStart, contextEnd).flatMap {
                         store.usageSnapshot(it.startMillis, it.endMillis)?.intervals.orEmpty()
@@ -156,7 +162,7 @@ class MainActivity : AppCompatActivity() {
                             },
                             bedMinutes = sessionRows.count { it.placement == Placement.BED },
                             unknownMinutes = sessionRows.count { it.placement == Placement.UNKNOWN },
-                            deepEnterEvents = stageResult?.minutes?.count { it.event == "enter_stable_window" } ?: 0,
+                            deepEnterEvents = stageResult?.minutes?.count { it.event?.startsWith("enter_") == true } ?: 0,
                             deepExitEvents = stageResult?.minutes?.count { it.event?.startsWith("exit_") == true } ?: 0
                         )
                     }
@@ -174,6 +180,11 @@ class MainActivity : AppCompatActivity() {
                             val storedStage = storedParts?.filter { it.start < minute.startMillis + MINUTE_MS && it.end > minute.startMillis }
                                 ?.map { it.stage }?.distinct()?.singleOrNull()
                             val capture = captures.firstOrNull { it.id == minute.recordingId }
+                            // Placement is resolved for every measured row, including nights
+                            // where no session diagnostic exists. Prefer that source so coupling
+                            // failure evidence is still exported for exactly those failed nights.
+                            val coupling = placementByMinute[minute.startMillis]?.coupling
+                                ?: feature?.motion?.coupling
                             val totals = result?.durations
                             fun preciseParts(parts: List<com.rsps1008.sleeptrace.sleep.SleepPart>?) = parts.orEmpty()
                                 .filter { it.start < minute.startMillis + MINUTE_MS && it.end > minute.startMillis }
@@ -211,7 +222,9 @@ class MainActivity : AppCompatActivity() {
                                 minute.longestGapMillis?.toString().orEmpty(), minute.maxDelta?.csvNumber().orEmpty(),
                                 minute.movementEvents?.toString().orEmpty(), minute.longestActiveMillis?.toString().orEmpty(),
                                 minute.quietTailMillis?.toString().orEmpty(), minute.postureDelta?.csvNumber().orEmpty(), minute.recordingId?.toString().orEmpty(),
-                                feature?.couplingState?.name.orEmpty(), feature?.couplingAgeMillis?.toString().orEmpty(), feature?.couplingInvalidation.orEmpty(),
+                                (feature?.couplingState ?: coupling?.state)?.name.orEmpty(),
+                                (feature?.couplingAgeMillis ?: coupling?.ageMillis)?.toString().orEmpty(),
+                                (feature?.couplingInvalidation ?: coupling?.reason).orEmpty(),
                                 feature?.canStage?.toString().orEmpty(), feature?.canEnterDeep?.toString().orEmpty(), feature?.canMaintainDeep?.toString().orEmpty(),
                                  feature?.priorState?.toString().orEmpty(), feature?.currentEligibility?.toString().orEmpty(),
                                  feature?.entryDecision?.applicable?.toString().orEmpty(), feature?.entryDecision?.allowed?.toString().orEmpty(),
@@ -238,9 +251,25 @@ class MainActivity : AppCompatActivity() {
                                 preciseParts(session?.let { com.rsps1008.sleeptrace.sleep.sleepParts(it.copy(stageIntervals = result?.intervals.orEmpty())) }),
                                 preciseParts(storedParts), capture?.trigger.orEmpty(), capture?.windowStart?.toString().orEmpty(),
                                 capture?.registeredAt?.toString().orEmpty(), capture?.firstEvent?.toString().orEmpty(), capture?.periodUs?.toString().orEmpty(),
-                                capture?.latencyUs?.toString().orEmpty(), capture?.fifoCount?.toString().orEmpty(), capture?.wakeUp?.toString().orEmpty(),
+                                capture?.latencyUs?.toString().orEmpty(), capture?.fifoMaxEventCount?.toString().orEmpty(), capture?.wakeUp?.toString().orEmpty(),
                                 capture?.rawEvents?.toString().orEmpty(), capture?.rejectedEvents?.toString().orEmpty(),
-                                capture?.meanIntervalMillis?.csvNumber().orEmpty(), capture?.maxIntervalMillis?.toString().orEmpty()
+                                capture?.meanIntervalMillis?.csvNumber().orEmpty(), capture?.maxIntervalMillis?.toString().orEmpty(),
+                                // Schema v2 is append-only: keep every v1 field name
+                                // and position stable for existing CSV consumers.
+                                coupling?.currentBlocker.orEmpty(), coupling?.lastResetReason.orEmpty(), coupling?.basis?.name.orEmpty(),
+                                coupling?.fastStats?.historyMinutes?.toString().orEmpty(), coupling?.fastStats?.qualifyingMovements?.toString().orEmpty(),
+                                coupling?.fastStats?.movementSpanMillis?.toString().orEmpty(), coupling?.sparseStats?.historyMinutes?.toString().orEmpty(),
+                                coupling?.sparseStats?.qualifyingMovements?.toString().orEmpty(), coupling?.sparseStats?.movementSpanMillis?.toString().orEmpty(),
+                                capture?.targetPeriodUs?.toString().orEmpty(), capture?.sensorMinDelayUs?.toString().orEmpty(),
+                                capture?.sensorMaxDelayUs?.toString().orEmpty(), capture?.fifoReservedEventCount?.toString().orEmpty(),
+                                capture?.targetHertz?.csvNumber().orEmpty(), capture?.registeredHertz?.csvNumber().orEmpty(),
+                                capture?.observedRawHertz?.csvNumber().orEmpty(), capture?.featureHertz?.csvNumber().orEmpty(),
+                                 com.rsps1008.sleeptrace.sleep.DIAGNOSTIC_SCHEMA_VERSION.toString(),
+                                 feature?.isFallbackLight?.toString().orEmpty(),
+                                 feature?.takeIf { it.isFallbackLight }?.primaryReason?.name.orEmpty(),
+                                 result?.fallbackLightReasonsMillis?.entries?.joinToString(";") { "${it.key}:${it.value}" }.orEmpty(),
+                                 baseline?.p70?.csvNumber().orEmpty(),
+                                 baseline?.let { "NIGHTLY_P70_PROVISIONAL_CONFIRMED" }.orEmpty()
                             )
                             val values = listOf(
                                 formatter.format(Instant.ofEpochMilli(minute.startMillis)),
@@ -412,6 +441,7 @@ class MainActivity : AppCompatActivity() {
         val historyCard: MaterialCardView,
         val historyRows: List<HistoryRowViews>,
         val historyAllButton: MaterialButton,
+        val captureFrequency: TextView,
         val scheduleTime: TextView,
         val scheduleMode: TextView,
         val windowAlarmAccess: MaterialButton,
@@ -537,6 +567,12 @@ class MainActivity : AppCompatActivity() {
         configuredRoot.addView(historyCard)
 
         configuredRoot.addView(createSectionTitle("動作資料匯出"))
+        val captureFrequency = TextView(this).apply {
+            textSize = 12f
+            setTextColor(color(R.color.text_secondary))
+            setLineSpacing(0f, 1.15f)
+            setPadding(0, dp(10), 0, dp(4))
+        }
         val exportCard = createCard()
         exportCard.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -547,6 +583,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(color(R.color.text_secondary))
                 setLineSpacing(0f, 1.2f)
             })
+            addView(captureFrequency)
             addView(MaterialButton(this@MainActivity).apply {
                 text = "匯出每分鐘動作資料"
                 isAllCaps = false
@@ -680,7 +717,7 @@ class MainActivity : AppCompatActivity() {
         return HomeViews(
             setupCard, configuredRoot, classificationScore, classificationDetail, emptyCard,
             latest.card, latest.title, latest.status, latest.duration, latest.times, latest.awake,
-            historyCard, historyRows, historyAllButton, scheduleTime, scheduleMode, windowAlarmAccess, scheduleToggle, permissionsReady,
+            historyCard, historyRows, historyAllButton, captureFrequency, scheduleTime, scheduleMode, windowAlarmAccess, scheduleToggle, permissionsReady,
             permissionRows, permissionSummary, permissionGrant, backgroundSection, backgroundDescription
         )
     }
@@ -823,6 +860,8 @@ class MainActivity : AppCompatActivity() {
         homeViews.configuredRoot.visibility = if (configured) View.VISIBLE else View.GONE
         if (configured) {
             updateSleepSection(snapshot.sessions, snapshot.latestClassification)
+            homeViews.captureFrequency.text = snapshot.latestCapture?.homeRateSummary()
+                ?: "尚無最近採集頻率資料。要求頻率與原始事件實測頻率會分開顯示。"
             updateSchedule(requireNotNull(snapshot.schedule), snapshot.recordingEnabled, snapshot.exactAlarmAllowed)
             updatePermissions(snapshot.healthGranted)
             updateBackgroundAccess(snapshot.backgroundRestricted, snapshot.batteryExempt)
@@ -1149,14 +1188,59 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadSessionDetails(id: String) {
-        lifecycleScope.launch {
-            val session = withContext(Dispatchers.IO) { store.session(id) } ?: return@launch
+        sessionDetailJob?.cancel()
+        sessionDetailJob = lifecycleScope.launch {
+            val payload = withContext(Dispatchers.IO) {
+                val session = store.session(id) ?: return@withContext null
+                val explanation = try {
+                    val schedule = preferences.schedule()
+                    val replayWindow = schedule.windowAt(session.startMillis)
+                    if (replayWindow == null || session.endMillis > replayWindow.endMillis) {
+                        return@withContext session to
+                            "目前排程已不再完整涵蓋這筆歷史紀錄，無法可靠回推當晚的正式阻擋原因；已保存結果不受影響。"
+                    }
+                    // AUTO placement needs the longer sparse-evidence lookback;
+                    // this is read-only and does not rewrite the saved session.
+                    val contextStart = session.startMillis - CouplingPolicy.SPARSE_EVIDENCE_WINDOW_MILLIS
+                    val contextEnd = session.endMillis
+                    val snapshotUsage = schedule.windowsBetween(contextStart, contextEnd).flatMap { window ->
+                        store.usageSnapshot(window.startMillis, window.endMillis)?.intervals.orEmpty()
+                    }
+                    // Saved Awake intervals are the durable evidence for this session.
+                    // Keep them in placement too, even if the current schedule no
+                    // longer finds the historical snapshot key.
+                    val placementUsage = normalizedAwake(
+                        contextStart,
+                        contextEnd,
+                        snapshotUsage + session.awakeIntervals
+                    )
+                    val resolved = AutomaticPlacement.resolve(
+                        dependencies.motionStore.read(contextStart, contextEnd), placementUsage, schedule
+                    )
+                    val result = SleepStageEstimator.analyze(
+                        session,
+                        resolved,
+                        store.recentSamples(contextStart),
+                        stageUsageFor(session, placementUsage),
+                        store.segments(contextStart, contextEnd),
+                        schedule
+                    )
+                    "依目前規則與目前排程唯讀檢查：${stagingAvailability(result).message()}"
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
+                session to explanation
+            } ?: return@launch
+            val (session, explanation) = payload
             SleepDialogHelper.showSession(
                 this@MainActivity, session, ::formatDuration,
                 onEdit = { editSession(session) },
                 onRetry = if (session.state in setOf(SyncState.FAILED_PERMANENT, SyncState.RETIRED_FAILED_PERMANENT)) {
                     ({ retrySession(session) })
-                } else null
+                } else null,
+                stagingExplanation = explanation
             )
         }
     }

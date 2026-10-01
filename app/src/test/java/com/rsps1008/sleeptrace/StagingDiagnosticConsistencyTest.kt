@@ -18,7 +18,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Regression cases for the V7 formal-decision and diagnostic provenance contract. */
+/** Regression cases for the formal-decision and rule-9 diagnostic provenance contract. */
 class StagingDiagnosticConsistencyTest {
     private val base = 20_000L * MINUTE_MS
     private val schedule = SleepSchedule(0, 0)
@@ -62,7 +62,14 @@ class StagingDiagnosticConsistencyTest {
     }.stage
 
     private fun accumulatorMinute(index: Int, missingSeconds: Set<Int>): MotionMinute {
-        val accumulator = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED, 77L)
+        val accumulator = MotionAccumulator(
+            SamplingPlan.choose(
+                1000,
+                targetPeriodUs = SamplingPlan.LEGACY_ONE_HZ_TARGET_PERIOD_US
+            ),
+            Placement.BED,
+            77L
+        )
         for (second in 0..60) {
             if (second !in missingSeconds) accumulator.add(
                 base + index * MINUTE_MS + second * 1_000L, 0.0, 0.0, 9.81
@@ -72,7 +79,8 @@ class StagingDiagnosticConsistencyTest {
     }
 
     private fun withAccumulatorGap(missingSeconds: Set<Int>): List<MotionMinute> = rows().map { minute ->
-        if (minute.startMillis == base + 40 * MINUTE_MS) accumulatorMinute(40, missingSeconds) else minute
+        if (minute.startMillis == base + 40 * MINUTE_MS) accumulatorMinute(40, missingSeconds)
+        else minute.copy(featureVersion = MotionAccumulator.ONE_HZ_FEATURE_VERSION)
     }
 
     private fun active(minute: MotionMinute) = minute.copy(
@@ -106,7 +114,8 @@ class StagingDiagnosticConsistencyTest {
         assertTrue(result.minutes.all { !it.canMaintainDeep })
         assertTrue(result.minutes.none { it.maintenanceDecision.applicable })
         assertTrue(result.minutes.all { SleepStageEstimator.Reason.LOW_SIGNAL_DIFFERENTIATION in it.reasons })
-        assertTrue(result.intervals.all { it.stage == SleepStage.SLEEPING })
+        assertTrue(result.intervals.all { it.stage == SleepStage.LIGHT })
+        assertTrue(result.minutes.all { !it.canStage })
     }
 
     @Test fun `isolated activity uses the formal maintenance tolerance`() {
@@ -264,26 +273,27 @@ class StagingDiagnosticConsistencyTest {
 
     @Test fun `formal activity rewrite retains its own provenance channel`() {
         val result = analyze(rows().mapIndexed { index, minute ->
-            if (index in 40..42) active(minute) else minute
+            val legacy = minute.copy(featureVersion = MotionAccumulator.ONE_HZ_FEATURE_VERSION)
+            if (index in 40..42) active(legacy) else legacy
         })
         val rewritten = result.minutes.first { it.retroactivelyAdjusted }
         assertTrue(rewritten.retroactivelyAdjusted)
         assertEquals(SleepStageEstimator.PostProcessReason.SUSTAINED_ACTIVITY_REWRITE,
             rewritten.retroactiveAdjustmentReason)
-        assertTrue(result.minutes.any { it.wasBackfilled })
         assertFalse(rewritten.safetyCapAdjusted)
     }
 
-    @Test fun `legal real accumulator gap blocks only while it remains in the recent five-minute context`() {
+    @Test fun `legal real accumulator gap remains fallback Light and stays visible in entry context`() {
         val result = analyze(withAccumulatorGap(setOf(10)))
         val gapStart = base + 40 * MINUTE_MS
 
         val gap = result.minutes[40].motion!!
         assertEquals(58_000L, gap.coveredMillis)
         assertEquals(2_000L, gap.longestGapMillis)
+        assertEquals(SleepStage.LIGHT, stageAt(result, 40))
+        assertFalse(result.minutes[40].canStage)
         for (index in 41..44) {
             val minute = result.minutes[index]
-            assertFalse(minute.canEnterDeep)
             assertTrue(SleepStageEstimator.Reason.RECENT_WINDOW_INCOMPLETE in minute.windowBlockingReasons)
             assertTrue(minute.windowBlockingIntervals.any { gapStart in it })
             assertTrue(SleepStageEstimator.Reason.ALLOWED_MINOR_GAP in minute.nonBlockingReasons)
@@ -295,41 +305,39 @@ class StagingDiagnosticConsistencyTest {
         assertTrue(reentry.windowBlockingIntervals.isEmpty())
         assertTrue(SleepStageEstimator.Reason.ALLOWED_MINOR_GAP in reentry.nonBlockingReasons)
         assertFalse(SleepStageEstimator.Reason.WINDOW_TOO_SHORT in reentry.currentEligibilityReasons)
-        assertEquals(SleepStageEstimator.Action.ENTER, reentry.action)
-        assertTrue(SleepStageEstimator.Reason.ENTER_DEEP in reentry.reasons)
-        assertEquals(SleepStageEstimator.Reason.ENTER_DEEP, reentry.primaryReason)
-        assertEquals("enter_stable_window", reentry.transitionReason)
+        assertTrue(reentry.canStage)
+        assertEquals(SleepStage.DEEP, reentry.finalStage)
     }
 
-    @Test fun `real accumulator cumulative eight-second gap exceeds the minor-gap budget`() {
+    @Test fun `real accumulator cumulative eight-second gap is Light and reports exceeded minor-gap budget`() {
         val result = analyze(withAccumulatorGap(setOf(10, 20, 30, 40)))
         val minute = result.minutes[45]
 
-        assertFalse(minute.canEnterDeep)
+        assertEquals(SleepStage.LIGHT, stageAt(result, 40))
+        assertFalse(result.minutes[40].canStage)
         assertTrue(SleepStageEstimator.Reason.MINOR_GAP_BUDGET_EXCEEDED in minute.windowBlockingReasons)
         assertTrue(SleepStageEstimator.Reason.WINDOW_CONTAINS_GAP in minute.windowBlockingReasons)
         assertFalse(SleepStageEstimator.Reason.ALLOWED_MINOR_GAP in minute.nonBlockingReasons)
         assertTrue(minute.windowBlockingIntervals.any { base + 40 * MINUTE_MS in it })
     }
 
-    @Test fun `formal entry and later output retain backfill and safety-cap provenance`() {
+    @Test fun `formal v7 entry does not backfill and later output retains safety-cap provenance`() {
+        val normalRows = rows(60)
         val normal = SleepStageEstimator.analyze(
-            session(60), rows(60), emptyList(),
-            listOf(UsageInterval(base + 20 * MINUTE_MS, base + 20 * MINUTE_MS + 1_000L)),
+            session(60), normalRows, emptyList(),
+            emptyList(),
             listOf(SleepSegment(base, base + 60 * MINUTE_MS, 95)), schedule
         )
         val entry = normal.minutes.first { it.action == SleepStageEstimator.Action.ENTER }
-        val backfilled = normal.minutes.filter { it.wasBackfilled }
-
-        assertTrue(backfilled.isNotEmpty())
-        assertTrue(backfilled.all { it.formalStage != SleepStage.DEEP })
+        assertTrue(normal.minutes.none { it.wasBackfilled })
         assertEquals(SleepStage.DEEP, entry.formalStage)
-        assertTrue(backfilled.any { it.finalStage == SleepStage.DEEP })
+        assertEquals(SleepStage.DEEP, entry.finalStage)
 
         val capped = analyze((0 until 300).map { index -> row(index, if (index < 280) .005 else .08) }, 300)
         val adjusted = capped.minutes.filter { it.safetyCapAdjusted }
         assertTrue(adjusted.isNotEmpty())
-        assertTrue(adjusted.all { it.formalStage == SleepStage.DEEP && it.finalStage == SleepStage.SLEEPING })
+        assertTrue(adjusted.all { it.formalStage == SleepStage.DEEP && it.finalStage == SleepStage.LIGHT })
+        assertTrue(adjusted.all { SleepStageEstimator.Reason.SAFETY_CAP in it.reasons })
         assertTrue(adjusted.none { it.retroactivelyAdjusted })
         capped.minutes.filter { it.action == SleepStageEstimator.Action.ENTER }.forEach {
             assertEquals("enter_stable_window", it.transitionReason)

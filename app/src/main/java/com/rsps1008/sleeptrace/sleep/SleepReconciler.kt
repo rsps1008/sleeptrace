@@ -4,7 +4,9 @@ import android.content.Context
 import com.rsps1008.sleeptrace.motion.MotionSleepEstimator
 import com.rsps1008.sleeptrace.motion.AutomaticPlacement
 import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
+import com.rsps1008.sleeptrace.motion.CouplingPolicy
 import com.rsps1008.sleeptrace.sleepDependencies
+import java.time.ZoneId
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -65,10 +67,25 @@ class SleepReconciler(private val context: Context) {
             includeAwakeIntervals = false,
             states = RECONCILIATION_STATES
         )
-        val segmentStart = minOf(analysisStart, unresolved.minOfOrNull { it.startMillis } ?: analysisStart)
-        val allSegments = store.segments(segmentStart, now)
-        val samples = store.recentSamples(analysisStart)
-        val windows = schedule.windowsBetween(segmentStart, now)
+        // A session which merely overlaps the 48-hour cutoff still needs its full
+        // saved span plus the 60-minute sparse-coupling lookback. Otherwise the
+        // arbitrary cutoff can erase the first movements and wash old stages to
+        // fallback Light during a rule migration.
+        val existingRecent = store.sessionsInRange(analysisStart, now)
+        val segmentStart = minOf(
+            analysisStart,
+            unresolved.minOfOrNull { it.startMillis } ?: analysisStart,
+            existingRecent.minOfOrNull { it.startMillis } ?: analysisStart
+        )
+        val evidenceStart = reconciliationEvidenceStart(
+            analysisStart = segmentStart,
+            sessionStarts = unresolved.map { it.startMillis } + existingRecent.map { it.startMillis },
+            schedule = schedule,
+            now = now
+        )
+        val allSegments = store.segments(evidenceStart, now)
+        val samples = store.recentSamples(evidenceStart)
+        val windows = schedule.windowsBetween(evidenceStart, now)
         val completedWindows = SleepUsageSnapshot.completedWindows(windows, now)
         val usageResult = SleepUsageSnapshot(context).captureWindows(store, completedWindows, now)
         val segments = allSegments.filter { segment ->
@@ -77,14 +94,19 @@ class SleepReconciler(private val context: Context) {
         val base = SleepAnalyzer.analyzeByWindow(
             segments, samples, usageResult.intervals, schedule, completedWindows, usageResult::availableFor
         )
-        val motion = dependencies.motionStore.read(analysisStart, now)
+        val motion = dependencies.motionStore.read(evidenceStart, now)
         val resolved = AutomaticPlacement.resolve(motion, usageResult.intervals, schedule)
+        fun inReconciliationScope(session: SleepSession): Boolean =
+            session.endMillis > analysisStart || unresolved.any {
+                it.startMillis < session.endMillis && it.endMillis > session.startMillis
+            }
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
+            .filter(::inReconciliationScope)
         val fallback = MotionSleepEstimator.estimate(
             resolved, usageResult.intervals, schedule, now,
             usageAvailable = usageResult::availableFor
         ).mapNotNull { candidate -> confirmMotionCandidateOnset(candidate, segments, samples) }
-        val existingRecent = store.sessionsInRange(analysisStart, now)
+            .filter(::inReconciliationScope)
         val staged = selectBestSessions(calculated, fallback).map { session ->
             val sessionUsage = stageUsageFor(session, usageResult.intervals)
             val estimate = SleepStageEstimator.analyze(
@@ -97,7 +119,7 @@ class SleepReconciler(private val context: Context) {
             )
             val old = existingRecent.firstOrNull { it.id == session.id || (it.startMillis < session.endMillis && it.endMillis > session.startMillis) }
             session.copy(stageIntervals = preserveExistingStagesWithoutCurrentEvidence(estimate, old?.stageIntervals, session),
-                stageAlgorithmVersion = if (estimate.currentFeatureValidMinutes > 0 || old?.stageIntervals.isNullOrEmpty()) SleepStageEstimator.ALGORITHM_VERSION else old?.stageAlgorithmVersion,
+                stageAlgorithmVersion = SleepStageEstimator.ALGORITHM_VERSION,
                 stageFeatureVersion = if (estimate.currentFeatureValidMinutes > 0) estimate.baselineFeatureVersion else old?.stageFeatureVersion)
         }
         val invalidatedAutomaticSessionIds = if (ruleMigrationPending) {
@@ -124,7 +146,7 @@ class SleepReconciler(private val context: Context) {
                     schedule = schedule
                 )
                 store.updateStageIntervals(session, preserveExistingStagesWithoutCurrentEvidence(estimate, session.stageIntervals, session),
-                    if (estimate.currentFeatureValidMinutes > 0 || session.stageIntervals.isEmpty()) SleepStageEstimator.ALGORITHM_VERSION else session.stageAlgorithmVersion,
+                    SleepStageEstimator.ALGORITHM_VERSION,
                     if (estimate.currentFeatureValidMinutes > 0) estimate.baselineFeatureVersion else session.stageFeatureVersion)
             }
         store.markReconciled(capturedGeneration)
@@ -136,6 +158,19 @@ class SleepReconciler(private val context: Context) {
             SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED_RETRYABLE
         )
     }
+}
+
+internal fun reconciliationEvidenceStart(
+    analysisStart: Long,
+    sessionStarts: List<Long>,
+    schedule: SleepSchedule,
+    now: Long,
+    zone: ZoneId = ZoneId.systemDefault()
+): Long {
+    val scopeStart = minOf(analysisStart, sessionStarts.minOrNull() ?: analysisStart)
+    val containingWindowStart = schedule.windowsBetween(scopeStart, now, zone)
+        .minOfOrNull { it.startMillis } ?: scopeStart
+    return minOf(scopeStart, containingWindowStart) - CouplingPolicy.SPARSE_EVIDENCE_WINDOW_MILLIS
 }
 
 internal fun preserveExistingStagesWithoutCurrentEvidence(
@@ -160,7 +195,8 @@ internal fun preserveExistingStagesWithoutCurrentEvidence(
     boundaries.zipWithNext().forEach { (start, end) ->
         if (end <= start) return@forEach
         val awake = result.intervals.any { it.stage == SleepStage.AWAKE && it.startMillis < end && it.endMillis > start }
-        val oldStage = clipped.firstOrNull { it.startMillis <= start && it.endMillis >= end }?.stage ?: SleepStage.SLEEPING
+        val oldStage = clipped.firstOrNull { it.startMillis <= start && it.endMillis >= end }?.stage
+            ?.takeUnless { it == SleepStage.SLEEPING } ?: SleepStage.LIGHT
         val stage = if (awake) SleepStage.AWAKE else oldStage
         val previous = output.lastOrNull()
         if (previous != null && previous.endMillis == start && previous.stage == stage)
