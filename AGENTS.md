@@ -2,7 +2,22 @@
 
 本文件供後續對話、AI 與開發者接手使用，適用於本專案全目錄。內容依 2026-10-01 的程式與已完成驗證整理；後續修改功能時，請同步維護本文件及 `README.md`。若描述與程式不同，先查實作並說明差異，不要把規劃或舊對話當作已完成功能。使用者後續明確指示優先於本文件。
 
-## 最新交付：1.0.1／規則 10（2026-10-01 review 後）
+## 最新交付：1.0.1／規則 11（2026-10-01 演算法／省電／穩定性審查）
+
+本輪從 `272f743` 開始；App 仍為 versionCode 2／1.0.1、feature v7／10 Hz、DB schema motion 4／sleep 11。最新驗證與審查範圍見 `docs/algorithm-review-v11.md`。
+
+JDK 21.0.11：262 項 JVM tests 通過；Lint 26 warnings／0 errors；Debug、AndroidTest、R8 unsigned Release 建置成功。Android 16 一次性 `-read-only -no-snapshot` 模擬器通過 13 項 instrumentation（儲存 9、觀測窗口 3、服務／UI 1）。這些會改測試 App 資料與權限，只能在可丟棄 emulator 執行；沒有操作實體手機。
+
+- 動態窗口採兩段起床等待：有效低分串起點在原排程結束前一小時內或延長期間，2 筆且跨至少 10 分鐘；更早仍需 3 筆且跨至少 20 分鐘。保留後半窗、先前高分至少早 30 分鐘、相鄰 ≤ 15 分鐘及末筆新鮮度 ≤ 10 分鐘。只取最近連續後半窗低分串，缺口及前半窗低分不永久阻擋後續證據。已 closed 窗口不回溯重開，延長的 freshness／nextStart／過期不復活規則不變。
+- `MotionWindowLookup` 在 HandlerThread 上快取事件窗口，設定／有效窗口／時區刷新時失效；事件跨窗口時重算。窗外或下一窗事件只要求一次控制端重估，補強廣播遲到時停止／換窗，不新增輪詢。換窗建立新 capture，延長同一窗口不重啟感測。
+- `MotionConfigurationRefresh` 單一 consumer 搭配 conflated Channel，避免舊慢查詢覆蓋新閉合窗，也減少重複 SP／SQLite 讀取。取消必須向外傳，普通查詢失敗不能終止 consumer。
+- `SleepSubscriptionController` 串行送出 Sleep API 訂閱／取消，合併待處理目標；暫停、恢復及 force 不能被晚到回應吃掉。失敗等下次外部觸發，不自行無限重試。`ResubscribeReceiver` 在開機、套件更新、時間／時區及精準鬧鐘權限變動後清除邊界快取再排程。
+- `MotionSleepEstimator` 在 recordingId／featureVersion 變動或時間缺口切段，不能拼接各不足 30 分鐘的片段。`ALGORITHM_VERSION=11` 沿用既有 generation、近期重算、SKIPPED／RETIRED 撤銷及人工範圍保護。
+- v7 不掃描不使用的 legacy relative-quiet 支持點；正式分期門檻與 reason／provenance 不變。批次同步逐筆 fallback 遇暫態失敗就停止後續 provider calls，保留未送列的 ID／revision 供退避重試。
+
+歷史 fixture 與 v7～v10 報告不改，新 estimator-only 報告另存 `docs/staging-v11-*`。新工程測試不代表整夜耗電、Google 真實回報、OEM／Doze／FIFO、Health Connect 真實讀寫或 PSG 準確度已驗證。
+
+## 規則 10 歷史交付（2026-10-01 review 後）
 
 本節取代下方規則 9 的歷史驗證快照；今晚測試與隔日回傳步驟見 README 的「1.0.1 夜間測試版」。App `versionCode=2`，feature v7／10 Hz 不變，DB schema 仍為 motion 4／sleep 11。
 
@@ -50,7 +65,7 @@ JDK 21.0.11：完整 243 項 JVM tests 通過、Lint 26 warnings／0 errors；De
 
 ### 偵測時段及 Sleep API
 
-2026-09-30 起床／延長觀測規則（2026-10-01 修正，僅適用非全天窗口）：排程結束是重新評估的時間，不是仍在睡眠時的硬性停止點。排程後半段若先有至少早 30 分鐘的 confidence ≥ 80 睡眠證據，再連續至少 3 筆 confidence ≤ 20、跨至少 20 分鐘、相鄰不超過 15 分鐘、最後一筆距現在不超過 10 分鐘，關閉窗口於這串低分的起點並排入自動統計／同步。單次低分、夜間短醒、缺資料或完全靜止不能提早關閉。
+2026-10-01 規則 11 起床／延長觀測（僅適用非全天窗口）：排程結束是重新評估的時間，不是仍在睡眠時的硬性停止點。排程後半段先有至少早 30 分鐘的 confidence ≥ 80 睡眠證據，才評估連續 confidence ≤ 20 的起床回報。低分串起點若在原排程結束前一小時內或延長期間，只需至少 2 筆、跨度至少 10 分鐘；更早則仍需至少 3 筆、跨度至少 20 分鐘。兩條路徑都要求相鄰回報不超過 15 分鐘、最後一筆距現在不超過 10 分鐘。回報缺口及前半夜資料只重設當串證據，不會永久阻擋後續合格的起床串；關閉時間取有效低分串起點。單筆低分、缺資料或完全靜止不能提早關閉；更早時段保留 20 分鐘以降低夜間短醒誤關窗，末段 10 分鐘仍可能受誤分類影響。這是未校準工程門檻，10 分鐘是回報的時間跨度，不是實際醒來後的保證反應時間。
 
 接近排程結束前 20 分鐘起，最新分類仍為 confidence ≥ 80 且距現在不超過 20 分鐘時，實際觀測結束延至該證據之後 30 分鐘；持續新睡眠回報可續延。續延需 now 不大於目前 effectiveEnd，且回報時間仍位於既有觀測範圍；恰在有效結束時可合法續期，超過後即使窗內高分晚到也不能重新延長。沒有近期睡眠支持時在目前有效結束時間完成觀測，不把未知或手機靜止當成睡眠。最多延至下一個排程開始，避免平日／週末窗口重疊；下一窗可接續觀測。門檻未校準，分類延遲／漏失仍可能影響結果。
 
@@ -99,7 +114,7 @@ JDK 21.0.11：完整 243 項 JVM tests 通過、Lint 26 warnings／0 errors；De
 - 完全靜止從未建立支持者維持 INSUFFICIENT／UNKNOWN，不因此宣稱床邊或睡眠。舊 BED／BEDSIDE 可讀；v4 固定尺度 BED 摘要有明確相容分期路徑，不重建已丟失的秒級特徵，不能與 v5 混入同一基準。
 - 床邊或未知資料不單獨產生動作睡眠候選，仍可採用 Sleep API 與手機使用紀錄。不能因整晚靜止就直接算整晚睡眠；舊資料的 BED／BEDSIDE 標記保留相容性。
 - v7 10 Hz、v6 1 Hz、v5 時間結構與 v4 cadence-anchor 相容路徑的 BED／QUIET 可以累積 20 分鐘以形成 motion-only 安靜區段；v3 activity-only 的 BED／ACTIVE 可作為結束區段／衝突證據，但 v3 QUIET 與 v1／v2 不建立或延長候選。motion-only 靜止不得獨立建立有效睡眠候選；Reconciler 需用 Sleep API 區段或 confidence ≥ 80 的分類確認起點，並裁掉證據之前的安靜時間。只有確認後且完整至少 30 分鐘才作為備援候選。
-- 已知手機使用、缺失／覆蓋不足資料會切斷候選；持續活動 5 分鐘也會切斷。短暫翻動不直接視為清醒。
+- 已知手機使用、缺失／覆蓋不足資料、錄製重啟及特徵版本切換會切斷候選；持續活動 5 分鐘也會切斷。短暫翻動不直接視為清醒。
 - 每個合格的動作安靜段各自形成候選，參考分數目前為 50；同一時段的分段睡眠不再只保留最長一段。
 - 若有效床上動作資料至少 30 分鐘、涵蓋 Sleep API 候選至少一半，而活動分鐘占比 ≥ 30%，該 API 候選降低 30 分。
 - `selectBestSessions` 按調整後分數由高到低保留不重疊候選，平手優先 Sleep API。所有採用的候選進入 `PENDING`，沒有人工確認門檻。
@@ -318,7 +333,7 @@ v7、v6、v5、v4 都是可提供 Deep 正向證據的 cadence 路徑；v1／v2 
 
 既有 `sleeptrace_motion_2026-10-01.csv` 與去識別回放只含 v5／v6 分鐘摘要，沒有 v7 的 100 ms 代表點或原始事件 timestamp；它們可驗證舊資料相容與「Deep 超過 60 分鐘」這類最後黑箱驗收，但不能驗證 10 Hz 特徵、缺口判定、整夜耗電或準確度。v7 必須另取新的正式 10 Hz 夜間資料，依 feature version、原始事件實測 Hz、feature target Hz、每分鐘 sample count／coverage、gap、分期輸出及電量一起驗證；feature target 不是實測有效率。小米健康截圖沒有同晚逐段真值，只作形狀與量級參考，不進入公式。
 
-`motion.db` 非破壞性維持 schema 4；同一時間結構欄位保存 v7 10 Hz 或 v6 1 Hz 分鐘摘要，v1／v2 原列保留，舊資料沒有量到的新特徵仍為 SQL NULL；`capture_runs` 保存 target/request period、sensor min/max delay 與 FIFO reserved/max。舊 schema 3 的政策 target 依隔離實驗 trigger 還原為 1 Hz／2 Hz；當時未保存的 sensor min/max delay 與 FIFO reserved 保持 SQL NULL，不把未知冒充量測到的 0。`sleep_events.db` 維持 schema 11 保存每筆 session 的 nullable `stageAlgorithmVersion`、`stageFeatureVersion`；舊結果無來源顯示舊版／來源不明。規則 10 由全域 dirty/generation 觸發近期重算，不新建平行排程；legacy SLEEPING／空白／矛盾階段在標準時間線正規化成 Light。沒有可相容的現存摘要時仍保留 session 與其時間界線，不能虛構 Deep；規則撤銷亦需窗口仍有 Sleep API 原始輸入。人工起訖不改，重算裁在人工界線內。同輸入／版本輸出確定，只有同步內容真正變更才遞增 revision，保留 clientRecordId；僅版本來源更新不重送。
+`motion.db` 非破壞性維持 schema 4；同一時間結構欄位保存 v7 10 Hz 或 v6 1 Hz 分鐘摘要，v1／v2 原列保留，舊資料沒有量到的新特徵仍為 SQL NULL；`capture_runs` 保存 target/request period、sensor min/max delay 與 FIFO reserved/max。舊 schema 3 的政策 target 依隔離實驗 trigger 還原為 1 Hz／2 Hz；當時未保存的 sensor min/max delay 與 FIFO reserved 保持 SQL NULL，不把未知冒充量測到的 0。`sleep_events.db` 維持 schema 11 保存每筆 session 的 nullable `stageAlgorithmVersion`、`stageFeatureVersion`；舊結果無來源顯示舊版／來源不明。規則 11 由全域 dirty/generation 觸發近期重算，不新建平行排程；legacy SLEEPING／空白／矛盾階段在標準時間線正規化成 Light。沒有可相容的現存摘要時仍保留 session 與其時間界線，不能虛構 Deep；規則撤銷亦需窗口仍有 Sleep API 原始輸入。人工起訖不改，重算裁在人工界線內。同輸入／版本輸出確定，只有同步內容真正變更才遞增 revision，保留 clientRecordId；僅版本來源更新不重送。
 
 ### CSV 診斷閱讀
 

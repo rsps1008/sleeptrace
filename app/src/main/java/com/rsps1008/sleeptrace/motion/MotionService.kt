@@ -21,6 +21,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -36,11 +37,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 
 /** Automatic foreground recording after setup; no continuous wake lock or raw sensor persistence. */
 class MotionService : Service(), SensorEventListener2 {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val configurationRequests = Channel<Unit>(Channel.CONFLATED)
     private lateinit var thread: HandlerThread
     private lateinit var handler: Handler
     private lateinit var sensors: SensorManager
@@ -52,6 +55,8 @@ class MotionService : Service(), SensorEventListener2 {
     private var capture: CaptureDiagnostics? = null
     private var configuredExperiment = CaptureExperiment.OFF
     private var schedule: SleepSchedule? = null
+    private val eventWindows = MotionWindowLookup()
+    private var boundaryRefreshPending = false
     private var triggeredWindowStart: Long? = null
     private var fallbackWindowStart: Long? = null
     @Volatile private var screenOffSince: Long? = null
@@ -96,6 +101,21 @@ class MotionService : Service(), SensorEventListener2 {
         ).firstOrNull()
         thread = HandlerThread("sleeptrace-motion").apply { start() }
         handler = Handler(thread.looper)
+        scope.launch(Dispatchers.IO) {
+            consumeMotionConfigurationRefreshes(configurationRequests, refresh = {
+                val prefs = sleepDependencies().preferences
+                val newSchedule = if (prefs.configured()) prefs.schedule() else null
+                val classifications = sleepDependencies().store.recentSamples(
+                    System.currentTimeMillis() - SleepClassificationTrigger.MAX_EVENT_AGE_MILLIS
+                )
+                handler.post {
+                    if (!stopped && !destroyed) {
+                        recentClassifications = classifications
+                        configure(newSchedule, classifications)
+                    }
+                }
+            }, onFailure = { Log.w("MotionService", "睡眠記錄設定更新失敗，等待下次更新", it) })
+        }
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "自動睡眠記錄", NotificationManager.IMPORTANCE_LOW)
         )
@@ -142,19 +162,7 @@ class MotionService : Service(), SensorEventListener2 {
     }
 
     fun refreshConfiguration() {
-        scope.launch(Dispatchers.IO) {
-            val prefs = sleepDependencies().preferences
-            val newSchedule = if (prefs.configured()) prefs.schedule() else null
-            val classifications = sleepDependencies().store.recentSamples(
-                System.currentTimeMillis() - SleepClassificationTrigger.MAX_EVENT_AGE_MILLIS
-            )
-            handler.post {
-                if (!stopped && !destroyed) {
-                    recentClassifications = classifications
-                    configure(newSchedule, classifications)
-                }
-            }
-        }
+        configurationRequests.trySend(Unit)
     }
 
     /** Called after Google Play services delivers sleep classifications. */
@@ -169,6 +177,8 @@ class MotionService : Service(), SensorEventListener2 {
 
     private fun configure(newSchedule: SleepSchedule?, classifications: List<ClassificationSample> = recentClassifications) {
         schedule = newSchedule
+        eventWindows.update(newSchedule)
+        boundaryRefreshPending = false
         if (!settings.enabled || !SleepTracker.hasActivityRecognition(this)) {
             stopped = true
             transition { stopSelf() }; return
@@ -233,7 +243,8 @@ class MotionService : Service(), SensorEventListener2 {
             fifoReservedEventCount = selected.fifoReservedEventCount
         )
         val offset = now - SystemClock.elapsedRealtime()
-        if (!modeChanged && plan == next && kotlin.math.abs(clockOffset - offset) < 2_000 && pendingChange == null) return
+        if (!modeChanged && plan == next && capture?.windowStart == activeWindow.start &&
+            kotlin.math.abs(clockOffset - offset) < 2_000 && pendingChange == null) return
         transition {
             clockOffset = System.currentTimeMillis() - SystemClock.elapsedRealtime()
             val captureId = SystemClock.elapsedRealtimeNanos()
@@ -301,9 +312,18 @@ class MotionService : Service(), SensorEventListener2 {
     override fun onSensorChanged(event: SensorEvent) {
         val engine = accumulator ?: return
         val time = clockOffset + event.timestamp / 1_000_000
-        val window = schedule?.windowAt(time) ?: return
-        if (time < window.start || time >= window.end) {
-            if (pendingChange == null && !stopped) configure(schedule)
+        // Resolve calendar/DST boundaries only when entering a different window or after
+        // configuration changes, not on each raw callback (which may exceed requested Hz).
+        val eventWindow = eventWindows.windowAt(time)
+        if (eventWindow == null || eventWindow.start != capture?.windowStart) {
+            // An overdue/missing boundary broadcast must not leave a live listener running
+            // outside its window. One existing sensor callback requests a fresh schedule;
+            // no polling alarm or extra wake lock is added. Ignore late pre-window batches.
+            if (time >= (capture?.windowStart ?: Long.MAX_VALUE) &&
+                !boundaryRefreshPending && pendingChange == null && !stopped) {
+                boundaryRefreshPending = true
+                refreshConfiguration()
+            }
             return
         }
         if (capture?.firstEvent == null) capture = capture?.copy(firstEvent = time)
@@ -354,6 +374,7 @@ class MotionService : Service(), SensorEventListener2 {
 
     override fun onDestroy() {
         active = null
+        configurationRequests.close()
         scope.cancel()
         runCatching { unregisterReceiver(powerReceiver) }
         handler.post {

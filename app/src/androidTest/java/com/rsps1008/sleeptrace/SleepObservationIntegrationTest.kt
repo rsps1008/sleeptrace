@@ -102,4 +102,33 @@ class SleepObservationIntegrationTest {
         }
         withContext(Dispatchers.IO) { assertFalse(backing.read().containsKey(full)) }
     }
+
+    @Test fun fastWakeCommitsFromSQLiteAndDoesNotReopenOnLateHigh() = runBlocking {
+        val context = context("fast_wake")
+        val backing = SharedPreferencesObservationPersistence(context.getSharedPreferences("sleeptrace_motion", Context.MODE_PRIVATE))
+        val store = SleepEventStore(context)
+        var now = at(440)
+        var closed = 0
+        try {
+            withContext(Dispatchers.IO) {
+                backing.commit(emptyMap(), backing.read().keys)
+                store.writableDatabase.delete("samples", null, null)
+                store.append(samples = listOf(350 to 90, 430 to 10, 440 to 10).map {
+                    ClassificationSample(at(it.first), it.second, 0, 0)
+                }, now = now)
+            }
+            val repo = SleepObservationRepository(backing, store::recentSamples, {}, {
+                assertEquals(ObservationEnd(at(430), true), backing.read()[window])
+                closed++
+            }, { now }, zone)
+            val preferences = SleepPreferences({ SleepSchedule(23 * 60, 7 * 60) to true }, {}, repo::apply)
+            withContext(Dispatchers.Main) { assertNull(preferences.schedule().windowAt(now, zone)) }
+            withContext(Dispatchers.IO) {
+                now = at(445)
+                store.append(samples = listOf(ClassificationSample(now, 90, 0, 0)), now = now)
+            }
+            withContext(Dispatchers.Main) { assertNull(preferences.schedule().windowAt(now, zone)) }
+            assertEquals(1, closed)
+        } finally { withContext(Dispatchers.IO) { store.close() } }
+    }
 }

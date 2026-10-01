@@ -107,6 +107,15 @@ object AutomaticSyncQueue {
                 // permanent failure one record at a time so valid siblings still get uploaded.
                 var transientFallbackFailure = false
                 writing.forEach { session ->
+                    if (transientFallbackFailure) {
+                        // The provider is unavailable/rate-limiting. Defer the untouched tail
+                        // to WorkManager's backoff instead of making up to 1,000 failing calls.
+                        update(session, session.copy(
+                            state = SyncState.FAILED_RETRYABLE,
+                            syncError = "健康服務暫時無法使用，等待自動重試"
+                        ))
+                        return@forEach
+                    }
                     try {
                         writeBatch(listOf(session))
                         update(session, session.copy(state = SyncState.SYNCED))

@@ -4,7 +4,21 @@ Android 手機睡眠推估，包名 `com.rsps1008.sleeptrace`。Google Sleep API
 
 App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 Android adaptive、圓形、一般及 monochrome themed icon；原始生成圖與預覽保存在 `artwork/`。
 
-## 1.0.1 夜間測試版：規則 10（2026-10-01）
+## 1.0.1 夜間測試版：規則 11（2026-10-01）
+
+本輪從 `272f743` 審查取樣、動態觀測、AUTO 耦合、睡眠候選、分期、保存及同步，並修正下列問題。App 仍為 `versionCode=2`／1.0.1、feature v7／10 Hz、DB schema motion 4／sleep 11。
+
+- **末段起床少等一筆回報**：低分串從原排程結束前一小時內或延長期間開始時，改為連續兩筆低分、至少 10 分鐘；更早仍需三筆、至少 20 分鐘。睡眠前證據、回報新鮮度與缺口限制保留。舊缺口或前半夜低分不再卡住之後重新建立的有效起床證據。
+- **減少背景重複計算**：感測回呼共用已解析窗口，窗口／時區更新即失效；8 小時、10 Hz 的受控測試從逐筆 288,000 次日曆查詢降為 1 次（沒有途中設定更新的情況）。v7 分期跳過不會採用的 legacy P70 支持點掃描；沒有降低採樣率或放寬 Deep 門檻。
+- **窗口與訂閱更新保持順序**：服務設定查詢串行並合併重複請求，失敗後可由下次事件重試。Sleep API 訂閱／取消也串行且只保留最新目標，避免晚到舊回應污染暫停／恢復狀態。開機、時間／時區或精準鬧鐘權限變動後重新設定邊界鬧鐘；窗外 sensor callback 也會要求一次窗口重估，補強邊界廣播遲到的情況，不增加輪詢或 wake lock。
+- **候選不能跨錄製／版本邊界拼接**：錄製重啟、feature 切換或資料缺口會結束原安靜段。規則升至 11，透過既有近期重算／撤銷流程保留穩定 ID、人工修正與退休紀錄。已持久化 closed 的觀測窗保持閉合，不回溯重開。
+- **暫態同步失敗停止密集呼叫**：批次永久失敗改逐筆嘗試時，一旦遇到暫態錯誤，剩餘列保留相同 ID／revision、等待既有 WorkManager 退避。
+
+完整審查範圍、重現及最新驗證見 [規則 11 審查紀錄](docs/algorithm-review-v11.md)。歷史回放文件不覆寫；新報告為 `docs/staging-v11-*`，既有 estimator-only 回放時間線與規則 10 相同。
+
+本輪 JDK 21.0.11 驗證：**262 項 JVM tests、13 項一次性 Android 16 模擬器 instrumentation 通過**；Lint 26 warnings／0 errors；Debug、AndroidTest、R8 unsigned Release APK 建置成功。沒有驗證實機整夜耗電或生理分期準確度，沒有操作實體手機。
+
+### 規則 10 歷史交付（本輪延續保留）
 
 針對 `ca609b3` 的 review 修正已完成；App `versionCode=2`、分期規則 10、正式動作摘要 v7／要求 10 Hz，motion／sleep DB schema 仍為 4／11。這是供新一晚收集資料的工程測試版，不是分期準確度、背景完整性或耗電已獲證實的結論。
 
@@ -27,7 +41,7 @@ JDK 21.0.11 執行 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndro
 
 ## 自動記錄睡眠
 
-2026-09-30 起床／延長觀測規則（2026-10-01 修正，僅適用非全天窗口）：排程結束是重新評估的時間，不是仍在睡眠時的硬性停止點。排程後半段若先有至少早 30 分鐘的 confidence ≥ 80 睡眠證據，再連續至少 3 筆 confidence ≤ 20、跨至少 20 分鐘、相鄰不超過 15 分鐘、最後一筆距現在不超過 10 分鐘，關閉窗口於這串低分的起點並排入自動統計／同步。單次低分、夜間短醒、缺資料或完全靜止不能提早關閉。
+2026-10-01 規則 11 起床／延長觀測（僅適用非全天窗口）：排程結束是重新評估的時間，不是仍在睡眠時的硬性停止點。排程後半段先有至少早 30 分鐘的 confidence ≥ 80 睡眠證據，才評估連續 confidence ≤ 20 的起床回報。低分串起點若在原排程結束前一小時內或延長期間，只需至少 2 筆、跨度至少 10 分鐘；更早則仍需至少 3 筆、跨度至少 20 分鐘。兩條路徑都要求相鄰回報不超過 15 分鐘、最後一筆距現在不超過 10 分鐘。回報缺口及前半夜資料只重設當串證據，不會永久阻擋後續合格的起床串；關閉時間取有效低分串起點。單筆低分、缺資料或完全靜止不能提早關閉；更早時段保留 20 分鐘以降低夜間短醒誤關窗，末段 10 分鐘仍可能受誤分類影響。這是未校準工程門檻，10 分鐘是回報的時間跨度，不是實際醒來後的保證反應時間。
 
 接近排程結束前 20 分鐘起，最新分類仍為 confidence ≥ 80 且距現在不超過 20 分鐘時，實際觀測結束延至該證據之後 30 分鐘；持續新睡眠回報可續延。續延需 now 不大於目前 effectiveEnd，且回報時間仍位於既有觀測範圍；恰在有效結束時可合法續期，超過後即使窗內高分晚到也不能重新延長。沒有近期睡眠支持時在目前有效結束時間完成觀測，不把未知或手機靜止當成睡眠。最多延至下一個排程開始，避免平日／週末窗口重疊；下一窗可接續觀測。門檻未校準，分類延遲／漏失仍可能影響結果。
 
@@ -61,7 +75,7 @@ JDK 21.0.11 執行 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndro
 
 ### 非醫療淺眠／深眠與證據限制
 
-目前分期規則版本為 10、正式 10 Hz 動作摘要 feature 版本為 7；詳細規則、資料相容性及欄位定義見下方「目前分期規則」。只在已成立 session 內分析；有充分、可比較的低活動證據時才推估 DEEP，其餘已接受睡眠輸出 LIGHT。缺資料、無耦合、基準不足或低訊號差異仍會阻擋 Deep，並保留正式 reason codes；回退 Light 只是輸出策略，不是淺眠生理證據。AWAKE 僅由已知清醒／精確手機使用覆蓋，手機靜止與 Google confidence 均不是深眠機率。
+目前分期規則版本為 11、正式 10 Hz 動作摘要 feature 版本為 7；詳細規則、資料相容性及欄位定義見下方「目前分期規則」。只在已成立 session 內分析；有充分、可比較的低活動證據時才推估 DEEP，其餘已接受睡眠輸出 LIGHT。缺資料、無耦合、基準不足或低訊號差異仍會阻擋 Deep，並保留正式 reason codes；回退 Light 只是輸出策略，不是淺眠生理證據。AWAKE 僅由已知清醒／精確手機使用覆蓋，手機靜止與 Google confidence 均不是深眠機率。
 
 新動作資料以事件 timestamp 的固定 100 ms cadence 正規化成約 10 個特徵代表點／秒，再彙總為 v7 分鐘摘要；不因 FIFO 批次一次送達就把事件擠在同一時刻，也不保存原始波形。既有 v6 固定 1 秒摘要及 v5／v4 cadence 都保留明確相容路徑；v1／v2 保留讀取，v3 保留活動衝突。基準不混版本，storage priority 為 v7 > v6 > v5 > v4 > v3 > v2 > v1。v7 每分鐘單次缺口不超過 500 ms、累積缺漏不超過 1,000 ms 時仍可通過品質檢查；這些已接受的小缺口不再重複消耗舊版 15 分鐘窗口的單次缺口額度。超額缺口、手機使用、guard、版本或錄製邊界仍阻擋 Deep；無法細分的已接受睡眠片段回退 Light。耦合使用 SUPPORTED／有限 HELD／INSUFFICIENT，不將安靜直接當床邊，不永久延續已過期的支持；內部 `UNKNOWN` placement 是證據狀態，不是輸出的睡眠階段。
 
@@ -85,7 +99,7 @@ Health Connect 待同步 session 會先驗證、保存 `SYNCING` 狀態，再以
 
 - 每分鐘有效覆蓋至少 45 秒才判讀；長間隔、倒序、重複或非有限值樣本不增加覆蓋。
 - v7 以相鄰 100 ms 差與精確 1 秒 lag 差的較大值作動作能量，v6 則使用相鄰 1 秒差；能量 ≥ 0.15 m/s² 算活動。v7 會合併同一短脈衝在 1 秒 lag 通道造成的回聲事件，避免一個物理動作被計成兩次。活動時間比例 ≥ 5% 或變化 RMS ≥ 0.20 m/s²，標示該分鐘有動作。這些是可調的工程起點，未以 PSG 校準。
-- v7 10 Hz、v6 1 Hz、v5 時間結構與 v4 cadence-anchor 相容路徑的 BED／QUIET 可以累積 20 分鐘安靜證據；v3 activity-only 的 BED／ACTIVE 可用來結束區段或降低既有候選的參考分數，v3 QUIET 與 v1／v2 資料不建立候選。完整區段至少 30 分鐘，才成為備援候選。手機使用、缺失／低覆蓋資料或持續活動 5 分鐘會切斷區段；短暫翻動不等於清醒。同一時段的多個合格安靜段會分別保存，避免分段睡眠只留下最長一段。
+- v7 10 Hz、v6 1 Hz、v5 時間結構與 v4 cadence-anchor 相容路徑的 BED／QUIET 可以累積 20 分鐘安靜證據；v3 activity-only 的 BED／ACTIVE 可用來結束區段或降低既有候選的參考分數，v3 QUIET 與 v1／v2 資料不建立候選。完整區段至少 30 分鐘，才成為備援候選。手機使用、缺失／低覆蓋資料、錄製重啟、特徵版本切換或持續活動 5 分鐘會切斷區段；短暫翻動不等於清醒。同一時段的多個合格安靜段會分別保存，避免分段睡眠只留下最長一段。
 - 若床上動作有效資料至少 30 分鐘且涵蓋候選一半以上，而其中活動分鐘占比 ≥ 30%，Sleep API 候選分數降低 30 分。重疊來源依調整後的參考分數自動選擇，平手優先 Sleep API；低分不阻擋同步。
 - 舊版需要人工處理的紀錄會自動轉入同步佇列。完全沒有候選、有效睡眠不足 30 分鐘或舊紀錄缺少已扣除手機使用的時間明細，App 會自動略過，不要求人工裁決。尚未授予使用情況存取權時，App 使用其餘資料推估並保留限制說明。
 - 新候選若跨越多筆破碎歷史紀錄，會保留其中一筆穩定 ID 作為新版；其餘已同步的 ID 先從 Health Connect 移除，成功後才送出新版，避免因保守跳過而長期不更新或留下重複資料。
@@ -167,7 +181,7 @@ Health Connect 去重／更新依據：[Client Record ID 與版本](https://deve
 
 2026-09-30 規則遷移撤銷：升版整理時重新驗證近期已完成睡眠窗內的自動 session；新版不再產生者保留本機列，未同步列標為 `SKIPPED`，已同步或可能已送出的列標為 `RETIRED` 並交由既有 Health Connect 刪除流程；手動修正及仍匹配新版候選者保留。117 個 JVM 測試通過，lintDebug 25 warnings／0 errors，Debug、AndroidTest APK 與 Release 建置成功；SQLite tombstone／generation instrumentation 已編譯但未在只有實體裝置的環境執行，Health Connect 實際刪除亦未連服務驗證。
 
-reconciliation rule version 目前為 10，沿用 `SleepStageEstimator.ALGORITHM_VERSION` 作為已保存規則版本。`AutomaticWorkSignals` 在保存版本低於目前版本時視為 dirty，讓升級後沿用既有 KEEP 工作重算最近 48 小時的寫回範圍；跨過截止點的既有 session 會讀完整 session／排程窗及額外 60 分鐘耦合前文，避免部分輸入洗掉既有階段。規則遷移時也會重新驗證完整結束睡眠窗內、未手動修正的自動 session。新版不再產生且未同步的列保留在本機並標成 `SKIPPED`；已同步或可能已送出的列保留為 `RETIRED`，由既有 Health Connect `clientRecordId` 刪除流程處理，成功刪除後才改為 `SKIPPED`。手動修正與新版仍產生的候選不撤銷；不會為此直接刪除本機 session。Health Connect 的退休刪除與新增寫入共用程序內互斥，避免 immediate／periodic worker 交錯而讓舊請求在刪除後重新寫入。只有 reconcile 資料交易完成且 generation 仍相同時才記錄新版本。
+reconciliation rule version 目前為 11，沿用 `SleepStageEstimator.ALGORITHM_VERSION` 作為已保存規則版本。`AutomaticWorkSignals` 在保存版本低於目前版本時視為 dirty，讓升級後沿用既有 KEEP 工作重算最近 48 小時的寫回範圍；跨過截止點的既有 session 會讀完整 session／排程窗及額外 60 分鐘耦合前文，避免部分輸入洗掉既有階段。規則遷移時也會重新驗證完整結束睡眠窗內、未手動修正的自動 session。新版不再產生且未同步的列保留在本機並標成 `SKIPPED`；已同步或可能已送出的列保留為 `RETIRED`，由既有 Health Connect `clientRecordId` 刪除流程處理，成功刪除後才改為 `SKIPPED`。手動修正與新版仍產生的候選不撤銷；不會為此直接刪除本機 session。Health Connect 的退休刪除與新增寫入共用程序內互斥，避免 immediate／periodic worker 交錯而讓舊請求在刪除後重新寫入。只有 reconcile 資料交易完成且 generation 仍相同時才記錄新版本。
 
 ## 目前分期規則：Light 回退、耦合及可觀測特徵（2026-10-01 更新）
 
@@ -199,7 +213,7 @@ v7、v6、v5、v4 都是可提供 Deep 正向證據的 cadence 路徑，但當�
 
 既有 `sleeptrace_motion_2026-10-01.csv` 與去識別回放只含 v5／v6 分鐘摘要，沒有 v7 的 100 ms 代表點或原始事件 timestamp；它們可驗證舊資料相容與「Deep 超過 60 分鐘」這類最後黑箱驗收，但不能驗證 10 Hz 特徵、缺口判定、整夜耗電或準確度。v7 必須另取新的正式 10 Hz 夜間資料，依 feature version、原始事件實測 Hz、feature target Hz、每分鐘 sample count／coverage、gap、分期輸出及電量一起驗證；feature target 只是正規化上限，不是實測有效率。小米健康截圖沒有同晚逐段真值，只作形狀與量級參考，不進入公式。
 
-`motion.db` 非破壞性維持 schema 4；同一組時間結構欄位保存 v7 10 Hz 或 v6 1 Hz 分鐘摘要，v1／v2 原列保留，舊資料沒有量到的新特徵仍為 SQL NULL；`capture_runs` 保存政策 target period、傳給 SensorManager 的 period、sensor min/max delay、FIFO reserved/max。舊 schema 3 的政策 target 可由隔離實驗 trigger 還原為 1 Hz／2 Hz；當時未保存的 sensor min/max delay 與 FIFO reserved 保持 SQL NULL，不把未知冒充量測到的 0。`sleep_events.db` 維持 schema 11 保存每筆 session 的 nullable `stageAlgorithmVersion`、`stageFeatureVersion`；舊結果無來源顯示舊版／來源不明。規則 10 透過全域 dirty/generation 觸發近期重算，不新建平行排程；legacy SLEEPING／空白／矛盾階段在標準時間線正規化成 Light。沒有可相容的現存摘要時仍保留 session 與其時間界線，不能虛構 Deep；規則撤銷亦需窗口仍有 Sleep API 原始輸入。人工起訖不改，重算裁在人工界線內。同輸入／版本輸出確定，只有同步內容真正變更才遞增 revision，保留 clientRecordId；僅版本來源更新不重送。
+`motion.db` 非破壞性維持 schema 4；同一組時間結構欄位保存 v7 10 Hz 或 v6 1 Hz 分鐘摘要，v1／v2 原列保留，舊資料沒有量到的新特徵仍為 SQL NULL；`capture_runs` 保存政策 target period、傳給 SensorManager 的 period、sensor min/max delay、FIFO reserved/max。舊 schema 3 的政策 target 可由隔離實驗 trigger 還原為 1 Hz／2 Hz；當時未保存的 sensor min/max delay 與 FIFO reserved 保持 SQL NULL，不把未知冒充量測到的 0。`sleep_events.db` 維持 schema 11 保存每筆 session 的 nullable `stageAlgorithmVersion`、`stageFeatureVersion`；舊結果無來源顯示舊版／來源不明。規則 11 透過全域 dirty/generation 觸發近期重算，不新建平行排程；legacy SLEEPING／空白／矛盾階段在標準時間線正規化成 Light。沒有可相容的現存摘要時仍保留 session 與其時間界線，不能虛構 Deep；規則撤銷亦需窗口仍有 Sleep API 原始輸入。人工起訖不改，重算裁在人工界線內。同輸入／版本輸出確定，只有同步內容真正變更才遞增 revision，保留 clientRecordId；僅版本來源更新不重送。
 
 ### CSV 診斷閱讀
 

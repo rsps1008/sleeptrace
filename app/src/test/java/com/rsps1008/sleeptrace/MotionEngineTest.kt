@@ -74,6 +74,25 @@ class MotionEngineTest {
         assertFalse(SleepClassificationTrigger.shouldFallback(window, delayed, null))
     }
 
+    @Test fun `motion candidates cannot bridge a recording restart or feature version change`() {
+        val control = (0 until 40).map { minute(it).copy(recordingId = 1L) }
+        assertEquals(1, MotionSleepEstimator.estimate(control, emptyList(), schedule, end).size)
+        val restarted = control.mapIndexed { index, row -> row.copy(recordingId = if (index < 20) 1L else 2L) }
+        val recalculated = MotionSleepEstimator.estimate(restarted, emptyList(), schedule, end)
+        assertTrue(recalculated.isEmpty())
+        val changedFeatures = control.mapIndexed { index, row -> row.copy(featureVersion =
+            if (index < 20) MotionAccumulator.ONE_HZ_FEATURE_VERSION else MotionAccumulator.CURRENT_FEATURE_VERSION) }
+        assertTrue(MotionSleepEstimator.estimate(changedFeatures, emptyList(), schedule, end).isEmpty())
+        for (state in listOf(SyncState.PENDING, SyncState.SYNCED)) {
+            val old = SleepSession(id = "old-mixed", startMillis = start, endMillis = start + 40 * MINUTE_MS,
+                confidence = 50, awakeMillis = 0, state = state, reason = "old candidate", stageAlgorithmVersion = 10)
+            val eligible = automaticSessionIdsEligibleForRuleRevocation(listOf(old), listOf(window))
+            val migrated = mergeSleepSessions(listOf(old), recalculated, eligible).single()
+            assertEquals(old.id, migrated.id)
+            assertEquals(if (state == SyncState.SYNCED) SyncState.RETIRED else SyncState.SKIPPED, migrated.state)
+        }
+    }
+
     @Test fun `a delayed batch keeps sample time and complete coverage`() {
         val engine = MotionAccumulator(SamplingPlan.choose(1000), Placement.BED)
         for (offset in 0L..120_000L step 100) engine.add(start + offset, 0.0, 0.0, 9.81)

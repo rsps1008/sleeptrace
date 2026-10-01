@@ -254,6 +254,24 @@ class SleepObservationRepositoryTest {
         }
     }
 
+    @Test fun `fast wake closure persists once and all consumers use the shorter window`() = runBlocking {
+        Harness(now = at(440)).use { h ->
+            h.samples = listOf(sample(350, 90), sample(430, 10), sample(440, 10))
+            val effective = h.preferences().schedule()
+            assertEquals(ObservationEnd(at(430), true), h.disk.read()[window])
+            assertFalse(SleepWindowScheduler.shouldRunForegroundService(effective, h.now, zone))
+            assertNull(effective.classificationWindowAt(h.now, zone))
+            assertEquals(at(430), analyze(effective, at(480)).single().endMillis)
+            assertTrue(SleepUsageSnapshot.isWindowComplete(session(start, at(430)), effective, h.now, zone))
+            assertFalse(SleepUsageSnapshot.canReuse(
+                UsageSnapshot(start, at(480), true, emptyList(), at(480)),
+                SleepWindow(start, at(430)), true))
+            h.events.clear(); h.reload(); h.samples += sample(445, 90); h.now = at(445)
+            assertNull(h.preferences().schedule().windowAt(h.now, zone))
+            assertTrue(h.events.isEmpty())
+        }
+    }
+
     @Test fun `formal preferences called on controlled Main move reads queries commit and notifications to IO`() {
         Executors.newSingleThreadExecutor { Thread(it, "controlled-Main") }.asCoroutineDispatcher().use { main ->
             Harness().use { h ->

@@ -30,6 +30,9 @@ class ResubscribeReceiver : BroadcastReceiver() {
                 } else {
                     SleepTracker.syncSubscription(context, schedule, enabled, System.currentTimeMillis())
                 }
+                // The same timestamp does not prove an alarm survived reboot/permission changes,
+                // or that an earlier inexact alarm now uses newly granted exact-alarm access.
+                SleepWindowScheduler.clearDelivered(context)
                 if (configured && enabled && schedule != null) SleepWindowScheduler.schedule(context, schedule)
                 else SleepWindowScheduler.cancel(context)
                 WorkScheduler.schedule(context)

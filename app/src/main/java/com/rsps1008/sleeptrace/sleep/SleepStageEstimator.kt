@@ -11,7 +11,7 @@ import com.rsps1008.sleeptrace.motion.CouplingState
 /** Offline engineering estimates inside an accepted session; never a clinical sleep stage. */
 object SleepStageEstimator {
     // This version also gates automatic reconciliation-rule migrations.
-    const val ALGORITHM_VERSION = 10
+    const val ALGORITHM_VERSION = 11
     const val SLEEP_ONSET_GUARD_MILLIS = 15 * MINUTE_MS
     const val MINIMUM_BASELINE_MINUTES = 10
     const val DEEP_WINDOW_MINUTES = 15
@@ -769,7 +769,7 @@ object SleepStageEstimator {
         // the existing 15-minute horizon. The current point may enter provisionally at
         // p70; corroboration is recorded separately so only actual low observations may
         // survive as a short confirmed run. This never targets a nightly duration.
-        val relativeQuietSupportIndices = if (baseline == null || evidenceStart == null) emptySet() else range.filterTo(linkedSetOf()) { candidateIndex ->
+        val relativeQuietSupportIndices = if (baseline?.relativeQuietThreshold == null || evidenceStart == null) emptySet() else range.filterTo(linkedSetOf()) { candidateIndex ->
             candidateIndex != index && timeline[candidateIndex].let { candidate ->
                 val candidateRecent = maxOf(0, candidateIndex - 4)..candidateIndex
                 val candidateActivityBlocked = rollingFeatures(timeline, candidateRecent).activeMinutes >= 3 ||

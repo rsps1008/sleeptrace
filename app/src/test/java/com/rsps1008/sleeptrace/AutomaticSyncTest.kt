@@ -107,6 +107,24 @@ class AutomaticSyncTest {
         assertEquals(1, failures.size)
     }
 
+    @Test fun `transient failure during single-record fallback stops further provider calls`() = runBlocking {
+        val repo = Repository(listOf("good", "busy", "deferred").map { session().copy(id = it) })
+        val attempts = mutableListOf<List<String>>()
+        val failures = mutableListOf<Throwable>()
+        assertFalse(AutomaticSyncQueue.drainBatch(repo::read, repo::update, failures::add) { batch ->
+            attempts += batch.map { it.id }
+            if (batch.size > 1) throw IllegalArgumentException("invalid batch")
+            if (batch.single().id == "busy") throw IOException("provider unavailable")
+        })
+        assertEquals(listOf(listOf("good", "busy", "deferred"), listOf("good"), listOf("busy")), attempts)
+        assertEquals(SyncState.SYNCED, repo.rows.first().state)
+        assertTrue(repo.rows.drop(1).all { it.state == SyncState.FAILED_RETRYABLE })
+        val retry = repo.rows.drop(1).map { it.id to it.revision }
+        assertTrue(AutomaticSyncQueue.drainBatch(repo::read, repo::update, failures::add) { batch ->
+            assertEquals(retry, batch.map { it.id to it.revision })
+        })
+    }
+
     @Test fun `interrupted upload is resumed without new id`() = runBlocking {
         val repo = Repository(listOf(session(SyncState.SYNCING)))
         assertTrue(AutomaticSyncQueue.drain(repo::read, repo::update) { assertEquals("night", it.id) })

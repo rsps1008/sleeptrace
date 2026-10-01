@@ -420,6 +420,7 @@ object MotionSleepEstimator {
             var sleepStart: Long? = null
             var activeStart: Long? = null
             var previousEnd: Long? = null
+            var previous: MotionMinute? = null
             val runs = mutableListOf<Pair<Long, Long>>()
             fun close(end: Long) {
                 sleepStart?.let { if (end - it >= 30 * MINUTE_MS) runs += it to end }
@@ -427,7 +428,11 @@ object MotionSleepEstimator {
             }
             usable.forEach { minute ->
                 val start = minute.startMillis
-                if (previousEnd != null && previousEnd != start) close(previousEnd!!)
+                if (previousEnd != null && (previousEnd != start ||
+                        previous?.recordingId != minute.recordingId ||
+                        previous?.featureVersion != minute.featureVersion)) {
+                    close(previousEnd!!)
+                }
                 val phoneInUse = usage.any { it.startMillis < start + MINUTE_MS && it.endMillis > start }
                 if (minute.placement != Placement.BED || minute.level == MotionLevel.UNKNOWN || phoneInUse ||
                     (!minute.supportsCurrentStaging && !MotionFeaturePolicy.supportsSleepConflictEvidence(minute.featureVersion, minute.level))
@@ -444,6 +449,7 @@ object MotionSleepEstimator {
                     if (start + MINUTE_MS - activeStart!! >= 5 * MINUTE_MS) close(activeStart!!)
                 }
                 previousEnd = start + MINUTE_MS
+                previous = minute
             }
             close(activeStart ?: previousEnd ?: window.start)
             runs.map { run ->

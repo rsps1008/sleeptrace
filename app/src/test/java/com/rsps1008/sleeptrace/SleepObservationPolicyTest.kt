@@ -44,6 +44,48 @@ class SleepObservationPolicyTest {
         assertEquals(ObservationEnd(at(400), true), resolve(woke, 420))
     }
 
+    @Test fun `last scheduled hour needs two low reports spanning ten minutes`() {
+        val samples = listOf(sample(350, 90), sample(430, 10), sample(440, 20))
+        assertEquals(ObservationEnd(at(430), true), resolve(samples, 440))
+        assertFalse(resolve(samples.take(2), 430).closed)
+        assertFalse(resolve(listOf(sample(350, 90), sample(430, 10), sample(439, 10)), 439).closed)
+    }
+
+    @Test fun `earlier wake and a run starting before the fast zone still need twenty minutes`() {
+        assertFalse(resolve(listOf(sample(300, 90), sample(400, 10), sample(410, 10)), 410).closed)
+        assertFalse(resolve(listOf(sample(300, 90), sample(415, 10), sample(425, 10)), 425).closed)
+        assertEquals(ObservationEnd(at(415), true), resolve(
+            listOf(sample(300, 90), sample(415, 10), sample(425, 10), sample(435, 10)), 435))
+    }
+
+    @Test fun `fast wake uses nominal end during an extension`() {
+        assertEquals(ObservationEnd(at(485), true), resolve(
+            listOf(sample(440, 90), sample(485, 10), sample(495, 10)), 495,
+            ObservationEnd(at(550), false)))
+    }
+
+    @Test fun `a missing report restarts wake proof instead of poisoning all subsequent lows`() {
+        val samples = listOf(sample(280, 90), sample(330, 10), sample(380, 10), sample(390, 10))
+        assertFalse(resolve(samples, 390).closed)
+        assertEquals(ObservationEnd(at(380), true), resolve(samples + sample(400, 10), 400))
+    }
+
+    @Test fun `lows before morning do not permanently block a later complete morning run`() {
+        assertEquals(ObservationEnd(at(240), true), resolve(
+            listOf(sample(150, 90), sample(220, 10), sample(230, 10),
+                sample(240, 10), sample(250, 10), sample(260, 10)), 260))
+    }
+
+    @Test fun `fast wake still rejects stale sparse interrupted duplicate and unsupported reports`() {
+        val high = sample(350, 90)
+        assertFalse(resolve(listOf(high, sample(430, 10), sample(450, 10)), 450).closed)
+        assertFalse(resolve(listOf(high, sample(430, 10), sample(440, 10)), 451).closed)
+        assertFalse(resolve(listOf(high, sample(430, 10), sample(435, 50), sample(440, 10)), 440).closed)
+        assertFalse(resolve(listOf(high, sample(430, 10), sample(430, 10)), 440).closed)
+        assertFalse(resolve(listOf(sample(430, 10), sample(440, 10)), 440).closed)
+        assertFalse(resolve(listOf(sample(420, 90), sample(430, 10), sample(440, 10)), 440).closed)
+    }
+
     @Test fun `single low score or short interruption cannot close`() {
         assertFalse(resolve(woke.take(2), 400).closed)
         assertFalse(resolve(listOf(sample(300, 90), sample(400, 10), sample(405, 10), sample(410, 10)), 410).closed)
