@@ -70,9 +70,9 @@ class StagingReplayTest {
         // explicit SLEEPTRACE_UPDATE_REPLAY_DOCS=true run is the only update
         // mode, used after reviewing the generated build/reports output.
         val docs = listOf(
-            java.io.File("../docs/staging-v9-replay.txt") to text,
-            java.io.File("../docs/staging-v9-transition-matrix.csv") to matrixCsv,
-            java.io.File("../docs/staging-v9-diff-intervals.csv") to diffCsv
+            java.io.File("../docs/staging-v10-replay.txt") to text,
+            java.io.File("../docs/staging-v10-transition-matrix.csv") to matrixCsv,
+            java.io.File("../docs/staging-v10-diff-intervals.csv") to diffCsv
         )
         if (System.getenv("SLEEPTRACE_UPDATE_REPLAY_DOCS").equals("true", ignoreCase = true)) {
             docs.forEach { (file, content) -> file.writeText(content, Charsets.UTF_8) }

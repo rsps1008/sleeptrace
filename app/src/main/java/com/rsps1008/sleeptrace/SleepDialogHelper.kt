@@ -145,7 +145,10 @@ object SleepDialogHelper {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 70)
             ).apply { topMargin = dp(context, 16) })
         }
-        val dialog = MaterialAlertDialogBuilder(context).setTitle(session.title()).setView(detail)
+        // Evidence explanations and sync errors can exceed a small screen's height.
+        // Keep the timeline reachable while the dialog's actions remain fixed.
+        val scrollableDetail = ScrollView(context).apply { addView(detail) }
+        val dialog = MaterialAlertDialogBuilder(context).setTitle(session.title()).setView(scrollableDetail)
             .setNegativeButton("關閉", null)
             .setNeutralButton("修正時間") { _, _ -> onEdit() }
         if (onRetry != null) dialog.setPositiveButton("重新同步") { _, _ -> onRetry() }

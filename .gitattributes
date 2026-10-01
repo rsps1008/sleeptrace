@@ -10,3 +10,6 @@ docs/staging-v8-diff-intervals.csv text eol=lf
 docs/staging-v9-replay.txt text eol=lf
 docs/staging-v9-transition-matrix.csv text eol=lf
 docs/staging-v9-diff-intervals.csv text eol=lf
+docs/staging-v10-replay.txt text eol=lf
+docs/staging-v10-transition-matrix.csv text eol=lf
+docs/staging-v10-diff-intervals.csv text eol=lf

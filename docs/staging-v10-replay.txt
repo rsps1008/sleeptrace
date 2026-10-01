@@ -1,0 +1,23 @@
+SYNTHETIC fixture, not an actual recorded night or physiological accuracy evidence.
+fixture_sha256=0b1426d1fe5836c2a5cc3d726899e08045b9c94faad677bee362eb64addbfef5
+frozen dc92433 algorithm 4: deep_ms=7920000, light_ms=11820000, undetermined_ms=0, awake_ms=0, transitions=8, fragments_under_5min=1
+algorithm 10: deep_ms=6240000, light_ms=13500000, undetermined_ms=0, awake_ms=0, transitions=8, fragments_under_5min=1
+old_valid_motion_ratio=0.8966565349544073, new_valid_motion_ratio=0.8966565349544073, new_span_motion_coverage=0.8975683890577507, new_stageable_sleep_coverage=0.44376899696048633
+new_undetermined_primary_reason_ms={}
+new_fallback_light_primary_reason_ms={MISSING_MOTION=1980000, INSUFFICIENT_COVERAGE=60000, COUPLING_INSUFFICIENT=8940000}
+AWAKE->AWAKE=0
+AWAKE->DEEP=0
+AWAKE->LIGHT=0
+AWAKE->SLEEPING=0
+DEEP->AWAKE=0
+DEEP->DEEP=6240000
+DEEP->LIGHT=1680000
+DEEP->SLEEPING=0
+LIGHT->AWAKE=0
+LIGHT->DEEP=0
+LIGHT->LIGHT=11820000
+LIGHT->SLEEPING=0
+SLEEPING->AWAKE=0
+SLEEPING->DEEP=0
+SLEEPING->LIGHT=0
+SLEEPING->SLEEPING=0

@@ -11,7 +11,7 @@ import com.rsps1008.sleeptrace.motion.CouplingState
 /** Offline engineering estimates inside an accepted session; never a clinical sleep stage. */
 object SleepStageEstimator {
     // This version also gates automatic reconciliation-rule migrations.
-    const val ALGORITHM_VERSION = 9
+    const val ALGORITHM_VERSION = 10
     const val SLEEP_ONSET_GUARD_MILLIS = 15 * MINUTE_MS
     const val MINIMUM_BASELINE_MINUTES = 10
     const val DEEP_WINDOW_MINUTES = 15
@@ -30,6 +30,8 @@ object SleepStageEstimator {
     private const val MAX_CONTINUOUS_ACTIVE_MILLIS = 12_000L
     /** A recorded v5/v6 short gap can bridge entry context, never be staged itself. */
     private const val MINOR_GAP_MAX_MILLIS = 2_000L
+    private const val TEN_HZ_MAX_SINGLE_GAP_MILLIS = 500L
+    private const val TEN_HZ_MAX_MISSING_MILLIS_PER_MINUTE = 1_000L
     private const val MAX_MINOR_GAP_MINUTES_IN_WINDOW = 1
     private const val MAX_MINOR_GAP_TOTAL_MILLIS = 2_000L
 
@@ -86,7 +88,15 @@ object SleepStageEstimator {
         val featureVersion: Int = MotionAccumulator.CURRENT_FEATURE_VERSION,
         val sampleCount: Int = bedMinutes,
         val reason: String? = null
-    )
+    ) {
+        /** Null means this feature definition has no legacy relative-quiet route. */
+        val relativeQuietThreshold: Double? get() = p70.takeUnless {
+            featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION
+        }
+        val relativeQuietMethod: String? get() = relativeQuietThreshold?.let {
+            "NIGHTLY_P70_PROVISIONAL_CONFIRMED"
+        }
+    }
     data class RollingFeatures(
         val validMinutes: Int, val quietMinutes: Int, val activeMinutes: Int,
         val medianRms: Double?, val p75Rms: Double?,
@@ -196,19 +206,20 @@ object SleepStageEstimator {
             // At 10 Hz, one missing 100 ms slot must not discard an otherwise
             // observed minute. Keep both per-gap and cumulative loss bounded.
             val missing = fullBucketMissingMillis ?: return gap == 0L
-            return gap <= 500L && missing <= 1_000L
+            return gap <= TEN_HZ_MAX_SINGLE_GAP_MILLIS &&
+                missing <= TEN_HZ_MAX_MISSING_MILLIS_PER_MINUTE
         }
         val minorObservedGap: Boolean get() = motion?.let { candidate ->
             validMotion && currentFeature && hasRequiredFeatures && !recordingBoundary &&
+                // V7's bounded sub-second loss already passes observedQuality.
+                // Do not charge it again against the legacy one-gap-in-15 rule.
+                // V7 losses above its own quality budget remain hard breaks.
                 candidate.featureVersion in setOf(
-                    MotionAccumulator.CURRENT_FEATURE_VERSION,
                     MotionAccumulator.ONE_HZ_FEATURE_VERSION,
                     MotionAccumulator.STRICT_CADENCE_FEATURE_VERSION
                 ) &&
                 (candidate.longestGapMillis ?: 0) in 1..MINOR_GAP_MAX_MILLIS &&
-                fullBucketMissingMillis != null &&
-                (candidate.featureVersion != MotionAccumulator.CURRENT_FEATURE_VERSION ||
-                    ((candidate.longestGapMillis ?: 0L) <= 500L && fullBucketMissingMillis!! <= 1_000L))
+                fullBucketMissingMillis != null
         } == true
         // Coupling says the signal is still plausibly connected to the bed, while
         // placement records the resolver's minute-level conclusion.  Require both:
@@ -724,9 +735,14 @@ object SleepStageEstimator {
         }
 
         val allReasons = (currentReasons + baselineReasons + windowReasons).distinct()
-        if (range.any { timeline[it].minorObservedGap } &&
+        val acceptedTenHertzGap = range.any {
+            val candidate = timeline[it]
+            candidate.motion?.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION &&
+                candidate.observedQuality && (candidate.motion.longestGapMillis ?: 0L) > 0L
+        }
+        if (acceptedTenHertzGap || (range.any { timeline[it].minorObservedGap } &&
             range.filter { timeline[it].minorObservedGap }.size <= MAX_MINOR_GAP_MINUTES_IN_WINDOW &&
-            range.filter { timeline[it].minorObservedGap }.sumOf { timeline[it].fullBucketMissingMillis ?: Long.MAX_VALUE } <= MAX_MINOR_GAP_TOTAL_MILLIS) {
+            range.filter { timeline[it].minorObservedGap }.sumOf { timeline[it].fullBucketMissingMillis ?: Long.MAX_VALUE } <= MAX_MINOR_GAP_TOTAL_MILLIS)) {
             nonBlockingReasons += Reason.ALLOWED_MINOR_GAP
         }
         // A strict 15-minute window remains the preferred entry path. Real phones can,
@@ -771,17 +787,17 @@ object SleepStageEstimator {
         // Sparse relative entry remains a compatibility path for legacy 1 Hz
         // summaries. New 10 Hz evidence has enough temporal resolution to require
         // the strict continuous 15-minute entry window instead.
-        val provisionalRelativeQuiet = baseline != null &&
-            baseline.featureVersion != MotionAccumulator.CURRENT_FEATURE_VERSION &&
-            current.motion?.rms?.let { it <= baseline.p70 } == true
+        val provisionalRelativeQuiet = baseline?.relativeQuietThreshold?.let { threshold ->
+            current.motion?.rms?.let { it <= threshold } == true
+        } == true
         val confirmedRelativeQuiet = provisionalRelativeQuiet && relativeQuietSupportIndices.isNotEmpty()
         val relativeQuietEntry = baseline != null && evidenceStart != null && currentEligibility &&
             !current.inOnsetGuard &&
             current.start >= maxOf(timeline.first().start, evidenceStart) + MIN_SESSION_AGE_FOR_DEEP &&
             current.bed && current.quiet && provisionalRelativeQuiet &&
             !sparseHardReset && !sparseActivityBlocked &&
-            (current.motion.movementEvents ?: Int.MAX_VALUE) <= ENTER_MAX_EVENTS &&
-            (current.motion.longestActiveMillis ?: Long.MAX_VALUE) < MAX_CONTINUOUS_ACTIVE_MILLIS
+            (current.motion?.movementEvents ?: Int.MAX_VALUE) <= ENTER_MAX_EVENTS &&
+            (current.motion?.longestActiveMillis ?: Long.MAX_VALUE) < MAX_CONTINUOUS_ACTIVE_MILLIS
         if (allReasons.isNotEmpty() && relativeQuietEntry) {
             nonBlockingReasons += Reason.RELATIVE_QUIET_ENTRY
             if (confirmedRelativeQuiet) nonBlockingReasons += Reason.RELATIVE_QUIET_CONFIRMED

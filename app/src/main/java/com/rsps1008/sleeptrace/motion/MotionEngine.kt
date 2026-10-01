@@ -366,7 +366,14 @@ class MotionAccumulator(plan: SamplingPlan, private val placement: Placement, pr
     }
 
     fun drain(throughMillis: Long, includePartial: Boolean = false): List<MotionMinute> {
-        val keys = buckets.keys.filter { includePartial || it + MINUTE_MS <= throughMillis }
+        // A raw event may fall just after a minute boundary while its normalized
+        // timestamp is still before it. The next representative then contributes
+        // to that minute's tail. Seal only through the accepted feature watermark
+        // so realtime drains and FIFO drains produce the same complete summaries.
+        val completeThrough = if (featureVersion == CURRENT_FEATURE_VERSION) {
+            minOf(throughMillis, lastFeatureTime)
+        } else throughMillis
+        val keys = buckets.keys.filter { includePartial || it + MINUTE_MS <= completeThrough }
         return keys.map { key ->
             val value = buckets.remove(key)!!
             MotionMinute(key, value.covered, value.active, value.squared, value.count, placement, featureVersion,

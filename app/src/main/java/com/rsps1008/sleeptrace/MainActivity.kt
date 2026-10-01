@@ -49,6 +49,7 @@ import com.rsps1008.sleeptrace.sleep.SleepStageEstimator
 import com.rsps1008.sleeptrace.sleep.normalizedAwake
 import com.rsps1008.sleeptrace.sleep.stageUsageFor
 import com.rsps1008.sleeptrace.sleep.stagingAvailability
+import com.rsps1008.sleeptrace.sleep.reconciliationEvidenceStart
 import com.rsps1008.sleeptrace.work.WorkScheduler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -111,9 +112,14 @@ class MainActivity : AppCompatActivity() {
                         it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT)
                     }
                     val schedule = preferences.schedule()
-                    val contextStart = minOf(start, sessions.minOfOrNull { it.startMillis } ?: start) -
-                        CouplingPolicy.SPARSE_EVIDENCE_WINDOW_MILLIS
                     val contextEnd = maxOf(end, sessions.maxOfOrNull { it.endMillis } ?: end) + 30 * MINUTE_MS
+                    val contextStart = reconciliationEvidenceStart(
+                        analysisStart = start,
+                        sessionStarts = sessions.map { it.startMillis },
+                        schedule = schedule,
+                        now = contextEnd,
+                        zone = zone
+                    )
                     val usage = schedule.windowsBetween(contextStart, contextEnd).flatMap {
                         store.usageSnapshot(it.startMillis, it.endMillis)?.intervals.orEmpty()
                     }
@@ -268,8 +274,8 @@ class MainActivity : AppCompatActivity() {
                                  feature?.isFallbackLight?.toString().orEmpty(),
                                  feature?.takeIf { it.isFallbackLight }?.primaryReason?.name.orEmpty(),
                                  result?.fallbackLightReasonsMillis?.entries?.joinToString(";") { "${it.key}:${it.value}" }.orEmpty(),
-                                 baseline?.p70?.csvNumber().orEmpty(),
-                                 baseline?.let { "NIGHTLY_P70_PROVISIONAL_CONFIRMED" }.orEmpty()
+                                 baseline?.relativeQuietThreshold?.csvNumber().orEmpty(),
+                                 baseline?.relativeQuietMethod.orEmpty()
                             )
                             val values = listOf(
                                 formatter.format(Instant.ofEpochMilli(minute.startMillis)),
@@ -1199,10 +1205,16 @@ class MainActivity : AppCompatActivity() {
                         return@withContext session to
                             "目前排程已不再完整涵蓋這筆歷史紀錄，無法可靠回推當晚的正式阻擋原因；已保存結果不受影響。"
                     }
-                    // AUTO placement needs the longer sparse-evidence lookback;
-                    // this is read-only and does not rewrite the saved session.
-                    val contextStart = session.startMillis - CouplingPolicy.SPARSE_EVIDENCE_WINDOW_MILLIS
                     val contextEnd = session.endMillis
+                    // Coupling may have been established hours before this session
+                    // and renewed by single movements. Replay the same full window
+                    // as reconciliation, not just the last establishment horizon.
+                    val contextStart = reconciliationEvidenceStart(
+                        analysisStart = session.startMillis,
+                        sessionStarts = listOf(session.startMillis),
+                        schedule = schedule,
+                        now = contextEnd
+                    )
                     val snapshotUsage = schedule.windowsBetween(contextStart, contextEnd).flatMap { window ->
                         store.usageSnapshot(window.startMillis, window.endMillis)?.intervals.orEmpty()
                     }

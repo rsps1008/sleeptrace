@@ -2,6 +2,19 @@
 
 本文件供後續對話、AI 與開發者接手使用，適用於本專案全目錄。內容依 2026-10-01 的程式與已完成驗證整理；後續修改功能時，請同步維護本文件及 `README.md`。若描述與程式不同，先查實作並說明差異，不要把規劃或舊對話當作已完成功能。使用者後續明確指示優先於本文件。
 
+## 最新交付：1.0.1／規則 10（2026-10-01 review 後）
+
+本節取代下方規則 9 的歷史驗證快照；今晚測試與隔日回傳步驟見 README 的「1.0.1 夜間測試版」。App `versionCode=2`，feature v7／10 Hz 不變，DB schema 仍為 motion 4／sleep 11。
+
+- v7 單次 ≤ 500 ms、全分鐘累計 ≤ 1,000 ms 的既有品質容忍，不得再次計入 legacy v5／v6 的「15 分鐘最多一個缺口分鐘」入口預算；超預算仍是硬中斷。保留 `ALLOWED_MINOR_GAP` 資訊，不蓋過正式 ENTER／MAINTAIN 原因。`ALGORITHM_VERSION=10` 使近期 session 由既有 generation 流程重算。
+- v7 `MotionAccumulator.drain` 以 raw 呼叫時間與最後已接受代表點時間的較小值封存分鐘；不可只因 raw 越過分鐘邊界就輸出尚未完整的桶。partial flush 與 legacy v6 不變；即時／整批 drain 必須輸出相同完整摘要。
+- 詳情／CSV 的 AUTO 前文共用 `reconciliationEvidenceStart`，從完整觀測窗口起點加 sparse 前文讀取。耦合可在 session 前數小時建立並靠單次合格動作續期，只讀 session 前 60 分鐘會錯報從未建立。
+- v7 `relative_quiet_threshold`／`relative_quiet_method` 為空，只有 legacy 路徑才輸出 P70 方法；欄位與正式公式共用 `NightlyBaseline` 屬性。詳情內容放進 ScrollView，保留固定操作按鈕及可到達的時間軸。
+
+JDK 21.0.11：完整 243 項 JVM tests 通過、Lint 26 warnings／0 errors；Debug、AndroidTest、R8 unsigned Release APK 建置成功。Android 16 一次性唯讀／不保存 snapshot 模擬器通過 12 項 instrumentation（StagingStorageRuntimeTest 9、SleepObservationIntegrationTest 2、MotionRuntimeTest 1）。最後一項涵蓋等待分類、要求 10 Hz、v7 摘要／capture 保存、低電量暫停、接電恢復、首頁原始事件率即時刷新、正式 CSV 按鈕／選日期／callback／writer，以及長詳情捲動；文件挑選器只替換測試 cache 目的地，未測所有廠牌文件提供者。測試會清除該模擬器 App 的 motion tables 與分類 samples，僅可在可丟棄 emulator 執行，不能用在使用者實機。
+
+六項新增 JVM regression 包含：99.9333% 覆蓋的小缺口對照修正前 Deep=0、修正後與無缺口控制各 66 分鐘；超品質預算拒絕；v7／legacy 方法欄位；180 分鐘 raw→AUTO→staging；完整窗口續期；跨分鐘 streaming/bulk 等價。180 分鐘合成案例自然產生 86 分鐘 Deep、各段 ≥ 10 分鐘；舊真實 **1 Hz** 摘要回放維持 62 分鐘，均不是 v7 真實整晚或 PSG 真值。沒有操作實體手機、沒有驗證真實 Health Connect 寫入／刪除、Google 真實回報、OEM／Doze／FIFO 或整夜耗電；不能用測試通過宣稱準確。歷史 fixture 與 v7／v8／v9 報告不覆寫，規則 10 estimator-only 報告另存 `docs/staging-v10-*`。
+
 ## 1. 專案目標與已確定的使用者需求
 
 - Android 手機睡眠推估 App，名稱 **眠迹 SleepTrace**，applicationId／namespace 為 `com.rsps1008.sleeptrace`，Gradle 專案名稱為 `SleepTrace`。工作目錄目前為 `E:\Git\sleep`，保留現有名稱與包名，除非使用者要求更名。
@@ -23,7 +36,7 @@
 | Java | Java 21：`C:\Program Files\Java\jdk-21.0.11` |
 | Android SDK | 本機為 `C:\Users\CHINTING\AppData\Local\Android\Sdk`；其他環境以 `local.properties` 為準 |
 | 建置 | Gradle Wrapper 9.6.0、Android Gradle Plugin 9.4.1 |
-| Android | minSdk 29、compileSdk 37、targetSdk 37；版本目前為 1.0／versionCode 1 |
+| Android | minSdk 29、compileSdk 37、targetSdk 37；版本目前為 1.0.1／versionCode 2 |
 | 語言／UI | Kotlin、AppCompat／Material；`MainActivity` 使用程式建立 View，沒有 Compose |
 | 背景工作 | Coroutines、WorkManager、health 類型前景服務 |
 | 資料保存 | Preferences DataStore、SharedPreferences 動作設定、SQLiteOpenHelper；睡眠事件與紀錄統一在 SQLite，尚未使用 Room |
@@ -167,7 +180,7 @@ App 沒有自己的雲端後端，不讀取其他 App 的健康紀錄。清除�
 在專案根目錄執行：
 
 ```powershell
-$env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.10'
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.11'
 $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --no-configuration-cache
 ```
@@ -285,7 +298,7 @@ featureVersion 5 的一個明確短缺口僅在完整 60 秒桶的 `60000-covere
 
 耦合參數集中在 `CouplingPolicy`，均為未校準工程值。fast 路徑要求近期 30 分鐘至少 20 個有效分鐘、3 個分散短動作且首末相隔 8 分鐘；sparse 路徑仍需 3 個短動作，但要求 60 分鐘至少 40 個有效分鐘且跨度 30 分鐘。局部安靜底噪乘 3、RMS 絕對下限 0.015 m/s²、活動 0.2～12 秒維持。手機使用前後 2 分鐘、單次大動作／低頻向量變化 >1.5 m/s²、超過 2 秒缺口及錄製片段／版本／睡眠窗邊界使支持失效。建立後 HELD 期限 45 分鐘，只有新合格動作可續期；過期清除已消耗的長窗口 history，不能以舊證據加一次新動作復活。歷史放置標記保留讀取相容，非物理位置保證；耦合本身絕不是睡眠證據。
 
-`MotionAccumulator.CURRENT_FEATURE_VERSION = 7`，`SleepStageEstimator.ALGORITHM_VERSION = 9`，兩者分別表示摘要定義與推估／reconciliation 規則。正式採集以 `100,000 µs` 要求 SensorManager，再按每筆事件 timestamp 映射固定 100 ms slot，每 slot 最多一個代表點，最後只保存分鐘摘要；較快的 OEM callback 不直接累加成不同尺度。v7 動作能量取相鄰 100 ms 差與相隔 1 秒差的較大值，兼顧瞬間衝擊與平滑翻身的 v6 等價尺度；coverage／longest gap 保留真缺口，不插值、不補零、不延伸前值。v6 固定 1 秒摘要及 v5 舊摘要保持 staging/conflict 相容，storage priority 為 v7 > v6 > v5 > v4 > v3 > v2 > v1。非有限／重複／倒序事件不改代表點；拒絕數保存在採集摘要。即時與 FIFO 同事件集合應得到相同特徵。服務重啟／校時建立不同錄製身份，不跨邊界比較差值。只保存摘要，沒有整晚原始三軸波形。
+`MotionAccumulator.CURRENT_FEATURE_VERSION = 7`，`SleepStageEstimator.ALGORITHM_VERSION = 10`，兩者分別表示摘要定義與推估／reconciliation 規則。正式採集以 `100,000 µs` 要求 SensorManager，再按每筆事件 timestamp 映射固定 100 ms slot，每 slot 最多一個代表點，最後只保存分鐘摘要；較快的 OEM callback 不直接累加成不同尺度。v7 動作能量取相鄰 100 ms 差與相隔 1 秒差的較大值，兼顧瞬間衝擊與平滑翻身的 v6 等價尺度；coverage／longest gap 保留真缺口，不插值、不補零、不延伸前值。v6 固定 1 秒摘要及 v5 舊摘要保持 staging/conflict 相容，storage priority 為 v7 > v6 > v5 > v4 > v3 > v2 > v1。非有限／重複／倒序事件不改代表點；拒絕數保存在採集摘要。即時與 FIFO 同事件集合應得到相同特徵。服務重啟／校時建立不同錄製身份，不跨邊界比較差值。只保存摘要，沒有整晚原始三軸波形。
 
 分鐘新增特徵（舊列為 null；CSV 空白表示沒有測量，與 0 不同）：
 
@@ -305,7 +318,7 @@ v7、v6、v5、v4 都是可提供 Deep 正向證據的 cadence 路徑；v1／v2 
 
 既有 `sleeptrace_motion_2026-10-01.csv` 與去識別回放只含 v5／v6 分鐘摘要，沒有 v7 的 100 ms 代表點或原始事件 timestamp；它們可驗證舊資料相容與「Deep 超過 60 分鐘」這類最後黑箱驗收，但不能驗證 10 Hz 特徵、缺口判定、整夜耗電或準確度。v7 必須另取新的正式 10 Hz 夜間資料，依 feature version、原始事件實測 Hz、feature target Hz、每分鐘 sample count／coverage、gap、分期輸出及電量一起驗證；feature target 不是實測有效率。小米健康截圖沒有同晚逐段真值，只作形狀與量級參考，不進入公式。
 
-`motion.db` 非破壞性維持 schema 4；同一時間結構欄位保存 v7 10 Hz 或 v6 1 Hz 分鐘摘要，v1／v2 原列保留，舊資料沒有量到的新特徵仍為 SQL NULL；`capture_runs` 保存 target/request period、sensor min/max delay 與 FIFO reserved/max。舊 schema 3 的政策 target 依隔離實驗 trigger 還原為 1 Hz／2 Hz；當時未保存的 sensor min/max delay 與 FIFO reserved 保持 SQL NULL，不把未知冒充量測到的 0。`sleep_events.db` 維持 schema 11 保存每筆 session 的 nullable `stageAlgorithmVersion`、`stageFeatureVersion`；舊結果無來源顯示舊版／來源不明。規則 9 由全域 dirty/generation 觸發近期重算，不新建平行排程；legacy SLEEPING／空白／矛盾階段在標準時間線正規化成 Light。沒有可相容的現存摘要時仍保留 session 與其時間界線，不能虛構 Deep；規則撤銷亦需窗口仍有 Sleep API 原始輸入。人工起訖不改，重算裁在人工界線內。同輸入／版本輸出確定，只有同步內容真正變更才遞增 revision，保留 clientRecordId；僅版本來源更新不重送。
+`motion.db` 非破壞性維持 schema 4；同一時間結構欄位保存 v7 10 Hz 或 v6 1 Hz 分鐘摘要，v1／v2 原列保留，舊資料沒有量到的新特徵仍為 SQL NULL；`capture_runs` 保存 target/request period、sensor min/max delay 與 FIFO reserved/max。舊 schema 3 的政策 target 依隔離實驗 trigger 還原為 1 Hz／2 Hz；當時未保存的 sensor min/max delay 與 FIFO reserved 保持 SQL NULL，不把未知冒充量測到的 0。`sleep_events.db` 維持 schema 11 保存每筆 session 的 nullable `stageAlgorithmVersion`、`stageFeatureVersion`；舊結果無來源顯示舊版／來源不明。規則 10 由全域 dirty/generation 觸發近期重算，不新建平行排程；legacy SLEEPING／空白／矛盾階段在標準時間線正規化成 Light。沒有可相容的現存摘要時仍保留 session 與其時間界線，不能虛構 Deep；規則撤銷亦需窗口仍有 Sleep API 原始輸入。人工起訖不改，重算裁在人工界線內。同輸入／版本輸出確定，只有同步內容真正變更才遞增 revision，保留 clientRecordId；僅版本來源更新不重送。
 
 ### CSV 診斷閱讀
 
@@ -336,7 +349,7 @@ adb.exe -s <序號> shell am broadcast -n com.rsps1008.sleeptrace/.motion.Captur
 
 在受控實機分夜比較 A／B，必要才 C；同手機各多晚記錄採集延遲、實測 raw event Hz、每分鐘 sample count／coverage、有效與可分期覆蓋、缺口、主要阻擋原因、起訖電量和背景限制。A 與 B 不只差頻率也差啟動時機，結果必須按 capture trigger／feature version 分開解讀。未知的平板使用若在所有手機輸入上與睡眠相同，App 無法辨別；只保留可看見的手機使用及 API 起點保護，不能保證排除不可觀測情境。
 
-本輪以 JDK 21.0.11 強制重跑完整 `testDebugUnitTest`，共 237 項 JVM 測試通過、0 failure／error。`lintDebug` 成功，保留 26 條既有 Warning、0 Error；Debug、AndroidTest 與 unsigned Release APK 全部建置成功，`git diff --check` 無錯誤。另以 UTC 單獨重跑去識別真實夜間回放，仍自然得到 Deep 62 分鐘且 `SLEEPING=0`；此數值只是最後黑箱驗收，不是 10 Hz 規則輸入。Android instrumentation 僅完成編譯，未在可丟棄模擬器或實機執行；也未驗證首頁持續前景更新、SQLite v3→v4 裝置升級、Health Connect 實際寫入／刪除、正式 10 Hz FIFO 喚醒、整夜耗電或 PSG／穿戴真值，因此以上只證明程式、固定特徵測試與舊摘要回放行為，不證明睡眠分期準確度。
+規則 9（ca609b3）的歷史驗證：以 JDK 21.0.11 強制重跑完整 `testDebugUnitTest`，共 237 項 JVM 測試通過、0 failure／error。`lintDebug` 成功，保留 26 條既有 Warning、0 Error；Debug、AndroidTest 與 unsigned Release APK 全部建置成功，`git diff --check` 無錯誤。另以 UTC 單獨重跑去識別真實夜間回放，仍自然得到 Deep 62 分鐘且 `SLEEPING=0`；此數值只是最後黑箱驗收，不是 10 Hz 規則輸入。Android instrumentation 僅完成編譯，未在可丟棄模擬器或實機執行；也未驗證首頁持續前景更新、SQLite v3→v4 裝置升級、Health Connect 實際寫入／刪除、正式 10 Hz FIFO 喚醒、整夜耗電或 PSG／穿戴真值，因此以上只證明程式、固定特徵測試與舊摘要回放行為，不證明睡眠分期準確度。
 
 ### 歷史 V5／V6 驗證快照（已由規則 9 驗證取代）
 

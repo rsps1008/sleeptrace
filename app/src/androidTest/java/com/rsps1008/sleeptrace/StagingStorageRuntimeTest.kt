@@ -55,7 +55,7 @@ class StagingStorageRuntimeTest {
             assertEquals(4, old.featureVersion); assertNull(old.movementEvents); assertNull(old.maxDelta)
             assertNull(old.longestGapMillis); assertNull(old.recordingId)
             val engine = MotionAccumulator(SamplingPlan.choose(0), Placement.AUTO)
-            for (i in 0..60) engine.add(MINUTE_MS + i * 1000, .01, 0.0, 9.81)
+            for (i in 0..600) engine.add(MINUTE_MS + i * 100L, .01, 0.0, 9.81)
             val fresh = engine.drain(2 * MINUTE_MS)
             store.append(fresh, now = 2 * MINUTE_MS)
             assertEquals(fresh, store.read(MINUTE_MS, 2 * MINUTE_MS))
@@ -254,16 +254,16 @@ class StagingStorageRuntimeTest {
         assertEquals(1,store.sessions().size)
     }
 
-    @Test fun algorithmVersionNineMigratesPreviouslyReconciledVersionEight() = isolated { context ->
+    @Test fun currentAlgorithmMigratesPreviouslyReconciledVersionNine() = isolated { context ->
         val prefs = context.getSharedPreferences("sleeptrace_maintenance", Context.MODE_PRIVATE)
         prefs.edit().putLong("reconcile_generation", 5L).putLong("reconciled_generation", 5L)
-            .putInt("reconciled_staging_version", 8).commit()
-        assertEquals(9, SleepStageEstimator.ALGORITHM_VERSION)
+            .putInt("reconciled_staging_version", 9).commit()
+        assertTrue(SleepStageEstimator.ALGORITHM_VERSION > 9)
         assertTrue(AutomaticWorkSignals.isDirty(context))
         val migrationGeneration = AutomaticWorkSignals.generation(context)
         AutomaticWorkSignals.markReconciled(context, migrationGeneration)
         assertFalse(AutomaticWorkSignals.isDirty(context))
-        assertEquals(9, prefs.getInt("reconciled_staging_version", 0))
+        assertEquals(SleepStageEstimator.ALGORITHM_VERSION, prefs.getInt("reconciled_staging_version", 0))
     }
 
     @Test fun ruleMigrationKeepsRetirementTombstonesInsteadOfDeletingRows() = isolated { context ->

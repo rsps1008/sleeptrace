@@ -1,25 +1,48 @@
 package com.rsps1008.sleeptrace
 
 import android.Manifest
+import android.app.Activity
+import android.app.Instrumentation
 import android.content.Intent
+import android.content.IntentFilter
+import android.net.Uri
 import android.os.Build
 import android.graphics.Rect
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import android.widget.ScrollView
+import android.widget.DatePicker
+import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.UiController
+import androidx.test.espresso.ViewAction
+import androidx.test.espresso.action.ViewActions.click
+import androidx.test.espresso.action.ViewActions.scrollTo
+import androidx.test.espresso.assertion.ViewAssertions.matches
+import androidx.test.espresso.matcher.RootMatchers.isDialog
+import androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom
+import androidx.test.espresso.matcher.ViewMatchers.isCompletelyDisplayed
+import androidx.test.espresso.matcher.ViewMatchers.hasDescendant
+import androidx.test.espresso.matcher.ViewMatchers.withText
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rsps1008.sleeptrace.data.SleepPreferences
 import com.rsps1008.sleeptrace.data.SleepStore
+import com.rsps1008.sleeptrace.data.SleepEventStore
 import com.rsps1008.sleeptrace.motion.MotionService
 import com.rsps1008.sleeptrace.motion.MotionSettings
 import com.rsps1008.sleeptrace.motion.MotionStore
 import com.rsps1008.sleeptrace.motion.MINUTE_MS
+import com.rsps1008.sleeptrace.motion.MotionAccumulator
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.ClassificationSample
+import com.rsps1008.sleeptrace.sleep.DIAGNOSTIC_CSV_HEADER
+import com.rsps1008.sleeptrace.sleep.diagnosticCsvHeaders
+import com.rsps1008.sleeptrace.sleep.SleepSession
+import com.rsps1008.sleeptrace.sleep.SleepSessionTimelineView
+import com.rsps1008.sleeptrace.sleep.SyncState
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -49,9 +72,20 @@ class MotionRuntimeTest {
         // Upgrade from old manual opt-out/bedside settings must still enable the new automatic mode.
         context.getSharedPreferences("sleeptrace_motion", 0).edit().remove("recording_enabled")
             .putBoolean("enabled", false).putString("placement", "BEDSIDE")
-            .putBoolean("battery_guide_shown", true).putBoolean("xiaomi_guide_shown", true).commit()
+            .putString("capture_experiment", "OFF")
+            .putBoolean("battery_guide_shown", true).putBoolean("xiaomi_guide_shown", true)
+            .putBoolean("window_alarm_guide_shown", true).commit()
         context.getSharedPreferences("sleeptrace_records", 0).edit().remove("samples").commit()
-        SleepStore(context).appendSamples(listOf(ClassificationSample(System.currentTimeMillis(), 87, 0, 0)))
+        // This emulator-only test must start without an old high-confidence trigger.
+        // Raw samples now live in SQLite, not the legacy JSON preference above.
+        SleepEventStore(context).use { it.writableDatabase.delete("samples", null, null) }
+        MotionStore(context).use {
+            // Repeated runs must not merge a prior capture into this run's minute:
+            // mixed recordingId=0 intentionally has no attributable capture metadata.
+            it.writableDatabase.delete("minutes", null, null)
+            it.writableDatabase.delete("capture_runs", null, null)
+        }
+        SleepStore(context).appendSamples(listOf(ClassificationSample(System.currentTimeMillis(), 37, 0, 0)))
         val settings = MotionSettings(context)
         assertTrue(settings.enabled)
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -89,8 +123,9 @@ class MotionRuntimeTest {
                 val text = views.filterIsInstance<TextView>().joinToString { it.text }
                 assertFalse(text.contains("變更放置位置"))
                 assertFalse(text.contains("動作感測"))
-                assertFalse(text.contains("Hz"))
-                assertTrue(text.contains("最近一次 Sleep API 睡眠信心：87/100"))
+                assertTrue(text.contains("目標要求 10.00 Hz"))
+                assertTrue(text.contains("特徵正規化上限 10.00 Hz"))
+                assertTrue(text.contains("最近一次 Sleep API 睡眠信心：37/100"))
                 assertTrue(text.contains("使用已保存資料，非即時查詢、非準確率"))
             }
             automation.takeScreenshot()?.let { bitmap ->
@@ -106,10 +141,92 @@ class MotionRuntimeTest {
             assertTrue("No minute summaries were persisted on sensor flush", rows.isNotEmpty())
             assertTrue(rows.any { it.sampleCount > 0 })
             assertTrue(rows.all { it.placement == com.rsps1008.sleeptrace.motion.Placement.AUTO })
+            assertTrue(rows.all { it.featureVersion == MotionAccumulator.CURRENT_FEATURE_VERSION })
+            val capture = MotionStore(context).use { requireNotNull(it.latestCapture()) }
+            assertEquals(100_000, capture.targetPeriodUs)
+            assertEquals(100_000, capture.periodUs)
+            assertTrue(capture.rawEvents > 1)
+            assertNotNull(capture.observedRawHertz)
+            await("Persisted capture did not refresh while the homepage stayed open") {
+                var refreshed = false
+                instrumentation.runOnMainSync {
+                    refreshed = descendants(activity.window.decorView).filterIsInstance<TextView>()
+                        .any { it.text.contains("原始事件實測約") }
+                }
+                refreshed
+            }
+
+            // Exercise the real button/date-picker/result callback and CSV writer.
+            // Only the document picker is replaced with an app-cache destination.
+            val csv = java.io.File(context.cacheDir, "runtime-motion.csv").apply { delete() }
+            val documentMonitor = instrumentation.addMonitor(
+                IntentFilter(Intent.ACTION_CREATE_DOCUMENT).apply { addDataType("text/csv") },
+                Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(Uri.fromFile(csv))), true
+            )
+            try {
+                onView(withText("匯出每分鐘動作資料")).perform(scrollTo(), click())
+                onView(isAssignableFrom(DatePicker::class.java)).perform(object : ViewAction {
+                    override fun getConstraints() = isAssignableFrom(DatePicker::class.java)
+                    override fun getDescription() = "select today's motion export"
+                    override fun perform(uiController: UiController, view: View) {
+                        val today = java.time.LocalDate.now()
+                        (view as DatePicker).updateDate(today.year, today.monthValue - 1, today.dayOfMonth)
+                        uiController.loopMainThreadUntilIdle()
+                    }
+                })
+                onView(androidx.test.espresso.matcher.ViewMatchers.withId(android.R.id.button1)).perform(click())
+                await("Motion CSV was not written by the real export callback") {
+                    csv.exists() && csv.readLines().size > 1
+                }
+                val lines = csv.readLines()
+                assertEquals(DIAGNOSTIC_CSV_HEADER, lines.first())
+                // This raw-only fixture contains no user strings or quoted CSV fields.
+                val exported = lines.drop(1).map { line ->
+                    val fields = line.split(',')
+                    assertEquals(diagnosticCsvHeaders.size, fields.size)
+                    diagnosticCsvHeaders.zip(fields).toMap()
+                }
+                assertTrue(exported.isNotEmpty())
+                assertTrue(exported.all { it["feature_version"] == "7" })
+                assertTrue(exported.all { it["requested_period_us"] == "100000" })
+                assertTrue(exported.all { it["feature_target_hz"] == "10.000000" })
+                assertTrue(exported.all { it["observed_raw_event_hz"]?.toDoubleOrNull()?.let { hz -> hz > 0 } == true })
+                assertTrue(exported.all { it["coupling_current_blocker"].orEmpty().isNotBlank() })
+                assertTrue(exported.all { it["relative_quiet_method"].orEmpty().isEmpty() })
+            } finally {
+                instrumentation.removeMonitor(documentMonitor)
+                csv.delete()
+            }
             shell("dumpsys battery set ac 1")
-            await("Charging did not resume sampling: ${settings.status}") { settings.status.contains("供電中") && settings.status.contains("Hz") }
+            await("Charging did not resume sampling: ${settings.status}") {
+                settings.status.contains("Google 已判斷入睡") && settings.status.contains("10.00 Hz")
+            }
+            assertNotEquals(capture.id, MotionStore(context).use { it.latestCapture()?.id })
             context.startService(Intent(context, MotionService::class.java).setAction(MotionService.ACTION_STOP))
             await("Foreground service did not stop") { MotionService.active == null && !settings.enabled }
+            // A long diagnostic must not hide the timeline below a fixed-height dialog.
+            instrumentation.runOnMainSync {
+                val now = System.currentTimeMillis()
+                SleepDialogHelper.showSession(activity,
+                    SleepSession("layout-only", now - 360 * MINUTE_MS, now, 50, 0,
+                        SyncState.PENDING, "工程測試；沒有儲存或同步這筆示範紀錄。"),
+                    formatDuration = { "${it / MINUTE_MS} 分鐘" }, onEdit = {},
+                    stagingExplanation = "床面動作支持不足；回退 Light 不代表生理淺眠。\n".repeat(20))
+            }
+            onView(org.hamcrest.Matchers.allOf(isAssignableFrom(ScrollView::class.java),
+                hasDescendant(isAssignableFrom(SleepSessionTimelineView::class.java))))
+                .inRoot(isDialog()).perform(object : ViewAction {
+                override fun getConstraints() = isAssignableFrom(ScrollView::class.java)
+                override fun getDescription() = "scroll long sleep details to the timeline"
+                override fun perform(uiController: UiController, view: View) {
+                    assertTrue("Long detail does not expose a scroll range", view.canScrollVertically(1))
+                    (view as ScrollView).fullScroll(View.FOCUS_DOWN)
+                    uiController.loopMainThreadForAtLeast(500)
+                }
+            })
+            onView(isAssignableFrom(SleepSessionTimelineView::class.java)).inRoot(isDialog())
+                .check(matches(isCompletelyDisplayed()))
+            onView(withText("關閉")).inRoot(isDialog()).check(matches(isCompletelyDisplayed())).perform(click())
         } finally {
             settings.enabled = false
             context.stopService(Intent(context, MotionService::class.java))
