@@ -4,6 +4,11 @@
     <color name="card_stroke">#334155</color>
     <color name="text_primary">#F1F5F9</color>
     <color name="text_secondary">#94A3B8</color>
+    <color name="home_canvas">#101620</color>
+    <color name="home_surface">#192231</color>
+    <color name="home_panel">#222E40</color>
+    <color name="home_hero">#222E47</color>
+    <color name="home_accent">#C2CEFF</color>
 
     <!-- Night status badge colors -->
     <color name="status_success">#86EFAC</color>

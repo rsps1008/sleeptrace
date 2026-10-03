@@ -17,7 +17,6 @@ import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.UiController
 import androidx.test.espresso.ViewAction
 import androidx.test.espresso.action.ViewActions.click
-import androidx.test.espresso.action.ViewActions.scrollTo
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.RootMatchers.isDialog
 import androidx.test.espresso.matcher.ViewMatchers.isAssignableFrom
@@ -123,10 +122,11 @@ class MotionRuntimeTest {
                 val text = views.filterIsInstance<TextView>().joinToString { it.text }
                 assertFalse(text.contains("變更放置位置"))
                 assertFalse(text.contains("動作感測"))
-                assertTrue(text.contains("目標要求 10.00 Hz"))
-                assertTrue(text.contains("特徵正規化上限 10.00 Hz"))
-                assertTrue(text.contains("最近一次 Sleep API 睡眠信心：37/100"))
-                assertTrue(text.contains("使用已保存資料，非即時查詢、非準確率"))
+                assertTrue(text.contains("App 要求頻率"))
+                assertTrue(text.contains("特徵正規化上限"))
+                assertTrue(text.contains("10.00 Hz"))
+                assertTrue(text.contains("37 / 100"))
+                assertTrue(text.contains("Sleep API 睡眠信心，非準確率"))
             }
             automation.takeScreenshot()?.let { bitmap ->
                 java.io.File(context.getExternalFilesDir(null), "automatic-home.png").outputStream().use {
@@ -151,7 +151,7 @@ class MotionRuntimeTest {
                 var refreshed = false
                 instrumentation.runOnMainSync {
                     refreshed = descendants(activity.window.decorView).filterIsInstance<TextView>()
-                        .any { it.text.contains("原始事件實測約") }
+                        .any { it.text.startsWith("約 ") && it.text.contains("Hz") }
                 }
                 refreshed
             }
@@ -164,7 +164,7 @@ class MotionRuntimeTest {
                 Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(Uri.fromFile(csv))), true
             )
             try {
-                onView(withText("匯出每分鐘動作資料")).perform(scrollTo(), click())
+                onView(withText("匯出每分鐘動作資料")).perform(revealHomeView(), click())
                 onView(isAssignableFrom(DatePicker::class.java)).perform(object : ViewAction {
                     override fun getConstraints() = isAssignableFrom(DatePicker::class.java)
                     override fun getDescription() = "select today's motion export"

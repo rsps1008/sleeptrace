@@ -345,6 +345,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(16), dp(16), dp(16), dp(32))
         }
         scroll = ScrollView(this).apply {
+            setBackgroundColor(color(R.color.home_canvas))
             isFillViewport = true
             isFocusableInTouchMode = true
             descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
@@ -359,6 +360,7 @@ class MainActivity : AppCompatActivity() {
         ViewCompat.requestApplyInsets(scroll)
         scroll.requestFocus()
         homeViews = createHomeSkeleton()
+        homeViews.captureView.detailsExpanded = savedInstanceState?.getBoolean("capture_details_expanded") ?: false
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 homeViewModel.state.filterNotNull().collect { renderHome(it) }
@@ -387,6 +389,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("capture_details_expanded", homeViews.captureView.detailsExpanded)
         outState.putBoolean("startup_checked", startupPermissionCheckDone)
         outState.putBoolean("continue_permissions", continueStartupPermissionFlow)
         outState.putBoolean("permissions_complete", permissionFlowComplete)
@@ -447,450 +450,276 @@ class MainActivity : AppCompatActivity() {
         val historyCard: MaterialCardView,
         val historyRows: List<HistoryRowViews>,
         val historyAllButton: MaterialButton,
-        val captureFrequency: TextView,
+        val captureView: HomeCaptureView,
         val scheduleTime: TextView,
         val scheduleMode: TextView,
+        val scheduleDescription: TextView,
         val windowAlarmAccess: MaterialButton,
         val scheduleToggle: MaterialButton,
         val permissionsReady: TextView,
         val permissionRows: List<PermissionViews>,
+        val permissionDividers: List<View>,
         val permissionSummary: TextView,
         val permissionGrant: MaterialButton,
+        val permissionRecheck: MaterialButton,
         val backgroundSection: LinearLayout,
         val backgroundDescription: TextView
     )
 
     /** Builds the stable page hierarchy once; renderHome only changes data and visibility. */
     private fun createHomeSkeleton(): HomeViews {
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(4), dp(4), dp(4), dp(12))
-            addView(TextView(this@MainActivity).apply {
-                text = getString(R.string.app_name)
-                textSize = 24f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(color(R.color.text_primary))
-            })
-            addView(TextView(this@MainActivity).apply {
-                text = "安心睡覺，醒來查看紀錄"
-                textSize = 13f
-                setTextColor(color(R.color.text_secondary))
-                setPadding(0, dp(2), 0, 0)
+        val header = homeColumn(4).apply {
+            addView(homeText(getString(R.string.app_name), 26f, bold = true))
+            addView(homeText("安心睡覺，醒來查看紀錄", 14f, secondary = true).apply {
+                setPadding(0, dp(6), 0, dp(16))
             })
         }
-
-        val setupCard = createCard()
-        setupCard.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(20), dp(20), dp(20))
-            addView(TextView(this@MainActivity).apply {
-                text = "設定你的自動偵測時段"
-                textSize = 18f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(color(R.color.text_primary))
+        val setupCard = createCard().apply {
+            addView(homeColumn().apply {
+                addView(homeText("從你的作息開始", 21f, bold = true))
+                addView(homeText("設定平日與週末的偵測時段。觀測完成後，App 會自動整理睡眠並同步至 Health Connect。", secondary = true).apply {
+                    setPadding(0, dp(12), 0, dp(8))
+                })
+                addView(homeText("允許使用情況存取後，可排除手機使用時間。紀錄不需要逐筆確認。", secondary = true))
+                addView(homeButton("設定時段並開始", primary = true) { chooseSchedule() })
             })
-            addView(TextView(this@MainActivity).apply {
-                text = "眠迹只會在設定的時段分析睡眠，依可用資料自動選擇最佳推估並同步。授予使用情況存取權後，會排除手機使用時間；不需要逐筆確認。"
-                textSize = 14f
-                setTextColor(color(R.color.text_secondary))
-                setPadding(0, dp(8), 0, dp(16))
-                setLineSpacing(0f, 1.25f)
-            })
-            addView(MaterialButton(this@MainActivity).apply {
-                text = "設定時段並開始"
-                isAllCaps = false
-                setOnClickListener { chooseSchedule() }
-            })
-        })
-
-        val configuredRoot = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
         }
+        val configuredRoot = homeColumn(0).apply { visibility = View.GONE }
         configuredRoot.addView(createSectionTitle("最近睡眠紀錄"))
-        val classificationCard = createCard()
-        val classificationScore = TextView(this).apply {
-            text = "尚未收到 Sleep API 睡眠分類"
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(color(R.color.text_primary))
-        }
-        val classificationDetail = TextView(this).apply {
-            text = "會在 Google Play services 回報分類後自動更新。"
-            textSize = 12f
-            setTextColor(color(R.color.text_secondary))
-            setPadding(0, dp(4), 0, 0)
-        }
-        classificationCard.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(14), dp(18), dp(14))
-            addView(classificationScore)
-            addView(classificationDetail)
-        })
-        configuredRoot.addView(classificationCard)
-
         val latest = createLatestSessionSkeleton()
         configuredRoot.addView(latest.card)
-
         val emptyCard = createCard().apply {
             visibility = View.GONE
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(16), dp(16), dp(16))
-                addView(TextView(this@MainActivity).apply {
-                    text = "準備好迎接第一晚。睡眠時間會在起床後自動整理並同步，不需要每天操作。"
-                    textSize = 14f
-                    setTextColor(color(R.color.text_secondary))
+            setCardBackgroundColor(color(R.color.home_hero))
+            addView(homeColumn().apply {
+                addView(homeText("等待第一晚的紀錄", 21f, bold = true))
+                addView(homeText("完成時段與權限設定後，就可以安心休息。", secondary = true).apply {
+                    setPadding(0, dp(10), 0, dp(8))
                 })
+                addView(homeText("觀測完成且資料足夠時，睡眠紀錄會自動出現在這裡。", secondary = true))
             })
         }
         configuredRoot.addView(emptyCard)
-
         val historyRows = List(4) { index -> createHistoryRow(index) }
-        val historyAllButton = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = "查看全部紀錄"
-            isAllCaps = false
+        val historyAllButton = homeButton("查看全部紀錄") { showAllSessions() }.apply { visibility = View.GONE }
+        val historyCard = createCard().apply {
             visibility = View.GONE
-            setOnClickListener { showAllSessions() }
-        }
-        val historyCard = createCard().apply { visibility = View.GONE }
-        historyCard.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-            addView(TextView(this@MainActivity).apply {
-                text = "更早的紀錄"
-                textSize = 13f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(color(R.color.text_secondary))
-                setPadding(0, 0, 0, dp(8))
-            })
-            historyRows.forEachIndexed { index, item ->
-                item.divider?.let { addView(it) }
-                addView(item.row)
-            }
-            addView(historyAllButton)
-        })
-        configuredRoot.addView(historyCard)
-
-        configuredRoot.addView(createSectionTitle("動作資料匯出"))
-        val captureFrequency = TextView(this).apply {
-            textSize = 12f
-            setTextColor(color(R.color.text_secondary))
-            setLineSpacing(0f, 1.15f)
-            setPadding(0, dp(10), 0, dp(4))
-        }
-        val exportCard = createCard()
-        exportCard.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(14), dp(18), dp(14))
-            addView(TextView(this@MainActivity).apply {
-                text = "匯出指定日期的每分鐘覆蓋時間、活動時間、變化 RMS、樣本數與放置模式 CSV。動作摘要保留 14 天；原始感測波形未保存。"
-                textSize = 13f
-                setTextColor(color(R.color.text_secondary))
-                setLineSpacing(0f, 1.2f)
-            })
-            addView(captureFrequency)
-            addView(MaterialButton(this@MainActivity).apply {
-                text = "匯出每分鐘動作資料"
-                isAllCaps = false
-                setOnClickListener { chooseMotionExportDate() }
-            })
-        })
-        configuredRoot.addView(exportCard)
-
-        configuredRoot.addView(createSectionTitle("自動偵測排程"))
-        val scheduleTime = TextView(this).apply {
-            textSize = 22f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(color(R.color.text_primary))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        val scheduleMode = TextView(this).apply {
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(color(R.color.purple_500))
-            setPadding(0, dp(4), 0, dp(4))
-        }
-        val windowAlarmAccess = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = "允許鬧鐘與提醒"
-            isAllCaps = false
-            setOnClickListener { openWindowAlarmSettings() }
-        }
-        val scheduleToggle = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            isAllCaps = false
-            setOnClickListener {
-                motionSettings.enabled = !motionSettings.enabled
-                if (motionSettings.enabled) {
-                    ensureAutomaticRecording()
-                    guideBackgroundAccessIfNeeded()
-                } else {
-                    SleepWindowScheduler.cancel(this@MainActivity)
-                    runCatching { SleepTracker.unsubscribe(this@MainActivity) }
-                    if (MotionService.active != null) startService(Intent(this@MainActivity, MotionService::class.java).setAction(MotionService.ACTION_STOP))
+            addView(homeColumn().apply {
+                addView(homeText("先前的睡眠", 15f, secondary = true, bold = true))
+                historyRows.forEach { item ->
+                    item.divider?.let { addView(it) }
+                    addView(item.row)
                 }
-                refresh()
-            }
-        }
-        val scheduleCard = createCard().apply {
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(18), dp(16), dp(18), dp(16))
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(scheduleTime)
-                    addView(MaterialButton(this@MainActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                        text = "修改時段"
-                        isAllCaps = false
-                        setOnClickListener { renderedSchedule?.let { chooseSchedule(it) } }
-                    })
-                })
-                addView(scheduleMode)
-                addView(windowAlarmAccess)
-                addView(TextView(this@MainActivity).apply {
-                    setText(R.string.automatic_recording_description)
-                    textSize = 13f
-                    setTextColor(color(R.color.text_secondary))
-                    setLineSpacing(0f, 1.2f)
-                })
-                addView(scheduleToggle)
+                addView(historyAllButton)
             })
         }
-        configuredRoot.addView(scheduleCard)
+        configuredRoot.addView(createSectionTitle("記錄與排程"))
+        val scheduleTime = homeText("", 22f, bold = true).apply {
+            setPadding(0, dp(14), 0, dp(4))
+        }
+        val scheduleMode = createBadge("", color(R.color.status_info), color(R.color.status_info_bg))
+        val scheduleDescription = homeText("", secondary = true).apply {
+            setPadding(0, dp(8), 0, dp(12))
+        }
+        val windowAlarmAccess = homeButton("允許鬧鐘與提醒") { openWindowAlarmSettings() }
+        val scheduleToggle = homeButton("") {
+            motionSettings.enabled = !motionSettings.enabled
+            if (motionSettings.enabled) {
+                ensureAutomaticRecording()
+                guideBackgroundAccessIfNeeded()
+            } else {
+                SleepWindowScheduler.cancel(this@MainActivity)
+                runCatching { SleepTracker.unsubscribe(this@MainActivity) }
+                if (MotionService.active != null) startService(Intent(this@MainActivity, MotionService::class.java).setAction(MotionService.ACTION_STOP))
+            }
+            refresh()
+        }
+        val classificationScore = homeText("", 19f, bold = true)
+        val classificationDetail = homeText("", 13f, secondary = true).apply { setPadding(0, dp(6), 0, 0) }
+        configuredRoot.addView(createCard().apply {
+            addView(homeColumn().apply {
+                addView(scheduleMode)
+                addView(scheduleTime)
+                addView(scheduleDescription)
+                addView(windowAlarmAccess)
+                addView(homeActions(
+                    homeButton("修改時段") { renderedSchedule?.let { chooseSchedule(it) } },
+                    scheduleToggle
+                ))
+                addView(homeText(getString(R.string.automatic_recording_description), 13f, secondary = true).apply {
+                    setPadding(0, dp(8), 0, dp(16))
+                })
+                addView(createDivider())
+                addView(homeText("Google 睡眠訊號", 14f, secondary = true, bold = true).apply {
+                    setPadding(0, dp(16), 0, dp(8))
+                })
+                addView(classificationScore)
+                addView(classificationDetail)
+                addView(homeText("Sleep API 睡眠信心，非準確率。顯示已保存的回報，不會即時查詢 Google。", 13f, secondary = true).apply {
+                    setPadding(0, dp(6), 0, 0)
+                })
+            })
+        })
 
-        configuredRoot.addView(createSectionTitle("系統連線與權限"))
+        configuredRoot.addView(historyCard)
+        configuredRoot.addView(createSectionTitle("連線與權限"))
         val permissionsReady = createBadge(getString(R.string.basic_permissions_ready), color(R.color.status_success), color(R.color.status_success_bg))
         val permissionRows = listOf(
-            createPermissionRow("睡眠偵測", "允許 App 自動記錄"),
+            createPermissionRow("睡眠偵測", "取得 Google 睡眠訊號"),
             createPermissionRow("使用情況存取", "排除夜間使用手機時間"),
             createPermissionRow("Health Connect", "自動寫入睡眠紀錄")
         )
-        val permissionSummary = TextView(this).apply { textSize = 13f; setPadding(0, dp(12), 0, dp(8)) }
-        val permissionGrant = MaterialButton(this).apply {
-            text = "檢查並引導授權"
-            isAllCaps = false
-            setOnClickListener { requestMissingPermissionsAtStartup() }
-        }
-        val permissionRecheck = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = "重新檢查權限"
-            isAllCaps = false
-            setOnClickListener { requestMissingPermissionsAtStartup() }
-        }
-        val permissionsCard = createCard().apply {
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(18), dp(16), dp(18), dp(16))
+        val permissionDividers = List(2) { createDivider() }
+        val permissionSummary = homeText("", 13f, secondary = true).apply { setPadding(0, dp(12), 0, dp(8)) }
+        val permissionGrant = homeButton("檢查並引導授權", primary = true) { requestMissingPermissionsAtStartup() }
+        val permissionRecheck = homeButton("重新檢查權限") { requestMissingPermissionsAtStartup() }
+        configuredRoot.addView(createCard().apply {
+            addView(homeColumn().apply {
                 addView(permissionsReady)
                 permissionRows.forEachIndexed { index, item ->
-                    if (index > 0) addView(createDivider())
+                    if (index > 0) addView(permissionDividers[index - 1])
                     addView(item.row)
                 }
                 addView(permissionSummary)
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    addView(permissionGrant, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
-                    addView(permissionRecheck, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                })
+                addView(permissionGrant)
+                addView(permissionRecheck)
             })
-        }
-        configuredRoot.addView(permissionsCard)
-
-        val backgroundDescription = TextView(this).apply {
-            textSize = 13f
-            setTextColor(color(R.color.text_secondary))
-        }
-        val backgroundSection = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(createSectionTitle(getString(R.string.background_recording_title)))
+        })
+        val backgroundDescription = homeText("", secondary = true)
+        val backgroundSection = homeColumn(0).apply {
             addView(createCard().apply {
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(18), dp(16), dp(18), dp(16))
-                    addView(backgroundDescription)
-                    addView(MaterialButton(this@MainActivity).apply {
-                        setText(R.string.allow_overnight_recording)
-                        isAllCaps = false
-                        setOnClickListener { openBatterySettings() }
+                addView(homeColumn().apply {
+                    addView(homeText(getString(R.string.background_recording_title), 16f, bold = true).apply {
+                        setPadding(0, 0, 0, dp(8))
                     })
+                    addView(backgroundDescription)
+                    addView(homeButton(getString(R.string.allow_overnight_recording)) { openBatterySettings() })
                 })
             })
         }
         configuredRoot.addView(backgroundSection)
 
+        configuredRoot.addView(createSectionTitle("資料與匯出"))
+        val captureView = HomeCaptureView(this)
+        configuredRoot.addView(createCard().apply {
+            addView(homeColumn().apply {
+                addView(homeText("每分鐘動作摘要", 17f, bold = true))
+                addView(homeText("保留最近 14 天，可選擇日期匯出 CSV。\n只保存分鐘摘要，不保存原始感測波形。", 13f, secondary = true).apply {
+                    setPadding(0, dp(8), 0, dp(4))
+                })
+                addView(homeButton("匯出每分鐘動作資料") { chooseMotionExportDate() })
+                addView(createDivider().apply {
+                    layoutParams = LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(16) }
+                })
+                addView(captureView)
+            })
+        })
+        configuredRoot.addView(homeText("睡眠階段為手機訊號推估，僅供日常參考。", 12f, secondary = true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(8), dp(8), dp(12))
+        })
         content.addView(header)
         content.addView(setupCard)
         content.addView(configuredRoot)
         return HomeViews(
             setupCard, configuredRoot, classificationScore, classificationDetail, emptyCard,
             latest.card, latest.title, latest.status, latest.duration, latest.times, latest.awake,
-            historyCard, historyRows, historyAllButton, captureFrequency, scheduleTime, scheduleMode, windowAlarmAccess, scheduleToggle, permissionsReady,
-            permissionRows, permissionSummary, permissionGrant, backgroundSection, backgroundDescription
+            historyCard, historyRows, historyAllButton, captureView, scheduleTime, scheduleMode, scheduleDescription,
+            windowAlarmAccess, scheduleToggle, permissionsReady, permissionRows, permissionDividers, permissionSummary,
+            permissionGrant, permissionRecheck, backgroundSection, backgroundDescription
         )
     }
-
     private fun createLatestSessionSkeleton(): LatestViews {
-        val title = TextView(this).apply {
-            textSize = 15f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(color(R.color.text_secondary))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
+        val title = homeText("", 16f, secondary = true, bold = true).apply { setPadding(0, dp(14), 0, 0) }
         val status = createBadge("", color(R.color.status_info), color(R.color.status_info_bg))
-        val duration = TextView(this).apply {
-            textSize = 26f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(color(R.color.purple_500))
+        val duration = homeText("", 32f, bold = true).apply {
+            setTextColor(color(R.color.home_accent))
+            setPadding(0, dp(6), 0, dp(2))
         }
-        val times = TextView(this).apply {
-            textSize = 16f
-            setTextColor(color(R.color.text_primary))
-            setPadding(0, 0, 0, dp(8))
-        }
-        val awake = TextView(this).apply {
-            textSize = 13f
-            setTextColor(color(R.color.text_secondary))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
+        val times = homeText("", 17f).apply { setPadding(0, dp(16), 0, dp(10)) }
+        val awake = homeText("", 13f, secondary = true).apply { setPadding(0, 0, 0, dp(12)) }
         val card = createCard().apply {
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(18), dp(18), dp(18), dp(18))
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(title)
-                    addView(status)
-                })
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.BOTTOM
-                    setPadding(0, dp(10), 0, dp(8))
-                    addView(duration)
-                    addView(TextView(this@MainActivity).apply {
-                        text = "  推估睡眠時長"
-                        textSize = 13f
-                        setTextColor(color(R.color.text_secondary))
-                        setPadding(0, 0, 0, dp(3))
-                    })
-                })
+            setCardBackgroundColor(color(R.color.home_hero))
+            addView(homeColumn().apply {
+                addView(status)
+                addView(title)
+                addView(duration)
+                addView(homeText("推估睡眠時長", 13f, secondary = true))
                 addView(times)
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, 0, 0, dp(10))
-                    addView(awake)
-                })
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    addView(MaterialButton(this@MainActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) }
-                        text = "自選修正時間"
-                        isAllCaps = false
-                        setOnClickListener { renderedLatestSession?.let { editSession(it) } }
-                    })
-                    addView(MaterialButton(this@MainActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                        text = "查看完整詳情"
-                        isAllCaps = false
-                        setOnClickListener { renderedLatestSession?.let { showSession(it) } }
-                    })
-                })
+                addView(awake)
+                addView(homeActions(
+                    homeButton("查看詳情", primary = true) { renderedLatestSession?.let { showSession(it) } },
+                    homeButton("修正時間") { renderedLatestSession?.let { editSession(it) } }
+                ))
             })
         }
         return LatestViews(card, title, status, duration, times, awake)
     }
 
     private fun createHistoryRow(index: Int): HistoryRowViews {
-        val title = TextView(this).apply {
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(color(R.color.text_primary))
-        }
-        val summary = TextView(this).apply {
-            textSize = 12f
-            setTextColor(color(R.color.text_secondary))
-            setPadding(0, dp(2), 0, 0)
-        }
+        val title = homeText("", 16f, bold = true)
+        val summary = homeText("", 13f, secondary = true).apply { setPadding(0, dp(6), 0, dp(10)) }
         val badge = createBadge("", color(R.color.status_info), color(R.color.status_info_bg))
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(8), 0, dp(8))
+        val row = homeColumn(0).apply {
+            setPadding(dp(4), dp(16), dp(4), dp(16))
             isClickable = true
             isFocusable = true
+            val selectable = TypedValue()
+            theme.resolveAttribute(android.R.attr.selectableItemBackground, selectable, true)
+            foreground = ContextCompat.getDrawable(this@MainActivity, selectable.resourceId)
             setOnClickListener { renderedHistorySessions[index]?.let { showSession(it) } }
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                addView(title)
-                addView(summary)
-            })
+            addView(title)
+            addView(summary)
             addView(badge)
         }
         return HistoryRowViews(row, title, summary, badge, if (index > 0) createDivider() else null)
     }
 
     private fun createPermissionRow(name: String, descriptionText: String): PermissionViews {
-        val description = TextView(this).apply {
-            text = descriptionText
-            textSize = 12f
-            setTextColor(color(R.color.text_secondary))
-            setPadding(0, dp(2), 0, 0)
-        }
+        val description = homeText(descriptionText, 13f, secondary = true).apply { setPadding(0, dp(6), 0, dp(8)) }
         val badge = createBadge("", color(R.color.status_warning), color(R.color.status_warning_bg))
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(8), 0, dp(8))
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                addView(TextView(this@MainActivity).apply {
-                    text = name
-                    textSize = 14f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(color(R.color.text_primary))
-                })
-                addView(description)
-            })
+        val row = homeColumn(0).apply {
+            setPadding(0, dp(12), 0, dp(12))
+            addView(homeText(name, 16f, bold = true))
+            addView(description)
             addView(badge)
         }
         return PermissionViews(row, description, badge)
     }
-
     private fun renderHome(snapshot: HomeSnapshot) {
-        val previousScroll = scroll.scrollY
         val configured = snapshot.configured && snapshot.schedule != null
         homeViews.setupCard.visibility = if (configured) View.GONE else View.VISIBLE
         homeViews.configuredRoot.visibility = if (configured) View.VISIBLE else View.GONE
         if (configured) {
             updateSleepSection(snapshot.sessions, snapshot.latestClassification)
-            homeViews.captureFrequency.text = snapshot.latestCapture?.homeRateSummary()
-                ?: "尚無最近採集頻率資料。要求頻率與原始事件實測頻率會分開顯示。"
+            homeViews.captureView.bind(snapshot.latestCapture)
             updateSchedule(requireNotNull(snapshot.schedule), snapshot.recordingEnabled, snapshot.exactAlarmAllowed)
             updatePermissions(snapshot.healthGranted)
             updateBackgroundAccess(snapshot.backgroundRestricted, snapshot.batteryExempt)
         }
-        scroll.post { scroll.scrollTo(0, previousScroll) }
+        // The stable hierarchy preserves ScrollView's position naturally. Posting an old scrollY
+        // here can undo a user scroll that happens between data binding and the next frame.
     }
 
     private fun updateSleepSection(sessions: List<SleepSession>, latestClassification: ClassificationSample?) {
         renderedSessions = sessions
-        homeViews.classificationScore.text = latestClassification?.let { "最近一次 Sleep API 睡眠信心：${it.confidence}/100" } ?: "尚未收到 Sleep API 睡眠分類"
+        homeViews.classificationScore.text = latestClassification?.let { "${it.confidence} / 100" } ?: "尚未收到回報"
         homeViews.classificationDetail.text = latestClassification?.let {
             val time = DateTimeFormatter.ofPattern("M月d日 HH:mm").withZone(ZoneId.systemDefault())
-            "回報時間：${time.format(Instant.ofEpochMilli(it.timeMillis))} · 使用已保存資料，非即時查詢、非準確率"
+            "最近回報　${time.format(Instant.ofEpochMilli(it.timeMillis))}"
         } ?: "會在 Google Play services 回報分類後自動更新。"
         renderedLatestSession = sessions.firstOrNull()
         homeViews.emptyCard.visibility = if (sessions.isEmpty()) View.VISIBLE else View.GONE
         homeViews.latestCard.visibility = if (sessions.isEmpty()) View.GONE else View.VISIBLE
         homeViews.historyCard.visibility = if (sessions.size > 1) View.VISIBLE else View.GONE
-        homeViews.historyAllButton.visibility = if (sessions.size > 1 + homeViews.historyRows.size) View.VISIBLE else View.GONE
+        homeViews.historyAllButton.visibility = if (sessions.size > 1) View.VISIBLE else View.GONE
         sessions.firstOrNull()?.let { session ->
             homeViews.latestTitle.text = session.title()
             updateBadge(homeViews.latestStatus, session.state)
-            homeViews.latestDuration.text = formatDuration(session.durationMillis)
+            val durationLabel = formatDuration(session.durationMillis)
+            homeViews.latestDuration.text = if (resources.configuration.fontScale >= 1.3f || resources.configuration.screenWidthDp < 360)
+                durationLabel.replace(" 小時 ", " 小時\n") else durationLabel
+            homeViews.latestDuration.contentDescription = durationLabel
             val time = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
             homeViews.latestTimes.text = getString(R.string.sleep_times, time.format(Instant.ofEpochMilli(session.startMillis)), time.format(Instant.ofEpochMilli(session.endMillis)))
             homeViews.latestAwake.text = getString(R.string.excluded_phone_time, formatDuration(session.awakeMillis))
@@ -911,12 +740,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateSchedule(schedule: SleepSchedule, recordingEnabled: Boolean, exactAlarmAllowed: Boolean) {
         renderedSchedule = schedule
-        homeViews.scheduleTime.text = schedule.label()
-        homeViews.scheduleMode.text = when {
-            !recordingEnabled -> "自動記錄已暫停"
-            !schedule.requiresWindowBoundary() -> "自動記錄已開啟 · 目前排程涵蓋全天"
-            exactAlarmAllowed -> "自動記錄已開啟 · 起床後整理，仍在睡眠時延長觀測"
-            else -> "未允許鬧鐘與提醒 · 睡眠窗背景啟動可能受限"
+        fun range(start: Int, end: Int): String {
+            fun clock(minute: Int) = "%02d:%02d".format(minute / 60, minute % 60)
+            return if (start == end) "全天（${clock(start)} 起）"
+            else "${clock(start)} – ${clock(end)}${if (end < start) "（隔日）" else ""}"
+        }
+        homeViews.scheduleTime.text = if (schedule.weekendStartMinute != null && schedule.weekendEndMinute != null) {
+            "平日\n${range(schedule.startMinute, schedule.endMinute)}\n\n週末\n${range(schedule.weekendStartMinute, schedule.weekendEndMinute)}"
+        } else "每日\n${range(schedule.startMinute, schedule.endMinute)}"
+        homeViews.scheduleMode.text = if (recordingEnabled) "自動記錄已開啟" else "自動記錄已暫停"
+        homeViews.scheduleMode.setTextColor(color(if (recordingEnabled) R.color.status_success else R.color.status_neutral))
+        homeViews.scheduleMode.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            color(if (recordingEnabled) R.color.status_success_bg else R.color.status_neutral_bg))
+        homeViews.scheduleDescription.text = when {
+            !recordingEnabled -> "目前不會自動偵測。恢復後會依設定時段記錄。"
+            !schedule.requiresWindowBoundary() -> "目前設定為全天觀測，App 會依可用資料整理睡眠。"
+            exactAlarmAllowed -> "觀測完成後自動整理；有持續睡眠訊號時，可能延長觀測。"
+            else -> "尚未允許「鬧鐘與提醒」。時段開始時可能無法準時啟動，造成漏記。"
         }
         homeViews.windowAlarmAccess.visibility = if (recordingEnabled && schedule.requiresWindowBoundary() && !exactAlarmAllowed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) View.VISIBLE else View.GONE
         homeViews.scheduleToggle.text = if (recordingEnabled) "暫停自動記錄" else "恢復自動記錄"
@@ -934,9 +774,9 @@ class MainActivity : AppCompatActivity() {
         homeViews.permissionRows.forEachIndexed { index, row ->
             val (granted, note) = states[index]
             row.row.visibility = if (allGranted) View.GONE else View.VISIBLE
-            row.description.text = note ?: listOf("允許 App 自動記錄", "排除夜間使用手機時間", "自動寫入睡眠紀錄")[index]
+            row.description.text = note ?: listOf("取得 Google 睡眠訊號", "排除夜間使用手機時間", "自動寫入睡眠紀錄")[index]
             row.description.setTextColor(if (note != null) color(R.color.status_warning) else color(R.color.text_secondary))
-            row.badge.text = if (granted) "已允許 ✓" else "需要允許 ⚠"
+            row.badge.text = if (granted) "已允許" else "尚未允許"
             row.badge.setTextColor(if (granted) color(R.color.status_success) else color(R.color.status_warning))
             row.badge.background = GradientDrawable().apply {
                 cornerRadius = dp(6).toFloat()
@@ -944,10 +784,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         homeViews.permissionsReady.visibility = if (allGranted) View.VISIBLE else View.GONE
+        homeViews.permissionDividers.forEach { it.visibility = if (allGranted) View.GONE else View.VISIBLE }
         homeViews.permissionSummary.visibility = if (allGranted) View.GONE else View.VISIBLE
-        homeViews.permissionSummary.text = "⚠ 尚有未允許的項目。每次開啟 App 都會自動檢查；使用情況存取需在 Android 系統設定中開啟。"
+        homeViews.permissionSummary.text = "尚有權限需要設定，點選下方按鈕即可依序完成。每次開啟 App 也會自動檢查。"
         homeViews.permissionSummary.setTextColor(color(R.color.status_warning))
         homeViews.permissionGrant.visibility = if (allGranted) View.GONE else View.VISIBLE
+        homeViews.permissionRecheck.visibility = if (allGranted) View.VISIBLE else View.GONE
     }
 
     private fun updateBackgroundAccess(backgroundRestricted: Boolean, batteryExempt: Boolean) {
@@ -1063,12 +905,52 @@ class MainActivity : AppCompatActivity() {
 
     private fun Double.csvNumber(): String = if (isFinite()) String.format(java.util.Locale.US, "%.6f", this) else ""
 
-    private fun createSectionTitle(title: String): TextView = TextView(this).apply {
-        text = title
+    private fun homeColumn(padding: Int = 20) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        layoutParams = LinearLayout.LayoutParams(-1, -2)
+        setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
+    }
+
+    private fun homeText(value: String, size: Float = 14f, secondary: Boolean = false, bold: Boolean = false) = TextView(this).apply {
+        text = value
+        textSize = size
+        breakStrategy = android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED
+        setTextColor(color(if (secondary) R.color.text_secondary else R.color.text_primary))
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+        setLineSpacing(dp(2).toFloat(), 1.15f)
+        layoutParams = LinearLayout.LayoutParams(-1, -2)
+    }
+
+    private fun homeButton(label: String, primary: Boolean = false, action: () -> Unit) = MaterialButton(
+        this, null, if (primary) com.google.android.material.R.attr.materialButtonStyle
+        else com.google.android.material.R.attr.materialButtonOutlinedStyle
+    ).apply {
+        text = label
         textSize = 14f
-        typeface = Typeface.DEFAULT_BOLD
-        setTextColor(color(R.color.text_secondary))
-        setPadding(dp(4), dp(8), dp(4), dp(6))
+        isAllCaps = false
+        minHeight = dp(52)
+        cornerRadius = dp(14)
+        setPadding(dp(12), dp(12), dp(12), dp(12))
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+        setOnClickListener { action() }
+    }
+
+    /** Stack actions when the usable width or font size would squeeze their labels. */
+    private fun homeActions(vararg buttons: MaterialButton) = LinearLayout(this).apply {
+        val stacked = resources.configuration.fontScale >= 1.3f || resources.configuration.screenWidthDp < 360
+        orientation = if (stacked) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        layoutParams = LinearLayout.LayoutParams(-1, -2)
+        buttons.forEachIndexed { index, button ->
+            addView(button, LinearLayout.LayoutParams(if (stacked) -1 else 0, -2, if (stacked) 0f else 1f).apply {
+                topMargin = dp(8)
+                if (!stacked && index < buttons.lastIndex) marginEnd = dp(8)
+            })
+        }
+    }
+
+    private fun createSectionTitle(title: String): TextView = homeText(title, 16f, bold = true).apply {
+        isAccessibilityHeading = true
+        setPadding(dp(4), dp(18), dp(4), dp(12))
     }
 
     private fun createDivider(): View = View(this).apply {
@@ -1083,26 +965,26 @@ class MainActivity : AppCompatActivity() {
         ).apply {
             setMargins(0, 0, 0, dp(14))
         }
-        radius = dp(16).toFloat()
+        radius = dp(22).toFloat()
         cardElevation = dp(0).toFloat()
         strokeWidth = dp(1)
         setStrokeColor(color(R.color.card_stroke))
-        val typedValue = TypedValue()
-        theme.resolveAttribute(com.google.android.material.R.attr.colorSurface, typedValue, true)
-        setCardBackgroundColor(typedValue.data)
+        setCardBackgroundColor(color(R.color.home_surface))
     }
 
     private fun createBadge(text: String, textColor: Int, bgColor: Int): TextView = TextView(this).apply {
         this.text = text
         this.setTextColor(textColor)
-        textSize = 11f
+        textSize = 12f
+        layoutParams = LinearLayout.LayoutParams(-2, -2)
+        setLineSpacing(dp(2).toFloat(), 1.1f)
         typeface = Typeface.DEFAULT_BOLD
         background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(6).toFloat()
             setColor(bgColor)
         }
-        setPadding(dp(8), dp(3), dp(8), dp(3))
+        setPadding(dp(10), dp(6), dp(10), dp(6))
     }
 
     private fun ensureAutomaticRecording() = lifecycleScope.launch {

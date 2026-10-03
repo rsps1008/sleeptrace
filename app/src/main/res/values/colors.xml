@@ -11,7 +11,12 @@
     <!-- Card and text colors -->
     <color name="card_stroke">#E2E8F0</color>
     <color name="text_primary">#1E293B</color>
-    <color name="text_secondary">#64748B</color>
+    <color name="text_secondary">#526179</color>
+    <color name="home_canvas">#F4F6FB</color>
+    <color name="home_surface">#FFFFFF</color>
+    <color name="home_panel">#EEF1F8</color>
+    <color name="home_hero">#ECF0FF</color>
+    <color name="home_accent">#394F8A</color>
 
     <!-- Status badge colors -->
     <color name="status_success">#166534</color>

@@ -12,6 +12,22 @@ App 圖示使用深靛藍夜色、淡紫月牙與藍綠睡眠軌跡，提供 And
 
 比較圖、全部設定、限制及 44 項相關 JVM 測試結果見 [離線回放報告](docs/offline-replay-2026-10-02/README.md)，重現命令見 [離線工具](tools/offline-replay/README.md)。實驗副本僅以 opt-in Gradle init script 加入 JVM 測試；**正式演算法、App 版本、取樣與同步均未改動，仍為規則 11**。
 
+## 首頁閱讀與感測資訊（2026-10-02）
+
+首頁依序呈現最近睡眠、記錄與排程、先前紀錄、連線與權限、資料與匯出。睡眠時長以主卡呈現；入睡／起床、平日／週末分行，長說明與操作按鈕分開。窄螢幕或放大字體時操作按鈕改為上下排列，採集欄位依可用寬度切換排列，並支援淺色／深色配色。保留暫停／恢復、修改時段、修正時間、詳情、完整歷史、授權與 CSV 匯出。
+
+「資料與匯出」將數字分成三列：**App 要求頻率**是政策目標、**原始事件實測**依已保存的事件時間間隔計算、**特徵正規化上限**是 App 處理上限，不是實測特徵率。感測器能力使 Android 註冊要求不同於政策時，另列註冊要求。採集時間明示為最近一次採集開始，並非即時記錄狀態；無資料不顯示假造的零值或 10 Hz。
+
+點「展開硬體與批次說明」可查看：
+
+- **硬體 FIFO 容量**：Android 從所選感測器回報的最大／保留事件筆數，不是 App 設定的容量，也不是目前使用量。最大容量可能共用；保留量為零不等於沒有 FIFO，舊紀錄缺欄位會標示未保存。
+- **App 批次等待上限**：App 依硬體容量與可能事件間隔換算後，取 80% 作為等待要求，預留 20% 緩衝；優先使用保留容量，沒有保留量才參考最大容量。App 未另設固定秒數上限，仍受 Android 可接受範圍限制。畫面顯示保存的要求值並保留小數秒，不是實際回報／CPU 喚醒間隔。
+- **感測器喚醒類型**：來自採集時保存的硬體回報，不代表已驗證整夜完整性或耗電。
+
+硬體欄位定義可對照 [Android Sensor 文件](https://developer.android.com/reference/android/hardware/Sensor#getFifoMaxEventCount())；批次要求定義見 [SensorManager 文件](https://developer.android.com/reference/android/hardware/SensorManager#registerListener(android.hardware.SensorEventListener,%20android.hardware.Sensor,%20int,%20int))。首頁固定骨架刷新，保留展開狀態及捲動位置；完整歷史入口修正為有較早紀錄即可使用。這次未修改取樣政策、分期規則、同步流程或資料庫 schema。
+
+JDK 21 驗證：完整 266 項 JVM tests 通過、Debug 與 AndroidTest APK 建置成功、Lint 23 warnings／0 errors。一次性 Android 16 emulator 已驗證首頁淺／深色 360dp 及深色 320dp／font scale 2.0，包含文字不裁切、按鈕可達、歷史入口、展開收合及採集刷新保留位置；服務／CSV／詳情整合亦通過。報告與合成 UI 截圖保存在 `app/build/reports/home-ui/`。未操作實體手機；測試畫面與顯示的已同步狀態是 UI fixture，不代表實際睡眠或 Health Connect 端到端驗證。
+
 ## 1.0.1 夜間測試版：規則 11（2026-10-01）
 
 本輪從 `272f743` 審查取樣、動態觀測、AUTO 耦合、睡眠候選、分期、保存及同步，並修正下列問題。App 仍為 `versionCode=2`／1.0.1、feature v7／10 Hz、DB schema motion 4／sleep 11。
@@ -213,7 +229,7 @@ reconciliation rule version 目前為 11，沿用 `SleepStageEstimator.ALGORITHM
 | activeMillis / movementEvents | 差值 ≥0.15 m/s² 的時間／由非活動進入活動的分離事件數 | 不是所有未取樣秒內動作的次數；跨分鐘連續活動不重計事件 |
 | longestActiveMillis / quietTailMillis | 最長連續活動／分鐘末連續安靜，ms | 延續只跨已觀測有效相鄰點，缺口與重啟歸零；不合格的 v5／v6／v7 分鐘不能維持 Deep；可含前一分鐘連續部分 |
 | postureDelta | 每約 10 秒的固定尺度代表點三軸均值，對當分鐘第一組均值的最大變化，m/s² | v7 使用約 100 個 100 ms 代表點、v6 使用 10 個 1 秒代表點；只描述低頻向量變化，不宣稱精確姿態；不足兩組或中途缺口不跨接 |
-| recordingId / observedStart / observedEnd | 錄製片段身份及有支持差值的事件範圍 | 重複／重疊新摘要不累加；同分钟不同片段合併後禁止細分 |
+| recordingId / observedStart / observedEnd | 錄製片段身份及有支持差值的事件範圍 | 重複／重疊新摘要不累加；同分鐘不同片段合併後禁止細分 |
 
 v7、v6、v5、v4 都是可提供 Deep 正向證據的 cadence 路徑，但當晚基準只選至少 10 筆的最高相容版本，不混版本；v1／v2 不提供正向證據，v3 只作活動衝突證據。v5／v6／v7 缺必要時間結構特徵時不可補零取得 Deep 資格。基準排除使用、guard、低覆蓋、無耦合及錄製邊界；全幅變化 ≤max(0.0005 m/s², P50×25%) 視為低差異，不能僅因相對分位數低製造 Deep，該睡眠片段回退 Light。這個品質門檻仍未校準。
 

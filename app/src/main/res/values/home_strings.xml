@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="sleep_times">入睡 %1$s　起床 %2$s</string>
+    <string name="sleep_times">入睡　%1$s\n起床　%2$s</string>
     <string name="excluded_phone_time">排除手機使用：%1$s</string>
-    <string name="sleep_duration_summary">%1$s · 排除手機 %2$s</string>
-    <string name="automatic_recording_description">手機放在床上或床邊都可以，App 會自動調整判斷方式，並依電量安排記錄。</string>
+    <string name="sleep_duration_summary">睡眠 %1$s\n已排除手機使用 %2$s</string>
+    <string name="automatic_recording_description">手機放在床上或床邊即可，App 會依可用訊號自動推估。未接電且電量低於或等於 15% 時暫停取樣。</string>
 </resources>
