@@ -18,6 +18,7 @@ import com.rsps1008.sleeptrace.sleep.SleepStageInterval
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageInterval
 import com.rsps1008.sleeptrace.sleep.confirmMotionCandidateOnset
+import com.rsps1008.sleeptrace.sleep.extendConfirmedMotionCandidate
 import com.rsps1008.sleeptrace.sleep.mergeSleepSessions
 import com.rsps1008.sleeptrace.sleep.sleepParts
 import org.junit.Assert.assertEquals
@@ -65,6 +66,68 @@ class SleepStageEstimatorTest {
         assertEquals(SleepStage.LIGHT, stageAt(stages, start))
         assertEquals(SleepStage.LIGHT, stageAt(stages, start + 15 * MINUTE_MS))
         assertTrue(stages.any { it.stage == SleepStage.DEEP && it.startMillis >= start + 15 * MINUTE_MS })
+    }
+
+    @Test fun `classification before coupling can confirm a later motion candidate`() {
+        val candidate = SleepSession(
+            id = "motion", startMillis = base + 79 * MINUTE_MS,
+            endMillis = base + 125 * MINUTE_MS, confidence = 50,
+            awakeMillis = 0, state = SyncState.PENDING, reason = "motion"
+        )
+
+        val confirmed = confirmMotionCandidateOnset(
+            candidate, emptyList(), listOf(ClassificationSample(base, 92, 0, 0))
+        )
+
+        assertEquals(candidate.startMillis, confirmed?.startMillis)
+    }
+
+    @Test fun `newer non-sleep classification cancels preceding sleep evidence`() {
+        val candidate = SleepSession(
+            id = "motion", startMillis = base + 79 * MINUTE_MS,
+            endMillis = base + 125 * MINUTE_MS, confidence = 50,
+            awakeMillis = 0, state = SyncState.PENDING, reason = "motion"
+        )
+
+        val confirmed = confirmMotionCandidateOnset(candidate, emptyList(), listOf(
+            ClassificationSample(base, 92, 0, 0),
+            ClassificationSample(base + 70 * MINUTE_MS, 10, 0, 0)
+        ))
+
+        assertNull(confirmed)
+    }
+
+    @Test fun `stale classification cannot confirm a much later motion candidate`() {
+        val candidate = SleepSession(
+            id = "motion", startMillis = base + 121 * MINUTE_MS,
+            endMillis = base + 167 * MINUTE_MS, confidence = 50,
+            awakeMillis = 0, state = SyncState.PENDING, reason = "motion"
+        )
+
+        assertNull(confirmMotionCandidateOnset(
+            candidate, emptyList(), listOf(ClassificationSample(base, 92, 0, 0))
+        ))
+    }
+
+    @Test fun `confirmed candidate bridges temporary unknown coupling and closes on dense wake`() {
+        fun row(minute: Int, active: Boolean = false) = MotionMinute(
+            startMillis = base + minute * MINUTE_MS, coveredMillis = 60_000,
+            activeMillis = if (active) 40_000 else 0, squaredDeltaTime = if (active) 3_000.0 else 0.0,
+            sampleCount = 600, placement = if (minute in 3..5) Placement.BED else Placement.UNKNOWN,
+            recordingId = 7
+        )
+        val candidate = SleepSession(
+            id = "motion", startMillis = base + 3 * MINUTE_MS, endMillis = base + 6 * MINUTE_MS,
+            confidence = 50, awakeMillis = 0, state = SyncState.PENDING, reason = "motion"
+        )
+        val minutes = (0..12).map { row(it, active = it >= 10) }
+
+        val expanded = extendConfirmedMotionCandidate(
+            candidate, minutes, listOf(ClassificationSample(base + 30_000, 92, 0, 0)), emptyList()
+        )
+
+        assertEquals(base + 30_000, expanded.startMillis)
+        assertEquals(base + 10 * MINUTE_MS, expanded.endMillis)
     }
 
     @Test fun `one or two active minutes do not fragment an established Deep run`() {

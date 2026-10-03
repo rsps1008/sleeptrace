@@ -105,7 +105,11 @@ class SleepReconciler(private val context: Context) {
         val fallback = MotionSleepEstimator.estimate(
             resolved, usageResult.intervals, schedule, now,
             usageAvailable = usageResult::availableFor
-        ).mapNotNull { candidate -> confirmMotionCandidateOnset(candidate, segments, samples) }
+        ).mapNotNull { candidate ->
+            confirmMotionCandidateOnset(candidate, segments, samples)?.let {
+                extendConfirmedMotionCandidate(it, resolved, samples, usageResult.intervals)
+            }
+        }
             .filter(::inReconciliationScope)
         val staged = selectBestSessions(calculated, fallback).map { session ->
             val sessionUsage = stageUsageFor(session, usageResult.intervals)
@@ -223,10 +227,14 @@ internal fun confirmMotionCandidateOnset(
     val segmentOnsets = segments.asSequence()
         .filter { it.startMillis < candidate.endMillis && it.endMillis > candidate.startMillis }
         .map { maxOf(candidate.startMillis, it.startMillis) }
-    val classificationOnsets = classifications.asSequence()
+    val latestRelevantClassification = classifications.asSequence()
         .filter {
-            it.confidence >= 80 && it.timeMillis >= candidate.startMillis && it.timeMillis < candidate.endMillis
+            it.timeMillis >= candidate.startMillis - MOTION_ONSET_CLASSIFICATION_LOOKBACK &&
+                it.timeMillis < candidate.endMillis
         }
+        .maxByOrNull { it.timeMillis }
+    val classificationOnsets = listOfNotNull(latestRelevantClassification).asSequence()
+        .filter { it.confidence >= 80 }
         .map { it.timeMillis }
     val confirmedStart = (segmentOnsets + classificationOnsets).minOrNull() ?: return null
     val start = maxOf(candidate.startMillis, confirmedStart)
@@ -239,6 +247,78 @@ internal fun confirmMotionCandidateOnset(
         reason = candidate.reason + "；手機靜止僅延伸 Sleep API 已確認的睡眠起點"
     )
 }
+
+/**
+ * Classification may arrive before coupling has enough motion history to resolve BED.
+ * Keep it bounded to the existing two-hour capture fallback horizon, and only trust the
+ * latest report so a newer awake/unknown classification cancels older sleep evidence.
+ */
+internal const val MOTION_ONSET_CLASSIFICATION_LOOKBACK = 2 * 60 * com.rsps1008.sleeptrace.motion.MINUTE_MS
+
+/**
+ * Once BED coupling and Google sleep evidence have independently accepted a candidate,
+ * preserve contiguous compatible quiet minutes while coupling is temporarily UNKNOWN.
+ * This does not let stillness establish sleep: without the accepted BED candidate this
+ * function is never called. Three consecutive dense-active minutes close the session at
+ * the first such minute; sparse turning does not.
+ */
+internal fun extendConfirmedMotionCandidate(
+    candidate: SleepSession,
+    minutes: List<com.rsps1008.sleeptrace.motion.MotionMinute>,
+    classifications: List<ClassificationSample>,
+    usage: List<UsageInterval>
+): SleepSession {
+    val evidence = classifications.asSequence()
+        .filter {
+            it.confidence >= 80 &&
+                it.timeMillis >= candidate.startMillis - MOTION_ONSET_CLASSIFICATION_LOOKBACK &&
+                it.timeMillis <= candidate.startMillis
+        }
+        .maxByOrNull { it.timeMillis }
+    val ordered = minutes.sortedBy { it.startMillis }
+    val recordingId = ordered.firstOrNull { it.startMillis in candidate.startMillis until candidate.endMillis }?.recordingId
+    fun phoneUsed(start: Long) = usage.any { it.startMillis < start + com.rsps1008.sleeptrace.motion.MINUTE_MS && it.endMillis > start }
+    fun compatible(row: com.rsps1008.sleeptrace.motion.MotionMinute) =
+        row.recordingId == recordingId && row.supportsCurrentStaging && !phoneUsed(row.startMillis)
+
+    var start = candidate.startMillis
+    if (evidence != null) {
+        val prefix = ordered.filter { it.startMillis >= evidence.timeMillis - evidence.timeMillis % com.rsps1008.sleeptrace.motion.MINUTE_MS && it.startMillis < candidate.startMillis }
+        val contiguous = prefix.isNotEmpty() && prefix.zipWithNext().all { (a, b) ->
+            b.startMillis == a.startMillis + com.rsps1008.sleeptrace.motion.MINUTE_MS
+        }
+        val quiet = prefix.drop(1).all { compatible(it) && it.level == com.rsps1008.sleeptrace.motion.MotionLevel.QUIET }
+        if (contiguous && quiet) start = evidence.timeMillis
+    }
+
+    var end = candidate.endMillis
+    var denseActiveStart: Long? = null
+    var denseActiveCount = 0
+    val tail = ordered.filter { it.startMillis >= candidate.endMillis }
+    var expected = candidate.endMillis
+    for (row in tail) {
+        if (row.startMillis != expected || !compatible(row)) break
+        val denseActive = row.level == com.rsps1008.sleeptrace.motion.MotionLevel.ACTIVE && row.activeMillis >= DENSE_WAKE_ACTIVE_MILLIS
+        if (denseActive) {
+            if (denseActiveStart == null) denseActiveStart = row.startMillis
+            denseActiveCount++
+            if (denseActiveCount >= DENSE_WAKE_MINUTES) {
+                end = denseActiveStart!!
+                break
+            }
+        } else {
+            denseActiveStart = null
+            denseActiveCount = 0
+            end = row.startMillis + com.rsps1008.sleeptrace.motion.MINUTE_MS
+        }
+        expected = row.startMillis + com.rsps1008.sleeptrace.motion.MINUTE_MS
+    }
+    return candidate.copy(startMillis = start, endMillis = end, id = "${candidate.id}-$start-$end",
+        reason = candidate.reason + "；Google 入睡證據與連續動作摘要補足耦合建立前後區間")
+}
+
+private const val DENSE_WAKE_MINUTES = 3
+private const val DENSE_WAKE_ACTIVE_MILLIS = 30_000L
 
 private fun overlaps(a: SleepSession, b: SleepSession) = a.startMillis < b.endMillis && a.endMillis > b.startMillis
 
