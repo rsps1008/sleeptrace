@@ -24,15 +24,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('csv', type=Path)
     parser.add_argument('--round', type=int, choices=(1, 2), default=1)
+    parser.add_argument('--output', type=Path, help='Separate ignored directory for another night')
+    parser.add_argument('--unsegmented', action='store_true', help='Prepare raw minutes without asserting an exported session; requires a separate replay test')
     args = parser.parse_args()
     if args.round == 2:
         OUT = OUT / 'round2'
+    if args.output:
+        OUT = args.output.resolve()
     source = args.csv.read_bytes()
     rows = list(csv.DictReader(source.decode('utf-8-sig').splitlines()))
     assert rows and all(None not in r for r in rows)
     assert len({r['timestamp_local'] for r in rows}) == len(rows)
     ids = {r['session_id'] for r in rows if r['session_id']}
-    assert len(ids) == 1, 'This fixed-session experiment requires exactly one exported session'
+    assert args.unsegmented or len(ids) == 1, 'This fixed-session experiment requires exactly one exported session'
     assert {r['feature_version'] for r in rows} == {'7'}, 'This experiment is for the v7 export'
     OUT.mkdir(parents=True, exist_ok=True)
     # A failed subsequent run must not leave an old PASS available to summarize.
@@ -89,6 +93,7 @@ def main():
     var EXIT_PERCENTILE = 70
     var EXIT_HIGH_WINDOWS = 3
     var EXIT_RMS_LOOKBACK_MINUTES = 5
+    var LOCAL_BASELINE_MINUTES = 0
     private fun entryThreshold(b: NightlyBaseline): Double = b.experimentalEntryRms
     private fun exitThreshold(b: NightlyBaseline): Double = b.experimentalExitRms
 ''')
@@ -98,14 +103,20 @@ def main():
     estimator = replace_once(estimator,
         'p50 * MIN_RELATIVE_SIGNAL_RANGE), featureVersion = version)',
         'p50 * MIN_RELATIVE_SIGNAL_RANGE), featureVersion = version,\n            experimentalEntryRms = percentileSorted(sorted, ENTRY_PERCENTILE / 100.0),\n            experimentalExitRms = percentileSorted(sorted, EXIT_PERCENTILE / 100.0))')
+    estimator = replace_once(estimator,
+        'index, timeline, rolling, baseline, evidenceStart, deep,',
+        '''index, timeline, rolling,
+                if (LOCAL_BASELINE_MINUTES > 0) nightlyBaseline(timeline.subList(maxOf(0, index - LOCAL_BASELINE_MINUTES + 1), index + 1)) ?: baseline else baseline,
+                evidenceStart, deep,''')
     for filename, content in [('OfflineCouplingPolicy.kt', policy), ('OfflineAutomaticPlacement.kt', placement), ('OfflineSleepStageEstimator.kt', estimator)]:
         (generated / filename).write_text(content, encoding='utf-8')
     manifest = {
         'round': args.round,
         'input_sha256': hashlib.sha256(source).hexdigest(), 'rows': len(rows), 'columns': len(rows[0]),
+        'input_tsv_sha256': hashlib.sha256((OUT / 'input.tsv').read_bytes()).hexdigest(),
         'source_sha256': {name: hashlib.sha256((BASE / name).read_bytes()).hexdigest() for name in files},
         'generated_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(generated.glob('*.kt'))},
-        'scope': 'Fixed exported session boundaries; accepted sleep evidence reconstructed from CSV; no candidate selection, classification delivery, storage or Health Connect replay.',
+        'scope': ('Unsegmented CSV: classification samples and exact usage are absent; any supplied evidence must be labelled as a scenario, not an observed replay.' if args.unsegmented else 'Fixed exported session boundaries; accepted sleep evidence reconstructed from CSV; no candidate selection, classification delivery, storage or Health Connect replay.'),
         'precision': 'RMS and other floating features are rounded to 6 decimals in the export; baseline equivalence is required before sweep.'
     }
     (OUT / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')

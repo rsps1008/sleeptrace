@@ -1,8 +1,31 @@
 # 匯出 CSV 的離線門檻回放
 
-本工具只產生 JVM 測試用的演算法副本，不修改 `app/src/main`、App 版本、正式門檻、手機資料或 Health Connect。正式程式沿用規則 11。
+本工具只產生 JVM 測試用的演算法副本，不修改 `app/src/main`、App 版本、正式門檻、手機資料或 Health Connect。2026-10-03 工作區正式程式為規則 12；下方 2026-10-02 報告中的規則 11 是當時快照。
 
 `prepare.py` 以當前工作區原始碼生成實驗副本；每個文字替換都要求唯一匹配，原始碼變動不符合預期時直接停止。`manifest.json` 保存來源、輸入及生成檔 SHA-256。`replay.init.gradle` 只在明確使用 `-I` 時加入實驗測試來源，正常 App／測試建置不包含這些副本。
+
+## 同晚參考圖與沒有 session 的匯出
+
+`paired_report.py prepare` 接受本晚 CSV、前一晚 CSV、同晚截圖、截圖起訖，以及經目視確認的像素軌道範圍／掃描列。它只讀圖，不修改影像；深睡像素線性映射至時間，需保留約 ±1 分鐘讀圖不確定性。以下變數由本機來源指定，不將原始健康 CSV、截圖或識別碼放進版本控制。
+
+```powershell
+$replayPython = 'C:\Users\CHINTING\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+# 先設定 $nightCsv、$previousNightCsv、$referenceImage 為本機輸入檔。
+& $replayPython tools/offline-replay/paired_report.py prepare --csv $nightCsv --previous-csv $previousNightCsv --image $referenceImage --start '2026-10-03 02:28:00' --end '2026-10-03 09:28:00' --plot-left 144 --plot-right 2462 --scan-y 900
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.11'
+$env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+.\gradlew.bat '-DofflineReplayDir=build/offline-replay/same-night' -I tools/offline-replay/replay.init.gradle :app:testDebugUnitTest --tests com.rsps1008.sleeptrace.SameNightReplayTest --tests com.rsps1008.sleeptrace.AutomaticPlacementTest --tests com.rsps1008.sleeptrace.SleepStageEstimatorTest --tests com.rsps1008.sleeptrace.TenHertzReviewRegressionTest --tests com.rsps1008.sleeptrace.SparseCouplingNightReplayTest --no-configuration-cache
+& $replayPython tools/offline-replay/paired_report.py report
+```
+
+這組讀圖參數適用已核對的 2608×1200 圖片，不可直接用在其他截圖。此腳本是本次配對實驗的可重現入口，報告的固定日期、選定設定及預期結果有防漂移斷言，並非通用睡眠 CSV 匯入器。繪圖沿用下方 matplotlib 依賴，只有 `prepare`／`report` 需要 Python，正式 App 不包含 Python 或實驗副本。
+
+- 參考圖起訖只用來建立固定的已接受睡眠容器；參考的 Deep 標記只在評分時使用，不送入演算法。沒有 Google 分類原始資料，不可把此容器當作實際 Sleep API segment。`candidate-scenario.txt` 的 first-event 高分類是假設，不是被匯出欄位證實的分類時間。
+- `PHONE_IN_USE` 是帶耦合安全邊界的分鐘標記。整段作保守排除，不逆推不存在的精確 UsageStats；評分只採有至少 45 秒摘要、無使用重疊的完整分鐘，按分鐘中點和截圖比較。Light 多數類別會拉高一致率，需一起看 Deep F1、重疊／多判／漏判、段數及最長段。
+- 新增 `LOCAL_BASELINE_MINUTES` 實驗維度：0 維持原始全晚規則；正值使用最近相應分鐘的 BED 基準評估入口與維持轉移，不足時沿用全晚基準。原有全晚分期資格保留。一般既有回放的預設仍為 0。
+- 1,586 組變體涵蓋原始全晚門檻、前輪 C、30／60／90 分鐘局部比較及鄰近設定；全部保留原品質與候選證據限制。選定 3 次動作、65 分鐘支持、10 分鐘入口、局部 30 分鐘 P45／P60、1 次退出確認、最短 7 分鐘。這是以同一晚選參數的樣本內結果，並非獨立驗證。前晚 CSV 只作回歸／形態檢查，不拿不同晚小米圖評分。
+- 中介資料在 `app/build/offline-replay/same-night/`；完整 HTML、PNG、選定參數、全部比較及驗證摘要在 `app/build/reports/same-night-2026-10-03/`。prepare 先清除舊成功標記；report 要求新測試零失敗／錯誤／略過，並核對正式／生成來源 SHA-256，防止把舊輸出當成新證據。
+- 正式演算法、規則版本、APK、DB、感測與同步均不套用這組設定；實驗結果對支持期限仍敏感。單晚已接近的總時數／段數不代表每段時間吻合，也不保證跨夜表現。
 
 ## 重現本次比較
 

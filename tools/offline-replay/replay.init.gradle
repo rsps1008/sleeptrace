@@ -3,7 +3,7 @@ gradle.beforeProject { p ->
     if (p.path == ':app') {
         def round = System.getProperty('offlineReplayRound', '1')
         if (!(round in ['1', '2'])) throw new GradleException('offlineReplayRound must be 1 or 2')
-        def work = p.file('build/offline-replay' + (round == '2' ? '/round2' : ''))
+        def work = p.file(System.getProperty('offlineReplayDir', 'build/offline-replay' + (round == '2' ? '/round2' : '')))
         p.plugins.withId('com.android.application') {
             p.android.sourceSets.getByName('test').kotlin.srcDir(new File(work, 'generated'))
             p.android.sourceSets.getByName('test').kotlin.srcDir(p.rootProject.file('tools/offline-replay/kotlin'))
