@@ -1,0 +1,37 @@
+[
+  {
+    "name": "com.rsps1008.sleeptrace.AutomaticPlacementTest",
+    "tests": 20,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  {
+    "name": "com.rsps1008.sleeptrace.OfflineThresholdReplayTest",
+    "tests": 1,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  {
+    "name": "com.rsps1008.sleeptrace.SleepStageEstimatorTest",
+    "tests": 14,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  {
+    "name": "com.rsps1008.sleeptrace.SparseCouplingNightReplayTest",
+    "tests": 3,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  {
+    "name": "com.rsps1008.sleeptrace.TenHertzReviewRegressionTest",
+    "tests": 6,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  }
+]

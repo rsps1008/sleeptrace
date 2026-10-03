@@ -1,0 +1,18 @@
+{
+  "round": 2,
+  "input_sha256": "b24c719d3ad9ba98dc0a16ee7c4f32e753171c287af5c6f9243ed7f342c002f9",
+  "rows": 376,
+  "columns": 134,
+  "source_sha256": {
+    "motion/SignalCoupling.kt": "72d03352c96760a6bd2926d1fe5b86ece6f747414447b9118ed6452d47249d58",
+    "motion/AutomaticPlacement.kt": "41981b7579b16fa88a57947988c38636aed7c386ec21afdbd80efbbea4a7f414",
+    "sleep/SleepStageEstimator.kt": "d21364dea5417bfa31db5e9ebf35aad1a10f300b511b62943e8426fe1a354b6e"
+  },
+  "generated_sha256": {
+    "OfflineAutomaticPlacement.kt": "11d8b9b833a720d792ed5eed13a241283e320a72b207e453371a12568fd2460a",
+    "OfflineCouplingPolicy.kt": "25b13a16c74b28d63e79b2f2acfa145d0668c7336dee0a1e520e95407163b92d",
+    "OfflineSleepStageEstimator.kt": "a2d2cedda31a66f1fce153c3412b9a0175f6348db384fa6779efd3f05cccc6b8"
+  },
+  "scope": "Fixed exported session boundaries; accepted sleep evidence reconstructed from CSV; no candidate selection, classification delivery, storage or Health Connect replay.",
+  "precision": "RMS and other floating features are rounded to 6 decimals in the export; baseline equivalence is required before sweep."
+}

@@ -1,0 +1,4 @@
+Production CSV interval/canStage/action/coupling/age parity PASS
+Generated baseline parity PASS
+Previous-round A/B full interval parity PASS
+1268 profiles: conservation, no ineligible Deep, minimum bout, quiet-only, phone-use, recording-boundary and measured-gap controls PASS
