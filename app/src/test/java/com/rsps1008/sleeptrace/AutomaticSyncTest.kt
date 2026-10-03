@@ -241,11 +241,11 @@ class AutomaticSyncTest {
         assertEquals(snapped, SleepUsageSnapshot.apply(snapped, listOf(UsageInterval(62_000, 122_000)), usageAvailable = true))
     }
 
-    @Test fun `missing usage access is recorded once with an explicit limitation`() {
+    @Test fun `legacy session becomes upload ready without usage access`() {
         val snapped = SleepUsageSnapshot.apply(session(), emptyList(), usageAvailable = false)
 
         assertTrue(snapped.usageSnapshotApplied)
-        assertTrue(snapped.reason.contains("無法排除手機使用"))
+        assertEquals(session().reason, snapped.reason)
     }
 
     @Test fun `reanalysis keeps the stored one-time phone use deduction`() {

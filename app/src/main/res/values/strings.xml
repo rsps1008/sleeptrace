@@ -1,10 +1,8 @@
 <resources>
     <string name="app_name">眠迹 SleepTrace</string>
-    <string name="sleep_detail_total">總睡眠：%1$s\n</string>
-    <string name="sleep_detail_stages">推估淺眠：%1$s　推估深眠：%2$s\n</string>
-    <string name="sleep_detail_fallback_notice">證據不足的已接受睡眠片段會回退顯示為淺眠；這是輸出規則，不代表已有淺眠生理證據。\n</string>
-    <string name="sleep_detail_evidence">證據檢查：%1$s\n</string>
-    <string name="sleep_detail_footer">已知清醒：%1$s\n手機工程推估，非醫療睡眠分期；規則 %2$s\n睡眠參考分數：%3$d/100（非準確率）\n\n%4$s</string>
-    <string name="sleep_detail_sync_error">\n\n同步錯誤：%1$s</string>
-    <string name="sleep_legacy_version">舊版來源不明</string>
+    <string name="sleep_detail_total_label">總睡眠</string>
+    <string name="sleep_detail_stages">淺眠 %1$s　深眠 %2$s</string>
+    <string name="sleep_detail_awake">清醒 %1$s</string>
+    <string name="sleep_detail_note">由 Sleep API 與手機動作推估，僅供日常參考。</string>
+    <string name="sleep_detail_sync_error">同步錯誤：%1$s</string>
 </resources>

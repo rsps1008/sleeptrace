@@ -406,10 +406,10 @@ object MotionSleepEstimator {
 
     fun estimate(
         minutes: List<MotionMinute>,
-        usage: List<UsageInterval>,
+        awakeEvidence: List<UsageInterval>,
         schedule: SleepSchedule,
         now: Long,
-        usageAvailable: (SleepWindow) -> Boolean = { true }
+        @Suppress("UNUSED_PARAMETER") usageAvailable: (SleepWindow) -> Boolean = { true }
     ): List<SleepSession> {
         return minutes.mapNotNull { minute -> schedule.windowAt(minute.startMillis)?.let { it to minute } }
             .groupBy({ it.first }, { it.second }).flatMap { (window, all) ->
@@ -433,8 +433,8 @@ object MotionSleepEstimator {
                         previous?.featureVersion != minute.featureVersion)) {
                     close(previousEnd!!)
                 }
-                val phoneInUse = usage.any { it.startMillis < start + MINUTE_MS && it.endMillis > start }
-                if (minute.placement != Placement.BED || minute.level == MotionLevel.UNKNOWN || phoneInUse ||
+                val knownAwake = awakeEvidence.any { it.startMillis < start + MINUTE_MS && it.endMillis > start }
+                if (minute.placement != Placement.BED || minute.level == MotionLevel.UNKNOWN || knownAwake ||
                     (!minute.supportsCurrentStaging && !MotionFeaturePolicy.supportsSleepConflictEvidence(minute.featureVersion, minute.level))
                 ) {
                     close(start)
@@ -456,8 +456,7 @@ object MotionSleepEstimator {
                 SleepSession(
                     id = "motion-${window.start}-${run.first}", startMillis = run.first, endMillis = run.second,
                     confidence = 50, awakeMillis = 0, state = SyncState.PENDING,
-                    reason = "加速度計推估：持續安靜至少 20 分鐘；分段睡眠會分別保存；非睡眠分期" +
-                        if (usageAvailable(window)) "" else "；未授予使用情況存取權，無法排除手機使用",
+                    reason = "加速度計安靜區段，已由 Sleep API 入睡證據確認",
                     usageSnapshotApplied = true
                 )
             }

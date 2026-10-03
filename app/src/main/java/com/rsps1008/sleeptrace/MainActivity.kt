@@ -30,7 +30,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import androidx.core.content.edit
 import androidx.health.connect.client.PermissionController
 import androidx.lifecycle.lifecycleScope
 import androidx.work.WorkManager
@@ -44,14 +43,11 @@ import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepTracker
 import com.rsps1008.sleeptrace.sleep.SyncState
-import com.rsps1008.sleeptrace.sleep.UsageMonitor
 import com.rsps1008.sleeptrace.sleep.SleepStageEstimator
 import com.rsps1008.sleeptrace.sleep.normalizedAwake
 import com.rsps1008.sleeptrace.sleep.stageUsageFor
-import com.rsps1008.sleeptrace.sleep.stagingAvailability
 import com.rsps1008.sleeptrace.sleep.reconciliationEvidenceStart
 import com.rsps1008.sleeptrace.work.WorkScheduler
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -90,12 +86,6 @@ class MainActivity : AppCompatActivity() {
         ensureAutomaticRecording()
         refresh()
     }
-    private val usageSettingsLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        permissionFlowComplete = true
-        reconcileIfUsageAccessChanged()
-        refresh()
-        guideBackgroundAccessIfNeeded()
-    }
     private val homeViewModel: HomeViewModel by viewModels()
     private var exportDate: LocalDate? = null
     private val createMotionCsv = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
@@ -120,15 +110,21 @@ class MainActivity : AppCompatActivity() {
                         now = contextEnd,
                         zone = zone
                     )
-                    val usage = schedule.windowsBetween(contextStart, contextEnd).flatMap {
-                        store.usageSnapshot(it.startMillis, it.endMillis)?.intervals.orEmpty()
-                    }
-                    val resolved = AutomaticPlacement.resolve(dependencies.motionStore.read(contextStart, contextEnd), usage, schedule)
+                    val awakeEvidence = normalizedAwake(
+                        contextStart, contextEnd, sessions.flatMap { it.awakeIntervals }
+                    )
+                    val resolved = AutomaticPlacement.resolve(
+                        dependencies.motionStore.read(contextStart, contextEnd), awakeEvidence, schedule
+                    )
                     val placementByMinute = resolved.associateBy { it.startMillis }
                     val samples = store.recentSamples(contextStart)
                     val segments = store.segments(contextStart, contextEnd)
                     val diagnostics = sessions.associateWith { session ->
-                        SleepStageEstimator.analyze(session, resolved, samples, stageUsageFor(session, usage), segments, schedule)
+                        SleepStageEstimator.analyze(
+                            session, resolved, samples,
+                            stageUsageFor(session, awakeEvidence + session.awakeIntervals),
+                            segments, schedule
+                        )
                     }
                     val diagnosticByMinute = diagnostics.flatMap { (session, result) ->
                         result.minutes.map { minute ->
@@ -313,7 +309,8 @@ class MainActivity : AppCompatActivity() {
             WorkScheduler.reconcileSoon(this@MainActivity)
             if (continueStartupPermissionFlow) {
                 continueStartupPermissionFlow = false
-                openUsageAccessIfNeeded()
+                permissionFlowComplete = true
+                guideBackgroundAccessIfNeeded()
             }
             refresh()
         }
@@ -378,7 +375,6 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         WorkScheduler.schedule(this)
-        reconcileIfUsageAccessChanged()
         if (store.hasPendingAutomaticWork()) WorkScheduler.reconcileSoon(this)
         ensureAutomaticRecording()
         if (!startupPermissionCheckDone) {
@@ -398,19 +394,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh() = homeViewModel.refresh()
-
-    private fun reconcileIfUsageAccessChanged() {
-        val current = UsageMonitor.hasAccess(this)
-        val prefs = getSharedPreferences("sleeptrace_maintenance", MODE_PRIVATE)
-        val key = "usage_access_last_seen"
-        val known = prefs.contains(key)
-        val previous = prefs.getBoolean(key, false)
-        if (current && (!known || !previous)) {
-            AutomaticWorkSignals.markDirty(this)
-            WorkScheduler.reconcileSoon(this)
-        }
-        prefs.edit { putBoolean(key, current) }
-    }
 
     private data class PermissionViews(
         val row: LinearLayout,
@@ -480,7 +463,7 @@ class MainActivity : AppCompatActivity() {
                 addView(homeText("設定平日與週末的偵測時段。觀測完成後，App 會自動整理睡眠並同步至 Health Connect。", secondary = true).apply {
                     setPadding(0, dp(12), 0, dp(8))
                 })
-                addView(homeText("允許使用情況存取後，可排除手機使用時間。紀錄不需要逐筆確認。", secondary = true))
+                addView(homeText("Sleep API 會判斷入睡與清醒，紀錄不需要逐筆確認。", secondary = true))
                 addView(homeButton("設定時段並開始", primary = true) { chooseSchedule() })
             })
         }
@@ -566,10 +549,9 @@ class MainActivity : AppCompatActivity() {
         val permissionsReady = createBadge(getString(R.string.basic_permissions_ready), color(R.color.status_success), color(R.color.status_success_bg))
         val permissionRows = listOf(
             createPermissionRow("睡眠偵測", "取得 Google 睡眠訊號"),
-            createPermissionRow("使用情況存取", "排除夜間使用手機時間"),
             createPermissionRow("Health Connect", "自動寫入睡眠紀錄")
         )
-        val permissionDividers = List(2) { createDivider() }
+        val permissionDividers = List(1) { createDivider() }
         val permissionSummary = homeText("", 13f, secondary = true).apply { setPadding(0, dp(12), 0, dp(8)) }
         val permissionGrant = homeButton("檢查並引導授權", primary = true) { requestMissingPermissionsAtStartup() }
         val permissionRecheck = homeButton("重新檢查權限") { requestMissingPermissionsAtStartup() }
@@ -764,17 +746,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun updatePermissions(healthGranted: Boolean) {
         val activityGranted = SleepTracker.hasActivityRecognition(this)
-        val usageGranted = UsageMonitor.hasAccess(this)
-        val allGranted = activityGranted && usageGranted && healthGranted
+        val allGranted = activityGranted && healthGranted
         val states = listOf(
             activityGranted to null,
-            usageGranted to if (!usageGranted) "未授權時無法排除手機使用" else null,
             healthGranted to if (!healthGranted) "尚未連線或未授權寫入" else null
         )
         homeViews.permissionRows.forEachIndexed { index, row ->
             val (granted, note) = states[index]
             row.row.visibility = if (allGranted) View.GONE else View.VISIBLE
-            row.description.text = note ?: listOf("取得 Google 睡眠訊號", "排除夜間使用手機時間", "自動寫入睡眠紀錄")[index]
+            row.description.text = note ?: listOf("取得 Google 睡眠訊號", "自動寫入睡眠紀錄")[index]
             row.description.setTextColor(if (note != null) color(R.color.status_warning) else color(R.color.text_secondary))
             row.badge.text = if (granted) "已允許" else "尚未允許"
             row.badge.setTextColor(if (granted) color(R.color.status_success) else color(R.color.status_warning))
@@ -1049,19 +1029,12 @@ class MainActivity : AppCompatActivity() {
     private fun requestHealthPermissionIfNeeded() {
         lifecycleScope.launch {
             if (!healthSync.available() || healthSync.hasWritePermission()) {
-                openUsageAccessIfNeeded()
+                permissionFlowComplete = true
+                guideBackgroundAccessIfNeeded()
                 return@launch
             }
             continueStartupPermissionFlow = true
             requestHealthPermissions.launch(healthSync.writePermissions)
-        }
-    }
-
-    private fun openUsageAccessIfNeeded() {
-        if (!UsageMonitor.hasAccess(this)) usageSettingsLauncher.launch(UsageMonitor.accessIntent())
-        else {
-            permissionFlowComplete = true
-            guideBackgroundAccessIfNeeded()
         }
     }
 
@@ -1078,63 +1051,13 @@ class MainActivity : AppCompatActivity() {
     private fun loadSessionDetails(id: String) {
         sessionDetailJob?.cancel()
         sessionDetailJob = lifecycleScope.launch {
-            val payload = withContext(Dispatchers.IO) {
-                val session = store.session(id) ?: return@withContext null
-                val explanation = try {
-                    val schedule = preferences.schedule()
-                    val replayWindow = schedule.windowAt(session.startMillis)
-                    if (replayWindow == null || session.endMillis > replayWindow.endMillis) {
-                        return@withContext session to
-                            "目前排程已不再完整涵蓋這筆歷史紀錄，無法可靠回推當晚的正式阻擋原因；已保存結果不受影響。"
-                    }
-                    val contextEnd = session.endMillis
-                    // Coupling may have been established hours before this session
-                    // and renewed by single movements. Replay the same full window
-                    // as reconciliation, not just the last establishment horizon.
-                    val contextStart = reconciliationEvidenceStart(
-                        analysisStart = session.startMillis,
-                        sessionStarts = listOf(session.startMillis),
-                        schedule = schedule,
-                        now = contextEnd
-                    )
-                    val snapshotUsage = schedule.windowsBetween(contextStart, contextEnd).flatMap { window ->
-                        store.usageSnapshot(window.startMillis, window.endMillis)?.intervals.orEmpty()
-                    }
-                    // Saved Awake intervals are the durable evidence for this session.
-                    // Keep them in placement too, even if the current schedule no
-                    // longer finds the historical snapshot key.
-                    val placementUsage = normalizedAwake(
-                        contextStart,
-                        contextEnd,
-                        snapshotUsage + session.awakeIntervals
-                    )
-                    val resolved = AutomaticPlacement.resolve(
-                        dependencies.motionStore.read(contextStart, contextEnd), placementUsage, schedule
-                    )
-                    val result = SleepStageEstimator.analyze(
-                        session,
-                        resolved,
-                        store.recentSamples(contextStart),
-                        stageUsageFor(session, placementUsage),
-                        store.segments(contextStart, contextEnd),
-                        schedule
-                    )
-                    "依目前規則與目前排程唯讀檢查：${stagingAvailability(result).message()}"
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    null
-                }
-                session to explanation
-            } ?: return@launch
-            val (session, explanation) = payload
+            val session = withContext(Dispatchers.IO) { store.session(id) } ?: return@launch
             SleepDialogHelper.showSession(
                 this@MainActivity, session, ::formatDuration,
                 onEdit = { editSession(session) },
                 onRetry = if (session.state in setOf(SyncState.FAILED_PERMANENT, SyncState.RETIRED_FAILED_PERMANENT)) {
                     ({ retrySession(session) })
-                } else null,
-                stagingExplanation = explanation
+                } else null
             )
         }
     }

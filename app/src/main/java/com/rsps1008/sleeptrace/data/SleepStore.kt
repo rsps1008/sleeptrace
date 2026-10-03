@@ -134,7 +134,7 @@ class SleepStore(context: Context) {
     fun reviseTimes(id: String, start: Long, end: Long) = synchronized(sessionLock) {
         migrateSessions()
         val current = eventStore.session(id) ?: return@synchronized
-        // Keep the time correction local. The one shared UsageStats snapshot is applied right before upload.
+        // Keep the time correction local. Legacy readiness is applied right before upload.
         upsert(current.copy(startMillis = start, endMillis = end, awakeMillis = 0, awakeIntervals = emptyList(),
             revision = current.revision + 1, state = SyncState.PENDING,
             manuallyEdited = true, reason = "使用者已修正時間，App 自動同步", syncError = null,

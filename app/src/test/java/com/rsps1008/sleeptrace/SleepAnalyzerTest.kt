@@ -6,8 +6,6 @@ import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSegment
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageInterval
-import com.rsps1008.sleeptrace.sleep.UsageSnapshot
-import com.rsps1008.sleeptrace.sleep.UsageSnapshotResult
 import java.time.LocalDate
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
@@ -20,11 +18,11 @@ class SleepAnalyzerTest {
     private val segment = SleepSegment(start, start + 8 * 60 * 60 * 1000L, 100)
     private val schedule = SleepSchedule(0, 23 * 60 + 59)
 
-    @Test fun `phone use is removed from sleep duration`() {
+    @Test fun `known awake evidence is removed from sleep duration`() {
         val session = SleepAnalyzer.analyze(listOf(segment), samples(), listOf(UsageInterval(start + 60_000, start + 16 * 60_000)), schedule).single()
         assertEquals(15 * 60_000L, session.awakeMillis)
         assertEquals(7 * 60 * 60 * 1000L + 45 * 60 * 1000L, session.durationMillis)
-        assertTrue(session.reason.contains("手機使用"))
+        assertTrue(session.reason.contains("中途清醒"))
     }
 
     @Test fun `missing classification still syncs the best available segment automatically`() {
@@ -54,35 +52,38 @@ class SleepAnalyzerTest {
         assertEquals(day.plusDays(1).atTime(7, 0).atZone(zone).toInstant().toEpochMilli(), session.endMillis)
     }
 
-    @Test fun `each night uses its own phone intervals and access limitation`() {
+    @Test fun `pre sleep low classifications keep tablet and phone time before true sleep`() {
         val zone = ZoneId.systemDefault()
         val schedule = SleepSchedule(23 * 60, 7 * 60)
-        val firstDate = LocalDate.of(2026, 9, 27)
-        val firstWindow = schedule.windowForStartDate(firstDate, zone)
-        val secondWindow = schedule.windowForStartDate(firstDate.plusDays(1), zone)
-        val phoneUse = UsageInterval(firstWindow.startMillis + 60_000, firstWindow.startMillis + 20 * 60_000)
-        val snapshots = listOf(
-            UsageSnapshot(firstWindow.startMillis, firstWindow.endMillis, true, listOf(phoneUse), firstWindow.endMillis),
-            UsageSnapshot(secondWindow.startMillis, secondWindow.endMillis, false, emptyList(), secondWindow.endMillis)
-        )
-        val usage = UsageSnapshotResult(snapshots, snapshots.flatMap { it.intervals })
+        val window = schedule.windowForStartDate(LocalDate.of(2026, 9, 27), zone)
         val sessions = SleepAnalyzer.analyzeByWindow(
-            segments = listOf(
-                SleepSegment(firstWindow.startMillis, firstWindow.endMillis, 100),
-                SleepSegment(secondWindow.startMillis, secondWindow.endMillis, 100)
+            segments = listOf(SleepSegment(window.startMillis, window.endMillis, 100)),
+            classifications = listOf(
+                ClassificationSample(window.startMillis + 10 * 60_000, 10, 80, 80),
+                ClassificationSample(window.startMillis + 20 * 60_000, 15, 70, 70),
+                ClassificationSample(window.startMillis + 30 * 60_000, 90, 0, 0)
             ),
-            classifications = emptyList(),
-            phoneUse = usage.intervals,
-            schedule = schedule,
-            windows = listOf(firstWindow, secondWindow),
-            usageAvailable = usage::availableFor
+            phoneUse = emptyList(), schedule = schedule, windows = listOf(window)
         )
 
-        assertEquals(2, sessions.size)
-        assertTrue(sessions[0].reason.contains("已扣除夜間手機使用"))
-        assertFalse(sessions[0].reason.contains("無法排除手機使用"))
-        assertTrue(sessions[1].reason.contains("無法排除手機使用"))
-        assertFalse(sessions[1].reason.contains("已扣除夜間手機使用"))
+        assertEquals(window.startMillis + 30 * 60_000, sessions.single().startMillis)
+    }
+
+    @Test fun `nearby SleepSegmentEvent gaps form one night with an awake interval`() {
+        val zone = ZoneId.systemDefault()
+        val schedule = SleepSchedule(23 * 60, 7 * 60)
+        val window = schedule.windowForStartDate(LocalDate.of(2026, 9, 27), zone)
+        val sessions = SleepAnalyzer.analyzeByWindow(
+            segments = listOf(
+                SleepSegment(window.startMillis + 30 * 60_000, window.startMillis + 3 * 60 * 60_000, 100),
+                SleepSegment(window.startMillis + 3 * 60 * 60_000 + 20 * 60_000, window.endMillis, 100)
+            ),
+            classifications = emptyList(), phoneUse = emptyList(), schedule = schedule, windows = listOf(window)
+        )
+
+        assertEquals(1, sessions.size)
+        assertEquals(20 * 60_000L, sessions.single().awakeMillis)
+        assertEquals(1, sessions.single().awakeIntervals.size)
     }
 
     private fun samples() = (0..47).map { index ->

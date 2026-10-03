@@ -7,8 +7,8 @@ object SleepObservationPolicy {
     private const val MINUTE = 60_000L
     const val SLEEP_FRESHNESS = 20 * MINUTE
     const val EXTENSION = 30 * MINUTE
-    private const val FAST_WAKE_ZONE = 60 * MINUTE
     private const val MAX_WAKE_REPORT_GAP = 15 * MINUTE
+    private const val WAKE_CONFIRMATION_SPAN = 5 * MINUTE
 
     fun resolve(
         window: SleepWindow,
@@ -33,10 +33,8 @@ object SleepObservationPolicy {
                 run.drop(lastGap + 1)
             }
         val firstLow = low.firstOrNull()?.timeMillis
-        // Anchor the fast zone to the user's nominal end, even while an extension is active.
-        val fastWake = firstLow != null && firstLow >= window.endMillis - FAST_WAKE_ZONE
-        val wakeConfirmed = low.size >= (if (fastWake) 2 else 3) && firstLow != null &&
-            low.last().timeMillis - firstLow >= (if (fastWake) 10 else 20) * MINUTE &&
+        val wakeConfirmed = low.size >= 2 && firstLow != null &&
+            low.last().timeMillis - firstLow >= WAKE_CONFIRMATION_SPAN &&
             now - low.last().timeMillis <= 10 * MINUTE &&
             ordered.any { it.confidence >= 80 && it.timeMillis <= firstLow - 30 * MINUTE }
         if (wakeConfirmed) return ObservationEnd(minOf(end, firstLow!!), true)

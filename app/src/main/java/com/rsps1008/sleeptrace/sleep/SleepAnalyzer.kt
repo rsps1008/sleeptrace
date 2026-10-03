@@ -4,24 +4,28 @@ package com.rsps1008.sleeptrace.sleep
 object SleepAnalyzer {
     const val MINIMUM_SLEEP_MILLIS = 30 * 60 * 1000L
 
-    /** Analyzes each completed window with only that window's phone-use data and access state. */
+    /** Analyzes each completed window using Sleep API segments/classifications as sleep evidence. */
     fun analyzeByWindow(
         segments: List<SleepSegment>,
         classifications: List<ClassificationSample>,
         phoneUse: List<UsageInterval>,
         schedule: SleepSchedule,
         windows: List<SleepWindow>,
-        usageAvailable: (SleepWindow) -> Boolean
+        @Suppress("UNUSED_PARAMETER") usageAvailable: (SleepWindow) -> Boolean = { true }
     ): List<SleepSession> = windows.flatMap { window ->
-        val clippedSegments = segments.mapNotNull { segment ->
-            val start = maxOf(segment.startMillis, window.startMillis)
-            val end = minOf(segment.endMillis, window.endMillis)
-            if (end <= start) null else segment.copy(startMillis = start, endMillis = end)
-        }
-        val windowPhoneUse = phoneUse.filter {
+        val windowExternalAwake = phoneUse.filter {
             it.endMillis > window.startMillis && it.startMillis < window.endMillis
         }
-        analyze(clippedSegments, classifications, windowPhoneUse, schedule, usageAvailable(window))
+        SleepApiTimeline.spans(segments, window).mapNotNull { span ->
+            val start = SleepApiTimeline.adjustedStart(span, classifications)
+            if (span.endMillis - start < MINIMUM_SLEEP_MILLIS) return@mapNotNull null
+            val apiAwake = SleepApiTimeline.awakeIntervals(start, span.endMillis, span.segmentGaps, classifications)
+            buildSession(
+                SleepSegment(start, span.endMillis, span.confidence),
+                classifications,
+                normalizedAwake(start, span.endMillis, windowExternalAwake + apiAwake)
+            ).takeIf { it.durationMillis >= MINIMUM_SLEEP_MILLIS }
+        }
     }
 
     fun analyze(
@@ -29,23 +33,24 @@ object SleepAnalyzer {
         classifications: List<ClassificationSample>,
         phoneUse: List<UsageInterval>,
         schedule: SleepSchedule,
-        usageAvailable: Boolean = true
-    ): List<SleepSession> = segments
-        .filter { it.endMillis > it.startMillis && it.endMillis - it.startMillis >= MINIMUM_SLEEP_MILLIS }
-        .flatMap { segment -> schedule.intersections(segment.startMillis, segment.endMillis).map { window -> segment.copy(startMillis = window.startMillis, endMillis = window.endMillis) } }
-        .filter { it.endMillis - it.startMillis >= MINIMUM_SLEEP_MILLIS }
-        .map { segment -> buildSession(segment, classifications, phoneUse, usageAvailable) }
-        .filter { it.durationMillis >= MINIMUM_SLEEP_MILLIS }
+        @Suppress("UNUSED_PARAMETER") usageAvailable: Boolean = true
+    ): List<SleepSession> {
+        val start = segments.minOfOrNull { it.startMillis } ?: return emptyList()
+        val end = segments.maxOfOrNull { it.endMillis } ?: return emptyList()
+        return analyzeByWindow(
+            segments, classifications, phoneUse, schedule,
+            schedule.windowsBetween(start, end), { true }
+        )
+    }
 
     private fun buildSession(
         segment: SleepSegment,
         classifications: List<ClassificationSample>,
-        phoneUse: List<UsageInterval>,
-        usageAvailable: Boolean
+        awakeEvidence: List<UsageInterval>
     ): SleepSession {
         val samples = classifications.filter { it.timeMillis in segment.startMillis..segment.endMillis }
             .sortedBy { it.timeMillis }
-        val awakeIntervals = normalizedAwake(segment.startMillis, segment.endMillis, phoneUse)
+        val awakeIntervals = normalizedAwake(segment.startMillis, segment.endMillis, awakeEvidence)
         val awake = awakeIntervals.sumOf { it.endMillis - it.startMillis }
         val rawDuration = segment.endMillis - segment.startMillis
         val covered = normalizedAwake(segment.startMillis, segment.endMillis,
@@ -55,14 +60,13 @@ object SleepAnalyzer {
         val highConfidence = samples.count { it.confidence >= 80 }
         val highRatio = if (samples.isEmpty()) 0.0 else highConfidence.toDouble() / samples.size
         val score = ((segment.confidence * 0.45) + (highRatio * 100 * 0.35) + (coverage * 100 * 0.20)).toInt()
-        val baseReason = when {
-            awake > 0 -> "已扣除夜間手機使用 ${awake / 60000} 分鐘"
+        val reason = when {
+            awake > 0 -> "Sleep API 顯示中途清醒 ${awake / 60000} 分鐘"
             samples.isEmpty() -> "分類樣本不足，App 採用 Sleep API 睡眠區段"
             coverage < 0.8 -> "分類資料有中斷，App 依可用資料推估"
             score < 80 -> "App 已採用目前最佳推估，參考分數較低"
-            else -> "Sleep API 與使用紀錄一致"
+            else -> "Sleep API 睡眠區段與分類一致"
         }
-        val reason = if (usageAvailable) baseReason else "$baseReason；未授予使用情況存取權，無法排除手機使用"
         return SleepSession(
             startMillis = segment.startMillis,
             endMillis = segment.endMillis,

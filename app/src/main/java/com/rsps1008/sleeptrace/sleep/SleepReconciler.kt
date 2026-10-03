@@ -39,7 +39,7 @@ class SleepReconciler(private val context: Context) {
         val dependencies = context.sleepDependencies()
         val preferences = dependencies.preferences
         // Recording controls future sensor capture only. Historical staging and rule migration
-        // continue from already saved Sleep API, UsageStats, motion and session data while paused.
+        // continue from already saved Sleep API, motion and session data while paused.
         val store = dependencies.store
         val capturedGeneration = AutomaticWorkSignals.generation(context)
         val ruleMigrationPending = AutomaticWorkSignals.hasPendingRuleMigration(context)
@@ -87,15 +87,22 @@ class SleepReconciler(private val context: Context) {
         val samples = store.recentSamples(evidenceStart)
         val windows = schedule.windowsBetween(evidenceStart, now)
         val completedWindows = SleepUsageSnapshot.completedWindows(windows, now)
-        val usageResult = SleepUsageSnapshot(context).captureWindows(store, completedWindows, now)
         val segments = allSegments.filter { segment ->
             segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
         }
         val base = SleepAnalyzer.analyzeByWindow(
-            segments, samples, usageResult.intervals, schedule, completedWindows, usageResult::availableFor
+            segments, samples, emptyList(), schedule, completedWindows
+        )
+        val classifiedAwake = completedWindows.flatMap { window ->
+            SleepApiTimeline.awakeIntervals(
+                window.startMillis, window.endMillis, emptyList(), samples
+            )
+        }
+        val apiAwake = normalizedAwake(
+            evidenceStart, now, base.flatMap { it.awakeIntervals } + classifiedAwake
         )
         val motion = dependencies.motionStore.read(evidenceStart, now)
-        val resolved = AutomaticPlacement.resolve(motion, usageResult.intervals, schedule)
+        val resolved = AutomaticPlacement.resolve(motion, apiAwake, schedule)
         fun inReconciliationScope(session: SleepSession): Boolean =
             session.endMillis > analysisStart || unresolved.any {
                 it.startMillis < session.endMillis && it.endMillis > session.startMillis
@@ -103,21 +110,20 @@ class SleepReconciler(private val context: Context) {
         val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
             .filter(::inReconciliationScope)
         val fallback = MotionSleepEstimator.estimate(
-            resolved, usageResult.intervals, schedule, now,
-            usageAvailable = usageResult::availableFor
+            resolved, apiAwake, schedule, now
         ).mapNotNull { candidate ->
             confirmMotionCandidateOnset(candidate, segments, samples)?.let {
-                extendConfirmedMotionCandidate(it, resolved, samples, usageResult.intervals)
+                extendConfirmedMotionCandidate(it, resolved, samples, apiAwake)
             }
         }
             .filter(::inReconciliationScope)
         val staged = selectBestSessions(calculated, fallback).map { session ->
-            val sessionUsage = stageUsageFor(session, usageResult.intervals)
+            val sessionAwake = stageUsageFor(session, apiAwake + session.awakeIntervals)
             val estimate = SleepStageEstimator.analyze(
                 session = session,
                 motionMinutes = resolved,
                 classifications = samples,
-                usageIntervals = sessionUsage,
+                usageIntervals = sessionAwake,
                 sleepSegments = segments,
                 schedule = schedule
             )
@@ -140,12 +146,12 @@ class SleepReconciler(private val context: Context) {
         store.sessionsInRange(analysisStart, now)
             .filter { it.manuallyEdited && it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT) }
             .forEach { session ->
-                val sessionUsage = stageUsageFor(session, usageResult.intervals)
+                val sessionAwake = stageUsageFor(session, apiAwake + session.awakeIntervals)
                 val estimate = SleepStageEstimator.analyze(
                     session = session,
                     motionMinutes = resolved,
                     classifications = samples,
-                    usageIntervals = sessionUsage,
+                    usageIntervals = sessionAwake,
                     sleepSegments = segments,
                     schedule = schedule
                 )

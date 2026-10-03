@@ -44,18 +44,17 @@ class SleepObservationPolicyTest {
         assertEquals(ObservationEnd(at(400), true), resolve(woke, 420))
     }
 
-    @Test fun `last scheduled hour needs two low reports spanning ten minutes`() {
+    @Test fun `second half closes after two low reports spanning five minutes`() {
         val samples = listOf(sample(350, 90), sample(430, 10), sample(440, 20))
         assertEquals(ObservationEnd(at(430), true), resolve(samples, 440))
         assertFalse(resolve(samples.take(2), 430).closed)
-        assertFalse(resolve(listOf(sample(350, 90), sample(430, 10), sample(439, 10)), 439).closed)
+        assertEquals(ObservationEnd(at(430), true), resolve(listOf(sample(350, 90), sample(430, 10), sample(439, 10)), 439))
     }
 
-    @Test fun `earlier wake and a run starting before the fast zone still need twenty minutes`() {
-        assertFalse(resolve(listOf(sample(300, 90), sample(400, 10), sample(410, 10)), 410).closed)
-        assertFalse(resolve(listOf(sample(300, 90), sample(415, 10), sample(425, 10)), 425).closed)
-        assertEquals(ObservationEnd(at(415), true), resolve(
-            listOf(sample(300, 90), sample(415, 10), sample(425, 10), sample(435, 10)), 435))
+    @Test fun `wake confirmation is fast throughout the second half`() {
+        assertFalse(resolve(listOf(sample(300, 90), sample(400, 10), sample(404, 10)), 404).closed)
+        assertEquals(ObservationEnd(at(400), true), resolve(
+            listOf(sample(300, 90), sample(400, 10), sample(405, 10)), 405))
     }
 
     @Test fun `fast wake uses nominal end during an extension`() {
@@ -66,8 +65,7 @@ class SleepObservationPolicyTest {
 
     @Test fun `a missing report restarts wake proof instead of poisoning all subsequent lows`() {
         val samples = listOf(sample(280, 90), sample(330, 10), sample(380, 10), sample(390, 10))
-        assertFalse(resolve(samples, 390).closed)
-        assertEquals(ObservationEnd(at(380), true), resolve(samples + sample(400, 10), 400))
+        assertEquals(ObservationEnd(at(380), true), resolve(samples, 390))
     }
 
     @Test fun `lows before morning do not permanently block a later complete morning run`() {
@@ -88,14 +86,14 @@ class SleepObservationPolicyTest {
 
     @Test fun `single low score or short interruption cannot close`() {
         assertFalse(resolve(woke.take(2), 400).closed)
-        assertFalse(resolve(listOf(sample(300, 90), sample(400, 10), sample(405, 10), sample(410, 10)), 410).closed)
+        assertFalse(resolve(listOf(sample(300, 90), sample(400, 10), sample(404, 10)), 404).closed)
         assertFalse(resolve(woke + sample(415, 60), 420).closed)
     }
 
     @Test fun `no sleep evidence night wake gaps and stale low reports cannot close early`() {
         assertFalse(resolve(woke.drop(1), 420).closed)
         assertFalse(resolve(listOf(sample(40, 90), sample(100, 10), sample(110, 10), sample(120, 10)), 120).closed)
-        assertFalse(resolve(listOf(sample(300, 90), sample(380, 10), sample(410, 10), sample(420, 10)), 420).closed)
+        assertFalse(resolve(listOf(sample(300, 90), sample(380, 10), sample(410, 10), sample(414, 10)), 414).closed)
         assertFalse(resolve(woke, 440).closed)
     }
 

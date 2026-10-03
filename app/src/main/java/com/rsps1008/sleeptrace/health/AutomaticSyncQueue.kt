@@ -36,7 +36,7 @@ object AutomaticSyncQueue {
         read().filter(::eligible).forEach { session ->
             if (!valid(session)) {
                 update(session, session.copy(state = SyncState.SKIPPED, syncError = null,
-                    reason = "App 已自動略過：有效睡眠不足 30 分鐘或舊資料缺少手機使用明細"))
+                    reason = "App 已自動略過：有效睡眠不足 30 分鐘或舊資料不完整"))
                 return@forEach
             }
             val writing = session.copy(state = SyncState.SYNCING, syncError = null)
@@ -66,7 +66,7 @@ object AutomaticSyncQueue {
                 update(session, session.copy(
                     state = SyncState.SKIPPED,
                     syncError = null,
-                    reason = "App 已自動略過：有效睡眠不足 30 分鐘或舊資料缺少手機使用明細"
+                    reason = "App 已自動略過：有效睡眠不足 30 分鐘或舊資料不完整"
                 ))
                 false
             }

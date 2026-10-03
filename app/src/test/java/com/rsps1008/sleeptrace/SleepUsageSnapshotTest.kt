@@ -21,22 +21,21 @@ class SleepUsageSnapshotTest {
         awakeMillis = 0, state = SyncState.PENDING, reason = "Sleep API 與使用紀錄一致"
     )
 
-    @Test fun `phone use updates awake intervals and the displayed reason together`() {
+    @Test fun `legacy awake intervals are imported without changing the user explanation`() {
         val updated = SleepUsageSnapshot.apply(
             base,
             listOf(UsageInterval(30 * 60_000L, 60 * 60_000L)),
             usageAvailable = true
         )
         assertEquals(30 * 60_000L, updated.awakeMillis)
-        assertTrue(updated.reason.contains("已扣除夜間手機使用 30 分鐘"))
-        assertFalse(updated.reason.contains("Sleep API 與使用紀錄一致"))
+        assertEquals(base.reason, updated.reason)
         assertTrue(updated.usageSnapshotApplied)
     }
 
-    @Test fun `unavailable UsageStats is not described as excluded`() {
+    @Test fun `legacy row becomes ready without UsageStats access`() {
         val updated = SleepUsageSnapshot.apply(base, emptyList(), usageAvailable = false)
-        assertTrue(updated.reason.contains("無法排除手機使用"))
-        assertFalse(updated.reason.contains("Sleep API 與使用紀錄一致"))
+        assertEquals(base.reason, updated.reason)
+        assertTrue(updated.usageSnapshotApplied)
     }
 
     @Test fun `a night snapshot and session become ready only after the complete scheduled window`() {

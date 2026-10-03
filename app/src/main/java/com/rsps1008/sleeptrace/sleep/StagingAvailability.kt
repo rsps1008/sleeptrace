@@ -32,7 +32,7 @@ data class StagingAvailability(
             SleepStageEstimator.Reason.LEGACY_FEATURE_LIMITATION to "特徵欄位或版本不相容",
             SleepStageEstimator.Reason.RECORDING_BOUNDARY to "錄製片段邊界",
             SleepStageEstimator.Reason.NO_SLEEP_EVIDENCE to "睡眠證據前或排程外",
-            SleepStageEstimator.Reason.PHONE_IN_USE to "已知手機使用",
+            SleepStageEstimator.Reason.PHONE_IN_USE to "Sleep API 判定清醒",
             SleepStageEstimator.Reason.COUPLING_INSUFFICIENT to "床面動作支持不足",
             SleepStageEstimator.Reason.COUPLING_EXPIRED to "床面動作支持已過期",
             SleepStageEstimator.Reason.COUPLING_INVALIDATED to "床面動作支持被中斷"

@@ -247,9 +247,13 @@ class SparseCouplingNightReplayTest {
     }
 
     private fun loadFixture(): Fixture {
-        val bytes = requireNotNull(javaClass.getResourceAsStream(FIXTURE_RESOURCE)) {
+        val resourceBytes = requireNotNull(javaClass.getResourceAsStream(FIXTURE_RESOURCE)) {
             "Missing replay fixture $FIXTURE_RESOURCE"
         }.use { it.readBytes() }
+        // Gradle resources can be copied with CRLF on a Windows checkout even though the source
+        // fixture is declared eol=lf. Hash the canonical LF bytes used by the frozen report.
+        val bytes = String(resourceBytes, StandardCharsets.UTF_8)
+            .replace("\r\n", "\n").toByteArray(StandardCharsets.UTF_8)
         val lines = String(bytes, StandardCharsets.UTF_8).lineSequence().filter { it.isNotBlank() }.toList()
         assertEquals(EXPECTED_HEADER, lines.first())
         val rows = lines.drop(1).map { line ->

@@ -106,47 +106,54 @@ object SleepDialogHelper {
         session: SleepSession,
         formatDuration: (Long) -> String,
         onEdit: () -> Unit,
-        onRetry: (() -> Unit)? = null,
-        stagingExplanation: String? = null
+        onRetry: (() -> Unit)? = null
     ) {
+        val totals = com.rsps1008.sleeptrace.sleep.stageDurations(session)
+        val displayedLight = totals.light + totals.sleeping
         val detail = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(context, 24), 0, dp(context, 24), 0)
+            setPadding(dp(context, 24), dp(context, 8), dp(context, 24), dp(context, 8))
             addView(TextView(context).apply {
-                val totals = com.rsps1008.sleeptrace.sleep.stageDurations(session)
-                // SLEEPING is retained only as a legacy storage value. A valid session
-                // presents every non-Awake/non-Deep span as the configured Light fallback.
-                val displayedLight = totals.light + totals.sleeping
-                text = buildString {
-                    append(context.getString(R.string.sleep_detail_total, formatDuration(totals.sleep)))
-                    append(context.getString(
-                        R.string.sleep_detail_stages,
-                        formatDuration(displayedLight),
-                        formatDuration(totals.deep)
-                    ))
-                    append(context.getString(R.string.sleep_detail_fallback_notice))
-                    stagingExplanation?.takeIf { it.isNotBlank() }?.let {
-                        append(context.getString(R.string.sleep_detail_evidence, it))
-                    }
-                    append(context.getString(
-                        R.string.sleep_detail_footer,
-                        formatDuration(totals.awake),
-                        session.stageAlgorithmVersion?.toString()
-                            ?: context.getString(R.string.sleep_legacy_version),
-                        session.confidence,
-                        session.reason
-                    ))
-                    session.syncError?.let { append(context.getString(R.string.sleep_detail_sync_error, it)) }
-                }
+                text = formatDuration(totals.sleep)
+                setTextColor(ContextCompat.getColor(context, R.color.home_accent))
+                textSize = 28f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            })
+            addView(TextView(context).apply {
+                text = context.getString(R.string.sleep_detail_total_label)
                 setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
-                textSize = 14f
+                textSize = 13f
+                setPadding(0, 0, 0, dp(context, 16))
+            })
+            addView(TextView(context).apply {
+                text = context.getString(
+                    R.string.sleep_detail_stages,
+                    formatDuration(displayedLight),
+                    formatDuration(totals.deep)
+                ) + if (totals.awake > 0) "\n" + context.getString(
+                    R.string.sleep_detail_awake, formatDuration(totals.awake)
+                ) else ""
+                setTextColor(ContextCompat.getColor(context, R.color.text_primary))
+                textSize = 15f
             })
             addView(SleepSessionTimelineView(context, session), LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 70)
             ).apply { topMargin = dp(context, 16) })
+            addView(TextView(context).apply {
+                text = context.getString(R.string.sleep_detail_note)
+                setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
+                textSize = 12f
+                setPadding(0, dp(context, 12), 0, 0)
+            })
+            session.syncError?.let { error ->
+                addView(TextView(context).apply {
+                    text = context.getString(R.string.sleep_detail_sync_error, error)
+                    setTextColor(ContextCompat.getColor(context, R.color.status_warning))
+                    textSize = 13f
+                    setPadding(0, dp(context, 10), 0, 0)
+                })
+            }
         }
-        // Evidence explanations and sync errors can exceed a small screen's height.
-        // Keep the timeline reachable while the dialog's actions remain fixed.
         val scrollableDetail = ScrollView(context).apply { addView(detail) }
         val dialog = MaterialAlertDialogBuilder(context).setTitle(session.title()).setView(scrollableDetail)
             .setNegativeButton("關閉", null)
@@ -349,7 +356,7 @@ object SleepDialogHelper {
         ) : RecyclerView.ViewHolder(view) {
             fun bind(session: SleepSession, formatDuration: (Long) -> String) {
                 title.text = session.title()
-                summary.text = "睡眠 ${formatDuration(session.durationMillis)} · 手機使用 ${formatDuration(session.awakeMillis)}"
+                summary.text = "睡眠 ${formatDuration(session.durationMillis)} · 清醒 ${formatDuration(session.awakeMillis)}"
                 itemView.setOnClickListener { onSelected(session.id) }
             }
         }

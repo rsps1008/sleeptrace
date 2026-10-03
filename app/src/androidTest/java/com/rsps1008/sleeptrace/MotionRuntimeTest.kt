@@ -204,26 +204,17 @@ class MotionRuntimeTest {
             assertNotEquals(capture.id, MotionStore(context).use { it.latestCapture()?.id })
             context.startService(Intent(context, MotionService::class.java).setAction(MotionService.ACTION_STOP))
             await("Foreground service did not stop") { MotionService.active == null && !settings.enabled }
-            // A long diagnostic must not hide the timeline below a fixed-height dialog.
+            // The simplified detail keeps the timeline visible without internal rule prose.
             instrumentation.runOnMainSync {
                 val now = System.currentTimeMillis()
                 SleepDialogHelper.showSession(activity,
                     SleepSession("layout-only", now - 360 * MINUTE_MS, now, 50, 0,
                         SyncState.PENDING, "工程測試；沒有儲存或同步這筆示範紀錄。"),
-                    formatDuration = { "${it / MINUTE_MS} 分鐘" }, onEdit = {},
-                    stagingExplanation = "床面動作支持不足；回退 Light 不代表生理淺眠。\n".repeat(20))
+                    formatDuration = { "${it / MINUTE_MS} 分鐘" }, onEdit = {})
             }
             onView(org.hamcrest.Matchers.allOf(isAssignableFrom(ScrollView::class.java),
                 hasDescendant(isAssignableFrom(SleepSessionTimelineView::class.java))))
-                .inRoot(isDialog()).perform(object : ViewAction {
-                override fun getConstraints() = isAssignableFrom(ScrollView::class.java)
-                override fun getDescription() = "scroll long sleep details to the timeline"
-                override fun perform(uiController: UiController, view: View) {
-                    assertTrue("Long detail does not expose a scroll range", view.canScrollVertically(1))
-                    (view as ScrollView).fullScroll(View.FOCUS_DOWN)
-                    uiController.loopMainThreadForAtLeast(500)
-                }
-            })
+                .inRoot(isDialog()).check(matches(isCompletelyDisplayed()))
             onView(isAssignableFrom(SleepSessionTimelineView::class.java)).inRoot(isDialog())
                 .check(matches(isCompletelyDisplayed()))
             onView(withText("關閉")).inRoot(isDialog()).check(matches(isCompletelyDisplayed())).perform(click())

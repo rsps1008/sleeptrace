@@ -53,7 +53,7 @@ data class SleepSession(
     val syncError: String? = null,
     val revision: Long = 1,
     val awakeIntervals: List<UsageInterval> = emptyList(),
-    /** True once the shared per-window UsageStats snapshot has been applied and persisted. */
+    /** Legacy upload-readiness marker retained for stored-row compatibility. */
     val usageSnapshotApplied: Boolean = false,
     /** Merged stage intervals, recomputed during reconciliation; empty means legacy generic sleep. */
     val stageIntervals: List<SleepStageInterval> = emptyList(),

@@ -248,7 +248,7 @@ class MotionEngineTest {
         assertEquals(session.id, MotionSleepEstimator.estimate(rows, emptyList(), schedule, end).single().id)
     }
 
-    @Test fun `motion candidates use UsageStats availability from their own night`() {
+    @Test fun `motion candidates no longer describe UsageStats permission`() {
         val secondWindow = schedule.windowForStartDate(LocalDate.of(2026, 9, 28), ZoneId.systemDefault())
         val rows = (0..119).map { minute(it) } + (0..119).map {
             minute(it).copy(startMillis = secondWindow.startMillis + it * MINUTE_MS)
@@ -260,8 +260,7 @@ class MotionEngineTest {
         )
 
         assertEquals(2, sessions.size)
-        assertFalse(sessions.first { it.startMillis == window.startMillis }.reason.contains("無法排除手機使用"))
-        assertTrue(sessions.first { it.startMillis == secondWindow.startMillis }.reason.contains("無法排除手機使用"))
+        assertTrue(sessions.all { !it.reason.contains("使用情況存取") })
     }
 
     @Test fun `active phone time breaks sleep candidate even with quiet accelerometer`() {

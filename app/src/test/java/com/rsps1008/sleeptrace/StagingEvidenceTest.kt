@@ -256,9 +256,9 @@ class StagingEvidenceTest {
         val candidates = MotionSleepEstimator.estimate(m, emptyList(), schedule, base + 2 * 24 * 60 * MINUTE_MS)
         assertTrue(candidates.mapNotNull { confirmMotionCandidateOnset(it, emptyList(), emptyList()) }.isEmpty())
     }
-    @Test fun `no usage permission preserves accepted sessions with explicit exclusion limitation`() {
+    @Test fun `Sleep API sessions do not depend on usage permission`() {
         val s = SleepAnalyzer.analyze(listOf(SleepSegment(base, base + 120 * MINUTE_MS, 60)), emptyList(), emptyList(), schedule, false).single()
-        assertTrue(s.reason.contains("無法排除手機使用"))
+        assertFalse(s.reason.contains("使用情況存取"))
         assertTrue(analyze(rows(), s).durations.sleep > 0)
     }
     @Test fun `same input and version is deterministic and provenance alone does not revise identity`() {
