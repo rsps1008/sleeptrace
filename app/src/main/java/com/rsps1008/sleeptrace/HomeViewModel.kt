@@ -10,6 +10,7 @@ import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.motion.SleepWindowScheduler
 import com.rsps1008.sleeptrace.motion.CaptureDiagnostics
 import com.rsps1008.sleeptrace.motion.CaptureUpdates
+import com.rsps1008.sleeptrace.motion.RecordingMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -27,6 +28,7 @@ data class HomeSnapshot(
     val latestCapture: CaptureDiagnostics?,
     val healthGranted: Boolean,
     val recordingEnabled: Boolean,
+    val recordingMode: RecordingMode,
     val backgroundRestricted: Boolean,
     val batteryExempt: Boolean,
     val exactAlarmAllowed: Boolean
@@ -59,6 +61,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                             latestCapture = dependencies.motionStore.latestCapture(),
                             healthGranted = healthSync.hasWritePermission(),
                             recordingEnabled = motionSettings.enabled,
+                            recordingMode = motionSettings.recordingMode,
                             backgroundRestricted = backgroundAccess.restricted,
                             batteryExempt = backgroundAccess.exempt,
                             exactAlarmAllowed = SleepWindowScheduler.hasExactAlarmAccess(getApplication())

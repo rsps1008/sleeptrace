@@ -7,6 +7,7 @@ import com.google.android.gms.location.SleepClassifyEvent
 import com.google.android.gms.location.SleepSegmentEvent
 import com.rsps1008.sleeptrace.sleepDependencies
 import com.rsps1008.sleeptrace.motion.MotionService
+import com.rsps1008.sleeptrace.motion.RecordingMode
 import com.rsps1008.sleeptrace.motion.SleepWindowScheduler
 import com.rsps1008.sleeptrace.work.WorkScheduler
 import kotlinx.coroutines.CoroutineScope
@@ -46,7 +47,9 @@ class SleepUpdateReceiver : BroadcastReceiver() {
                             if (active != null) {
                                 active.refreshConfiguration()
                             } else {
-                                if (dependencies.motionSettings.enabled && schedule?.windowAt(System.currentTimeMillis()) != null) {
+                                if (dependencies.motionSettings.enabled &&
+                                    dependencies.motionSettings.recordingMode == RecordingMode.STAGES &&
+                                    schedule?.windowAt(System.currentTimeMillis()) != null) {
                                     runCatching { MotionService.start(context) }.onFailure {
                                         dependencies.motionSettings.status = "Sleep API 已回報，但系統限制背景服務啟動；開啟 App 可恢復記錄"
                                     }

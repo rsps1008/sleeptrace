@@ -15,6 +15,7 @@ import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepUsageSnapshot
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.SleepStage
+import com.rsps1008.sleeptrace.sleep.SLEEP_API_ONLY_ALGORITHM_VERSION
 import kotlinx.coroutines.CancellationException
 import java.io.IOException
 import com.rsps1008.sleeptrace.sleep.sleepParts
@@ -52,15 +53,20 @@ internal fun toHealthRecord(session: SleepSession): SleepSessionRecord {
                 SleepStage.AWAKE -> SleepSessionRecord.STAGE_TYPE_AWAKE
                 SleepStage.LIGHT -> SleepSessionRecord.STAGE_TYPE_LIGHT
                 SleepStage.DEEP -> SleepSessionRecord.STAGE_TYPE_DEEP
-                // Legacy rows are normalized by sleepParts(); retain this defensive mapping.
-                SleepStage.SLEEPING -> SleepSessionRecord.STAGE_TYPE_LIGHT
+                SleepStage.SLEEPING -> if (session.stageAlgorithmVersion == SLEEP_API_ONLY_ALGORITHM_VERSION) {
+                    SleepSessionRecord.STAGE_TYPE_SLEEPING
+                } else SleepSessionRecord.STAGE_TYPE_LIGHT
             })
     }
     return SleepSessionRecord(
             startTime = start, startZoneOffset = zone.getOffset(start),
             endTime = end, endZoneOffset = zone.getOffset(end),
             title = "眠迹 SleepTrace",
-            notes = "眠迹依 Sleep API 與手機加速度計推估，僅供日常參考；規則 ${session.stageAlgorithmVersion ?: "舊版"}",
+            notes = if (session.stageAlgorithmVersion == SLEEP_API_ONLY_ALGORITHM_VERSION) {
+                "眠迹省電模式依 Sleep API 記錄睡眠時間，未推估淺眠或深眠"
+            } else {
+                "眠迹依 Sleep API 與手機加速度計推估，僅供日常參考；規則 ${session.stageAlgorithmVersion ?: "舊版"}"
+            },
             stages = stages,
             metadata = Metadata.autoRecorded(
                 clientRecordId = session.id,

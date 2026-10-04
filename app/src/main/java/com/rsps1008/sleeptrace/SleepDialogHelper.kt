@@ -14,6 +14,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSession
 import com.rsps1008.sleeptrace.sleep.SleepSessionTimelineView
+import com.rsps1008.sleeptrace.sleep.SLEEP_API_ONLY_ALGORITHM_VERSION
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
@@ -110,6 +111,7 @@ object SleepDialogHelper {
     ) {
         val totals = com.rsps1008.sleeptrace.sleep.stageDurations(session)
         val displayedLight = totals.light + totals.sleeping
+        val sleepApiOnly = session.stageAlgorithmVersion == SLEEP_API_ONLY_ALGORITHM_VERSION
         val detail = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(context, 24), dp(context, 8), dp(context, 24), dp(context, 8))
@@ -126,11 +128,9 @@ object SleepDialogHelper {
                 setPadding(0, 0, 0, dp(context, 16))
             })
             addView(TextView(context).apply {
-                text = context.getString(
-                    R.string.sleep_detail_stages,
-                    formatDuration(displayedLight),
-                    formatDuration(totals.deep)
-                ) + if (totals.awake > 0) "\n" + context.getString(
+                text = (if (sleepApiOnly) "只記錄睡眠時間，不推估淺眠或深眠" else context.getString(
+                    R.string.sleep_detail_stages, formatDuration(displayedLight), formatDuration(totals.deep)
+                )) + if (totals.awake > 0) "\n" + context.getString(
                     R.string.sleep_detail_awake, formatDuration(totals.awake)
                 ) else ""
                 setTextColor(ContextCompat.getColor(context, R.color.text_primary))
@@ -140,7 +140,9 @@ object SleepDialogHelper {
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(context, 70)
             ).apply { topMargin = dp(context, 16) })
             addView(TextView(context).apply {
-                text = context.getString(R.string.sleep_detail_note)
+                text = if (sleepApiOnly) {
+                    "此筆為省電模式，依 Sleep API 記錄睡眠與清醒時間；時間可能較粗略。"
+                } else context.getString(R.string.sleep_detail_note)
                 setTextColor(ContextCompat.getColor(context, R.color.text_secondary))
                 textSize = 12f
                 setPadding(0, dp(context, 12), 0, 0)

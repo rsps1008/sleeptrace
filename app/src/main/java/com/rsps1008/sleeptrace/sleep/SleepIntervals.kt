@@ -16,7 +16,10 @@ fun normalizedAwake(start: Long, end: Long, input: List<UsageInterval>): List<Us
     return result
 }
 
-/** SLEEPING is retained only to decode legacy stored rows; effective rule-9 output normalizes it to Light. */
+/** Version marker for sessions intentionally recorded without Light/Deep estimation. */
+const val SLEEP_API_ONLY_ALGORITHM_VERSION = 0
+
+/** SLEEPING is also used by the explicit Sleep-API-only recording mode. */
 enum class SleepStage { AWAKE, LIGHT, DEEP, SLEEPING }
 
 data class SleepPart(val start: Long, val end: Long, val stage: SleepStage) {
@@ -44,12 +47,18 @@ fun sleepParts(session: SleepSession): List<SleepPart> {
         if (end <= start) return@forEach
         val awake = awakeIntervals.any { it.startMillis <= start && it.endMillis >= end }
         val matching = stageIntervals.filter { it.startMillis <= start && it.endMillis >= end }.map { it.stage }.distinct()
-        // Actual Awake evidence always wins. Missing, contradictory and legacy generic-sleep
-        // labels are accepted-session fallback Light, not a fourth user-facing stage.
+        // Actual Awake evidence always wins. Generic sleep is user-visible only for an explicit
+        // Sleep-API-only session; legacy or missing stage data remains fallback Light.
         val selected = matching.singleOrNull()
         val stage = if (awake || SleepStage.AWAKE in matching) SleepStage.AWAKE else when (selected) {
             SleepStage.DEEP -> SleepStage.DEEP
-            SleepStage.LIGHT, SleepStage.SLEEPING, null -> SleepStage.LIGHT
+            SleepStage.SLEEPING -> if (session.stageAlgorithmVersion == SLEEP_API_ONLY_ALGORITHM_VERSION) {
+                SleepStage.SLEEPING
+            } else SleepStage.LIGHT
+            SleepStage.LIGHT -> SleepStage.LIGHT
+            null -> if (session.stageAlgorithmVersion == SLEEP_API_ONLY_ALGORITHM_VERSION) {
+                SleepStage.SLEEPING
+            } else SleepStage.LIGHT
             SleepStage.AWAKE -> SleepStage.AWAKE
         }
         val previous = parts.lastOrNull()

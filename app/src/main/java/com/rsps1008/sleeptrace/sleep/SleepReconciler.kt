@@ -5,6 +5,7 @@ import com.rsps1008.sleeptrace.motion.MotionSleepEstimator
 import com.rsps1008.sleeptrace.motion.AutomaticPlacement
 import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
 import com.rsps1008.sleeptrace.motion.CouplingPolicy
+import com.rsps1008.sleeptrace.motion.RecordingMode
 import com.rsps1008.sleeptrace.sleepDependencies
 import java.time.ZoneId
 import kotlinx.coroutines.sync.Mutex
@@ -90,9 +91,16 @@ class SleepReconciler(private val context: Context) {
         val segments = allSegments.filter { segment ->
             segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
         }
-        val base = SleepAnalyzer.analyzeByWindow(
+        val segmentBase = SleepAnalyzer.analyzeByWindow(
             segments, samples, emptyList(), schedule, completedWindows
         )
+        val classificationBase = SleepAnalyzer.analyzeClassificationsByWindow(
+            samples,
+            completedWindows.filter { window ->
+                segmentBase.none { it.startMillis < window.endMillis && it.endMillis > window.startMillis }
+            }
+        )
+        val base = segmentBase + classificationBase
         val classifiedAwake = completedWindows.flatMap { window ->
             SleepApiTimeline.awakeIntervals(
                 window.startMillis, window.endMillis, emptyList(), samples
@@ -101,24 +109,32 @@ class SleepReconciler(private val context: Context) {
         val apiAwake = normalizedAwake(
             evidenceStart, now, base.flatMap { it.awakeIntervals } + classifiedAwake
         )
-        val motion = dependencies.motionStore.read(evidenceStart, now)
-        val resolved = AutomaticPlacement.resolve(motion, apiAwake, schedule)
+        val stagesEnabled = dependencies.motionSettings.recordingMode == RecordingMode.STAGES
+        val motion = if (stagesEnabled) dependencies.motionStore.read(evidenceStart, now) else emptyList()
+        val resolved = if (stagesEnabled) AutomaticPlacement.resolve(motion, apiAwake, schedule) else emptyList()
         fun inReconciliationScope(session: SleepSession): Boolean =
             session.endMillis > analysisStart || unresolved.any {
                 it.startMillis < session.endMillis && it.endMillis > session.startMillis
             }
-        val calculated = base.map { MotionSleepEstimator.annotate(it, resolved) }
+        val calculated = base.map { if (stagesEnabled) MotionSleepEstimator.annotate(it, resolved) else it }
             .filter(::inReconciliationScope)
-        val fallback = MotionSleepEstimator.estimate(
+        val fallback = if (stagesEnabled) MotionSleepEstimator.estimate(
             resolved, apiAwake, schedule, now
         ).mapNotNull { candidate ->
             confirmMotionCandidateOnset(candidate, segments, samples)?.let {
                 extendConfirmedMotionCandidate(it, resolved, samples, apiAwake)
             }
         }
-            .filter(::inReconciliationScope)
+            .filter(::inReconciliationScope) else emptyList()
         val staged = selectBestSessions(calculated, fallback).map { session ->
             val sessionAwake = stageUsageFor(session, apiAwake + session.awakeIntervals)
+            val old = existingRecent.firstOrNull {
+                it.id == session.id || (it.startMillis < session.endMillis && it.endMillis > session.startMillis)
+            }
+            // A mode switch controls nights that have not been settled yet. Do not rewrite an
+            // existing staged night as generic sleep, or fabricate stages for an API-only night.
+            if (old != null && recordingModeChangedForExistingSession(old, stagesEnabled)) return@map old
+            if (!stagesEnabled) return@map sleepApiOnlySession(session, sessionAwake)
             val estimate = SleepStageEstimator.analyze(
                 session = session,
                 motionMinutes = resolved,
@@ -127,7 +143,6 @@ class SleepReconciler(private val context: Context) {
                 sleepSegments = segments,
                 schedule = schedule
             )
-            val old = existingRecent.firstOrNull { it.id == session.id || (it.startMillis < session.endMillis && it.endMillis > session.startMillis) }
             session.copy(stageIntervals = preserveExistingStagesWithoutCurrentEvidence(estimate, old?.stageIntervals, session),
                 stageAlgorithmVersion = SleepStageEstimator.ALGORITHM_VERSION,
                 stageFeatureVersion = if (estimate.currentFeatureValidMinutes > 0) estimate.baselineFeatureVersion else old?.stageFeatureVersion)
@@ -147,6 +162,14 @@ class SleepReconciler(private val context: Context) {
             .filter { it.manuallyEdited && it.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT) }
             .forEach { session ->
                 val sessionAwake = stageUsageFor(session, apiAwake + session.awakeIntervals)
+                val sessionWasApiOnly = session.stageAlgorithmVersion == SLEEP_API_ONLY_ALGORITHM_VERSION
+                if (sessionWasApiOnly != !stagesEnabled) return@forEach
+                if (!stagesEnabled) {
+                    val apiOnly = sleepApiOnlySession(session, sessionAwake)
+                    store.updateStageIntervals(session, apiOnly.stageIntervals,
+                        SLEEP_API_ONLY_ALGORITHM_VERSION, null)
+                    return@forEach
+                }
                 val estimate = SleepStageEstimator.analyze(
                     session = session,
                     motionMinutes = resolved,
@@ -169,6 +192,20 @@ class SleepReconciler(private val context: Context) {
         )
     }
 }
+
+internal fun recordingModeChangedForExistingSession(
+    session: SleepSession,
+    stagesEnabled: Boolean
+): Boolean = (session.stageAlgorithmVersion == SLEEP_API_ONLY_ALGORITHM_VERSION) != !stagesEnabled
+
+internal fun sleepApiOnlySession(session: SleepSession, awake: List<UsageInterval>): SleepSession = session.copy(
+    awakeIntervals = normalizedAwake(session.startMillis, session.endMillis, awake),
+    awakeMillis = normalizedAwake(session.startMillis, session.endMillis, awake)
+        .sumOf { it.endMillis - it.startMillis },
+    stageIntervals = listOf(SleepStageInterval(session.startMillis, session.endMillis, SleepStage.SLEEPING)),
+    stageAlgorithmVersion = SLEEP_API_ONLY_ALGORITHM_VERSION,
+    stageFeatureVersion = null
+)
 
 internal fun reconciliationEvidenceStart(
     analysisStart: Long,

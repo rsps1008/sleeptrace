@@ -4,6 +4,7 @@ import com.rsps1008.sleeptrace.sleep.ClassificationSample
 import com.rsps1008.sleeptrace.sleep.SleepAnalyzer
 import com.rsps1008.sleeptrace.sleep.SleepSchedule
 import com.rsps1008.sleeptrace.sleep.SleepSegment
+import com.rsps1008.sleeptrace.sleep.SleepWindow
 import com.rsps1008.sleeptrace.sleep.SyncState
 import com.rsps1008.sleeptrace.sleep.UsageInterval
 import java.time.LocalDate
@@ -28,6 +29,45 @@ class SleepAnalyzerTest {
     @Test fun `missing classification still syncs the best available segment automatically`() {
         val session = SleepAnalyzer.analyze(listOf(segment), emptyList(), emptyList(), schedule).single()
         assertEquals(SyncState.PENDING, session.state)
+    }
+
+    @Test fun `missing segment falls back to classify events after the window completes`() {
+        val window = SleepWindow(start, start + 8 * 60 * 60_000L)
+        val classifications = (0..41).map { index ->
+            ClassificationSample(start + 30 * 60_000L + index * 10 * 60_000L, 90, 0, 0)
+        }
+
+        val session = SleepAnalyzer.analyzeClassificationsByWindow(classifications, listOf(window)).single()
+
+        assertEquals(start + 30 * 60_000L, session.startMillis)
+        assertEquals(start + 7 * 60 * 60_000L + 40 * 60_000L, session.endMillis)
+        assertEquals(SyncState.PENDING, session.state)
+        assertTrue(session.reason.contains("分類事件"))
+    }
+
+    @Test fun `classify fallback keeps low confidence phone interval awake`() {
+        val window = SleepWindow(start, start + 3 * 60 * 60_000L)
+        val classifications = listOf(
+            ClassificationSample(start, 90, 0, 0),
+            ClassificationSample(start + 30 * 60_000L, 90, 0, 0),
+            ClassificationSample(start + 60 * 60_000L, 10, 0, 0),
+            ClassificationSample(start + 90 * 60_000L, 90, 0, 0),
+            ClassificationSample(start + 120 * 60_000L, 90, 0, 0)
+        )
+
+        val session = SleepAnalyzer.analyzeClassificationsByWindow(classifications, listOf(window)).single()
+
+        assertEquals(30 * 60_000L, session.awakeMillis)
+        assertEquals(1, session.awakeIntervals.size)
+    }
+
+    @Test fun `schedule alone never becomes sleep when both Sleep API signals are missing`() {
+        val window = SleepWindow(start, start + 8 * 60 * 60_000L)
+
+        assertTrue(SleepAnalyzer.analyzeClassificationsByWindow(emptyList(), listOf(window)).isEmpty())
+        assertTrue(SleepAnalyzer.analyzeByWindow(
+            emptyList(), emptyList(), emptyList(), schedule, listOf(window)
+        ).isEmpty())
     }
 
     @Test fun `confident complete session is pending sync`() {

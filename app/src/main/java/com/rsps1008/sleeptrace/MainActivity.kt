@@ -438,6 +438,7 @@ class MainActivity : AppCompatActivity() {
         val scheduleMode: TextView,
         val scheduleDescription: TextView,
         val windowAlarmAccess: MaterialButton,
+        val recordingModeButton: MaterialButton,
         val scheduleToggle: MaterialButton,
         val permissionsReady: TextView,
         val permissionRows: List<PermissionViews>,
@@ -517,6 +518,7 @@ class MainActivity : AppCompatActivity() {
             }
             refresh()
         }
+        val recordingModeButton = homeButton("") { chooseRecordingMode() }
         val classificationScore = homeText("", 19f, bold = true)
         val classificationDetail = homeText("", 13f, secondary = true).apply { setPadding(0, dp(6), 0, 0) }
         configuredRoot.addView(createCard().apply {
@@ -529,6 +531,7 @@ class MainActivity : AppCompatActivity() {
                     homeButton("修改時段") { renderedSchedule?.let { chooseSchedule(it) } },
                     scheduleToggle
                 ))
+                addView(recordingModeButton)
                 addView(homeText(getString(R.string.automatic_recording_description), 13f, secondary = true).apply {
                     setPadding(0, dp(8), 0, dp(16))
                 })
@@ -596,7 +599,7 @@ class MainActivity : AppCompatActivity() {
                 addView(captureView)
             })
         })
-        configuredRoot.addView(homeText("睡眠階段為手機訊號推估，僅供日常參考。", 12f, secondary = true).apply {
+        configuredRoot.addView(homeText("睡眠時間來自 Sleep API；睡眠階段僅在睡眠階段模式推估。", 12f, secondary = true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(8), dp(8), dp(8), dp(12))
         })
@@ -607,7 +610,7 @@ class MainActivity : AppCompatActivity() {
             setupCard, configuredRoot, classificationScore, classificationDetail, emptyCard,
             latest.card, latest.title, latest.status, latest.duration, latest.times, latest.awake,
             historyCard, historyRows, historyAllButton, captureView, scheduleTime, scheduleMode, scheduleDescription,
-            windowAlarmAccess, scheduleToggle, permissionsReady, permissionRows, permissionDividers, permissionSummary,
+            windowAlarmAccess, recordingModeButton, scheduleToggle, permissionsReady, permissionRows, permissionDividers, permissionSummary,
             permissionGrant, permissionRecheck, backgroundSection, backgroundDescription
         )
     }
@@ -675,9 +678,10 @@ class MainActivity : AppCompatActivity() {
         if (configured) {
             updateSleepSection(snapshot.sessions, snapshot.latestClassification)
             homeViews.captureView.bind(snapshot.latestCapture)
-            updateSchedule(requireNotNull(snapshot.schedule), snapshot.recordingEnabled, snapshot.exactAlarmAllowed)
+            updateSchedule(requireNotNull(snapshot.schedule), snapshot.recordingEnabled,
+                snapshot.recordingMode, snapshot.exactAlarmAllowed)
             updatePermissions(snapshot.healthGranted)
-            updateBackgroundAccess(snapshot.backgroundRestricted, snapshot.batteryExempt)
+            updateBackgroundAccess(snapshot.backgroundRestricted, snapshot.batteryExempt, snapshot.recordingMode)
         }
         // The stable hierarchy preserves ScrollView's position naturally. Posting an old scrollY
         // here can undo a user scroll that happens between data binding and the next frame.
@@ -720,7 +724,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateSchedule(schedule: SleepSchedule, recordingEnabled: Boolean, exactAlarmAllowed: Boolean) {
+    private fun updateSchedule(
+        schedule: SleepSchedule,
+        recordingEnabled: Boolean,
+        recordingMode: RecordingMode,
+        exactAlarmAllowed: Boolean
+    ) {
         renderedSchedule = schedule
         fun range(start: Int, end: Int): String {
             fun clock(minute: Int) = "%02d:%02d".format(minute / 60, minute % 60)
@@ -736,12 +745,42 @@ class MainActivity : AppCompatActivity() {
             color(if (recordingEnabled) R.color.status_success_bg else R.color.status_neutral_bg))
         homeViews.scheduleDescription.text = when {
             !recordingEnabled -> "目前不會自動偵測。恢復後會依設定時段記錄。"
+            recordingMode == RecordingMode.BATTERY_SAVER -> "省電模式只使用 Google 睡眠訊號，不啟動加速度計，也不推估淺眠或深眠。"
             !schedule.requiresWindowBoundary() -> "目前設定為全天觀測，App 會依可用資料整理睡眠。"
             exactAlarmAllowed -> "觀測完成後自動整理；有持續睡眠訊號時，可能延長觀測。"
             else -> "尚未允許「鬧鐘與提醒」。時段開始時可能無法準時啟動，造成漏記。"
         }
         homeViews.windowAlarmAccess.visibility = if (recordingEnabled && schedule.requiresWindowBoundary() && !exactAlarmAllowed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) View.VISIBLE else View.GONE
+        homeViews.recordingModeButton.text = if (recordingMode == RecordingMode.STAGES) {
+            "記錄模式：睡眠階段"
+        } else "記錄模式：省電"
         homeViews.scheduleToggle.text = if (recordingEnabled) "暫停自動記錄" else "恢復自動記錄"
+    }
+
+    private fun chooseRecordingMode() {
+        val choices = arrayOf(
+            "睡眠階段\n使用 Sleep API 與加速度計推估淺眠／深眠",
+            "省電\n只使用 Sleep API 記錄睡眠與清醒時間"
+        )
+        val current = if (motionSettings.recordingMode == RecordingMode.STAGES) 0 else 1
+        MaterialAlertDialogBuilder(this)
+            .setTitle("記錄模式")
+            .setSingleChoiceItems(choices, current) { dialog, which ->
+                val selected = if (which == 0) RecordingMode.STAGES else RecordingMode.BATTERY_SAVER
+                if (selected != motionSettings.recordingMode) {
+                    motionSettings.recordingMode = selected
+                    if (selected == RecordingMode.BATTERY_SAVER && MotionService.active != null) {
+                        MotionService.active?.refreshConfiguration()
+                    }
+                    AutomaticWorkSignals.markDirty(this)
+                    WorkScheduler.reconcileSoon(this)
+                    ensureAutomaticRecording()
+                    refresh()
+                }
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun updatePermissions(healthGranted: Boolean) {
@@ -772,8 +811,12 @@ class MainActivity : AppCompatActivity() {
         homeViews.permissionRecheck.visibility = if (allGranted) View.VISIBLE else View.GONE
     }
 
-    private fun updateBackgroundAccess(backgroundRestricted: Boolean, batteryExempt: Boolean) {
-        val visible = backgroundRestricted || !batteryExempt
+    private fun updateBackgroundAccess(
+        backgroundRestricted: Boolean,
+        batteryExempt: Boolean,
+        recordingMode: RecordingMode
+    ) {
+        val visible = recordingMode == RecordingMode.STAGES && (backgroundRestricted || !batteryExempt)
         homeViews.backgroundSection.visibility = if (visible) View.VISIBLE else View.GONE
         if (visible) homeViews.backgroundDescription.setText(
             if (backgroundRestricted) R.string.battery_restricted_description else R.string.battery_optimized_description
@@ -809,8 +852,10 @@ class MainActivity : AppCompatActivity() {
         lifecycle.withResumed {
             if (!backgroundSettingsOpen && motionSettings.enabled) {
                 when {
-                    !backgroundAccess.batteryReady && !backgroundAccess.batteryGuideShown -> openBatterySettings()
-                    backgroundAccess.isXiaomi && !backgroundAccess.xiaomiGuideShown -> openXiaomiSettings()
+                    motionSettings.recordingMode == RecordingMode.STAGES &&
+                        !backgroundAccess.batteryReady && !backgroundAccess.batteryGuideShown -> openBatterySettings()
+                    motionSettings.recordingMode == RecordingMode.STAGES &&
+                        backgroundAccess.isXiaomi && !backgroundAccess.xiaomiGuideShown -> openXiaomiSettings()
                     schedule.requiresWindowBoundary() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                         !SleepWindowScheduler.hasExactAlarmAccess(this@MainActivity) && !motionSettings.windowAlarmGuideShown -> guideWindowAlarm()
                 }
@@ -820,9 +865,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun guideWindowAlarm() {
         motionSettings.windowAlarmGuideShown = true
+        val saver = motionSettings.recordingMode == RecordingMode.BATTERY_SAVER
         MaterialAlertDialogBuilder(this)
-            .setTitle("睡眠窗外關閉背景服務")
-            .setMessage("允許「鬧鐘與提醒」後，眠迹可準時啟動觀測，並在排程結束時評估是否仍在睡眠。有足夠起床證據會提早整理，仍有近期睡眠證據則延長觀測，實際觀測結束後關閉前景服務。若略過，Android 可能限制鬧鐘或 Sleep API 回呼從背景啟動服務，造成動作資料缺口；Sleep API 睡眠區段仍會接收，開啟 App 時也會補啟動。")
+            .setTitle(if (saver) "準時完成睡眠整理" else "睡眠窗外關閉背景服務")
+            .setMessage(if (saver) {
+                "允許「鬧鐘與提醒」後，眠迹可在排程邊界準時切換 Sleep API 回報種類，並在窗口完成時整理昨晚睡眠。若略過，Android 可能延遲背景鬧鐘；SleepSegmentEvent 仍會在 Google 回報後觸發整理，開啟 App 時也會補排程。"
+            } else {
+                "允許「鬧鐘與提醒」後，眠迹可準時啟動觀測，並在排程結束時評估是否仍在睡眠。有足夠起床證據會提早整理，仍有近期睡眠證據則延長觀測，實際觀測結束後關閉前景服務。若略過，Android 可能限制鬧鐘或 Sleep API 回呼從背景啟動服務，造成動作資料缺口；Sleep API 睡眠區段仍會接收，開啟 App 時也會補啟動。"
+            })
             .setPositiveButton("開啟系統設定") { _, _ -> openWindowAlarmSettings() }
             .setNegativeButton("稍後", null)
             .show()
@@ -979,8 +1029,11 @@ class MainActivity : AppCompatActivity() {
         SleepWindowScheduler.schedule(this@MainActivity, schedule)
         SleepTracker.syncSubscription(this@MainActivity, schedule, motionSettings.enabled, System.currentTimeMillis())
         val now = System.currentTimeMillis()
-        val shouldKeepService = SleepWindowScheduler.shouldRunForegroundService(schedule, now)
-        if (MotionService.active != null) MotionService.active?.refreshConfiguration()
+        val stagesEnabled = motionSettings.recordingMode == RecordingMode.STAGES
+        val shouldKeepService = stagesEnabled && SleepWindowScheduler.shouldRunForegroundService(schedule, now)
+        if (!stagesEnabled && MotionService.active != null) {
+            MotionService.active?.refreshConfiguration()
+        } else if (MotionService.active != null) MotionService.active?.refreshConfiguration()
         if (shouldKeepService && MotionService.active == null) {
             lifecycle.withResumed {
                 if (motionSettings.enabled) runCatching { MotionService.start(this@MainActivity) }.onFailure {

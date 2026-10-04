@@ -209,6 +209,36 @@ class AutomaticSyncTest {
         assertTrue(payload.stages.none { it.stage == SleepSessionRecord.STAGE_TYPE_SLEEPING })
     }
 
+    @Test fun `Sleep API only mode exports generic sleeping and awake without fabricated stages`() {
+        val base = session().copy(
+            awakeIntervals = listOf(UsageInterval(61_000, 121_000)),
+            awakeMillis = 60_000
+        )
+
+        val apiOnly = sleepApiOnlySession(base, base.awakeIntervals)
+        val parts = sleepParts(apiOnly)
+        val payload = toHealthRecord(apiOnly)
+
+        assertEquals(SLEEP_API_ONLY_ALGORITHM_VERSION, apiOnly.stageAlgorithmVersion)
+        assertEquals(60_000L, stageDurations(apiOnly).awake)
+        assertEquals(apiOnly.durationMillis, stageDurations(apiOnly).sleep)
+        assertTrue(parts.filterNot { it.awake }.all { it.stage == SleepStage.SLEEPING })
+        assertTrue(payload.stages.any { it.stage == SleepSessionRecord.STAGE_TYPE_SLEEPING })
+        assertTrue(payload.stages.any { it.stage == SleepSessionRecord.STAGE_TYPE_AWAKE })
+        assertTrue(payload.stages.none { it.stage == SleepSessionRecord.STAGE_TYPE_LIGHT })
+        assertTrue(payload.stages.none { it.stage == SleepSessionRecord.STAGE_TYPE_DEEP })
+    }
+
+    @Test fun `mode switch does not restage an already settled night`() {
+        val staged = session().copy(stageAlgorithmVersion = SleepStageEstimator.ALGORITHM_VERSION)
+        val apiOnly = sleepApiOnlySession(session(), emptyList())
+
+        assertTrue(recordingModeChangedForExistingSession(staged, stagesEnabled = false))
+        assertTrue(recordingModeChangedForExistingSession(apiOnly, stagesEnabled = true))
+        assertFalse(recordingModeChangedForExistingSession(staged, stagesEnabled = true))
+        assertFalse(recordingModeChangedForExistingSession(apiOnly, stagesEnabled = false))
+    }
+
     @Test fun `optional manual correction is retained while upload remains automatic`() {
         val manual = session().copy(manuallyEdited = true)
         assertEquals(manual, mergeSleepSessions(listOf(manual), listOf(session().copy(endMillis = 10_000_000))).single())

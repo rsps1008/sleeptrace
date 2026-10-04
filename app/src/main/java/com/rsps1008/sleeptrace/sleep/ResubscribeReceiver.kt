@@ -10,6 +10,7 @@ import com.rsps1008.sleeptrace.motion.MotionService
 import com.rsps1008.sleeptrace.sleepDependencies
 import com.rsps1008.sleeptrace.work.WorkScheduler
 import com.rsps1008.sleeptrace.motion.SleepWindowScheduler
+import com.rsps1008.sleeptrace.motion.RecordingMode
 
 class ResubscribeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -39,7 +40,7 @@ class ResubscribeReceiver : BroadcastReceiver() {
 
                 if (configured && enabled && schedule != null && SleepTracker.hasActivityRecognition(context)) {
                     val inWindow = schedule.windowAt(System.currentTimeMillis()) != null
-                    val shouldStart = inWindow
+                    val shouldStart = inWindow && dependencies.motionSettings.recordingMode == RecordingMode.STAGES
                     val service = MotionService.active
                     if (service != null) {
                         service.refreshConfiguration()

@@ -3,6 +3,8 @@ package com.rsps1008.sleeptrace.sleep
 /** Pure analyzer: the phone being idle alone never creates a session. */
 object SleepAnalyzer {
     const val MINIMUM_SLEEP_MILLIS = 30 * 60 * 1000L
+    private const val SLEEP_CONFIDENCE = 80
+    private const val CLASSIFICATION_TAIL_MILLIS = 20 * 60 * 1000L
 
     /** Analyzes each completed window using Sleep API segments/classifications as sleep evidence. */
     fun analyzeByWindow(
@@ -40,6 +42,46 @@ object SleepAnalyzer {
         return analyzeByWindow(
             segments, classifications, phoneUse, schedule,
             schedule.windowsBetween(start, end), { true }
+        )
+    }
+
+    /**
+     * Fallback for completed windows where Google has not delivered a SleepSegmentEvent.
+     * A schedule or an idle phone never creates sleep: at least one high-confidence classify
+     * event is required. The final high event receives only one classify freshness window,
+     * unless wake evidence already closed the effective observation window earlier.
+     */
+    fun analyzeClassificationsByWindow(
+        classifications: List<ClassificationSample>,
+        windows: List<SleepWindow>
+    ): List<SleepSession> = windows.mapNotNull { window ->
+        val samples = classifications.asSequence()
+            .filter { it.timeMillis >= window.startMillis && it.timeMillis < window.endMillis }
+            .distinctBy { it.timeMillis }
+            .sortedBy { it.timeMillis }
+            .toList()
+        val firstHigh = samples.firstOrNull { it.confidence >= SLEEP_CONFIDENCE } ?: return@mapNotNull null
+        val lastHigh = samples.lastOrNull { it.confidence >= SLEEP_CONFIDENCE } ?: return@mapNotNull null
+        val end = minOf(window.endMillis, lastHigh.timeMillis + CLASSIFICATION_TAIL_MILLIS)
+        if (end <= firstHigh.timeMillis) return@mapNotNull null
+        val awakeIntervals = SleepApiTimeline.awakeIntervals(
+            firstHigh.timeMillis, end, emptyList(), samples
+        )
+        val awake = awakeIntervals.sumOf { it.endMillis - it.startMillis }
+        if (end - firstHigh.timeMillis - awake < MINIMUM_SLEEP_MILLIS) return@mapNotNull null
+        val inSpan = samples.filter { it.timeMillis in firstHigh.timeMillis until end }
+        val highRatio = inSpan.count { it.confidence >= SLEEP_CONFIDENCE }.toDouble() /
+            inSpan.size.coerceAtLeast(1)
+        SleepSession(
+            id = "classify-${window.startMillis}-${firstHigh.timeMillis}-${end}",
+            startMillis = firstHigh.timeMillis,
+            endMillis = end,
+            confidence = (50 + highRatio * 30).toInt().coerceIn(50, 80),
+            awakeMillis = awake,
+            state = SyncState.PENDING,
+            reason = "尚未收到 Sleep API 睡眠區段，依睡眠分類事件完成昨晚紀錄",
+            awakeIntervals = awakeIntervals,
+            usageSnapshotApplied = true
         )
     }
 

@@ -132,7 +132,8 @@ class MotionService : Service(), SensorEventListener2 {
             }
             return START_NOT_STICKY
         }
-        if (!settings.enabled || !SleepTracker.hasActivityRecognition(this)) {
+        if (!settings.enabled || settings.recordingMode != RecordingMode.STAGES ||
+            !SleepTracker.hasActivityRecognition(this)) {
             settings.status = "尚未啟動：請允許活動辨識並在 App 中啟動"
             stopSelf(); return START_NOT_STICKY
         }
@@ -179,7 +180,11 @@ class MotionService : Service(), SensorEventListener2 {
         schedule = newSchedule
         eventWindows.update(newSchedule)
         boundaryRefreshPending = false
-        if (!settings.enabled || !SleepTracker.hasActivityRecognition(this)) {
+        if (!settings.enabled || settings.recordingMode != RecordingMode.STAGES ||
+            !SleepTracker.hasActivityRecognition(this)) {
+            if (settings.recordingMode == RecordingMode.BATTERY_SAVER) {
+                settings.status = "省電模式，不啟動加速度計"
+            }
             stopped = true
             transition { stopSelf() }; return
         }
@@ -387,6 +392,7 @@ class MotionService : Service(), SensorEventListener2 {
             accumulator = null; capture = null
             settings.status = when {
                 !settings.enabled -> "動作偵測已關閉"
+                settings.recordingMode == RecordingMode.BATTERY_SAVER -> "省電模式，不啟動加速度計"
                 windowEndedNormally -> "睡眠窗外，已停止背景服務並等待下一個排程"
                 else -> "動作偵測已中斷，請開啟 App 重新啟動"
             }
@@ -420,6 +426,7 @@ class MotionBoundaryReceiver : BroadcastReceiver() {
                 val preferences = dependencies.preferences
                 val schedule = if (preferences.configured()) preferences.schedule() else null
                 val enabled = dependencies.motionSettings.enabled && schedule != null && SleepTracker.hasActivityRecognition(context)
+                val stagesEnabled = dependencies.motionSettings.recordingMode == RecordingMode.STAGES
                 if (!enabled) {
                     SleepWindowScheduler.cancel(context)
                     runCatching { SleepTracker.unsubscribe(context) }
@@ -435,7 +442,7 @@ class MotionBoundaryReceiver : BroadcastReceiver() {
                 val service = MotionService.active
                 if (service != null) {
                     service.refreshConfiguration()
-                } else if (inWindow) {
+                } else if (inWindow && stagesEnabled) {
                     runCatching { MotionService.start(context) }.onFailure {
                         dependencies.motionSettings.status = if (SleepWindowScheduler.hasExactAlarmAccess(context)) {
                             "系統未能於睡眠窗啟動背景記錄；開啟 App 可重新安排"

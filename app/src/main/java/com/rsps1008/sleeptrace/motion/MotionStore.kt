@@ -8,6 +8,8 @@ import androidx.core.content.edit
 import androidx.core.database.sqlite.transaction
 import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
 
+enum class RecordingMode { STAGES, BATTERY_SAVER }
+
 class MotionSettings(context: Context) {
     private val debug = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
     var experiment: CaptureExperiment
@@ -18,6 +20,11 @@ class MotionSettings(context: Context) {
         // Old motion opt-in and placement settings no longer control automatic recording.
         get() = prefs.getBoolean("recording_enabled", true)
         set(value) = prefs.edit { putBoolean("recording_enabled", value) }
+    var recordingMode: RecordingMode
+        get() = runCatching {
+            RecordingMode.valueOf(prefs.getString("recording_mode", RecordingMode.STAGES.name)!!)
+        }.getOrDefault(RecordingMode.STAGES)
+        set(value) = prefs.edit { putString("recording_mode", value.name) }
     var status: String
         get() = prefs.getString("status", "尚未啟動")!!
         set(value) = prefs.edit { putString("status", value) }
