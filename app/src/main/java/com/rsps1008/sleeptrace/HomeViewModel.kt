@@ -71,6 +71,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 com.rsps1008.sleeptrace.sleep.SyncState.SYNCING,
                                 com.rsps1008.sleeptrace.sleep.SyncState.FAILED_RETRYABLE
                             ) }?.let { "睡眠已整理，等待同步" }
+                                ?: schedule?.dataInsufficientObservationWindows?.maxByOrNull { it.startMillis }
+                                    ?.let { "最近一晚沒有 Google 睡眠證據，已標記資料不足" }
                         HomeSnapshot(
                             configured = configured,
                             schedule = schedule,

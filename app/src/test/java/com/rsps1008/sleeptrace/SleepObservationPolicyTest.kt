@@ -31,6 +31,23 @@ class SleepObservationPolicyTest {
             waitForWakeEvidence = true).closed)
     }
 
+    @Test fun `historical saver keeps the first proven wake despite later daytime reports`() {
+        val morningWakeThenDaytime = listOf(
+            sample(480, 10), sample(485, 15), // first proved wake
+            sample(840, 90),                   // daytime high confidence must not erase it
+            sample(900, 10), sample(905, 15)   // nor move wake to a later low run
+        )
+        assertEquals(ObservationEnd(at(480), true), SleepObservationPolicy.resolve(
+            window, null, morningWakeThenDaytime, at(3_000), at(1_440),
+            waitForWakeEvidence = true, historicalWakeEvidence = true))
+    }
+
+    @Test fun `expired historical night with no events settles as data insufficient`() {
+        assertEquals(ObservationEnd(at(480), true, dataInsufficient = true), SleepObservationPolicy.resolve(
+            window, null, emptyList(), at(3_000), at(1_440),
+            waitForWakeEvidence = true, historicalWakeEvidence = true, settleEmptyHistoricalWindow = true))
+    }
+
     @Test fun `late in-window high cannot reopen nominal window`() {
         assertEquals(ObservationEnd(at(480), true), resolve(listOf(sample(475, 90)), 485))
     }

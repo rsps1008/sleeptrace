@@ -21,6 +21,8 @@ data class SleepSchedule(
     val observationEnds: Map<SleepWindow, Long> = emptyMap(),
     /** Only persisted closed observation windows may be reconciled in saver mode. */
     val closedObservationWindows: Set<SleepWindow> = emptySet(),
+    /** Expired nights with no raw Google event; retained so late delivery can reopen them. */
+    val dataInsufficientObservationWindows: Set<SleepWindow> = emptySet(),
     /** Downloaded Taiwan calendar values override weekend defaults, including make-up workdays. */
     val holidayCalendar: Map<LocalDate, Boolean> = emptyMap()
 ) {
@@ -135,6 +137,9 @@ data class SleepSchedule(
 
     fun isObservationClosed(window: SleepWindow): Boolean =
         closedObservationWindows.any { it.startMillis == window.startMillis }
+
+    fun isObservationDataInsufficient(window: SleepWindow): Boolean =
+        dataInsufficientObservationWindows.any { it.startMillis == window.startMillis }
 
     private fun rangeLabel(start: Int, end: Int): String =
         "%02d:%02d–%02d:%02d".format(start / 60, start % 60, end / 60, end % 60)

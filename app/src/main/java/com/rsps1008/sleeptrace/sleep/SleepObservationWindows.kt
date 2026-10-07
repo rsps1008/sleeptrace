@@ -35,7 +35,7 @@ internal class SharedPreferencesObservationPersistence(private val prefs: Shared
             val start = parts.getOrNull(0)?.toLongOrNull() ?: return@mapNotNull null
             val end = parts.getOrNull(1)?.toLongOrNull() ?: return@mapNotNull null
             val actual = values.getOrNull(0)?.toLongOrNull() ?: return@mapNotNull null
-            SleepWindow(start, end) to ObservationEnd(actual, values.getOrNull(1) == "true")
+            SleepWindow(start, end) to ObservationEnd(actual, values.getOrNull(1) == "true", values.getOrNull(2) == "insufficient")
         }.toMap()
 
     override fun commit(updates: Map<SleepWindow, ObservationEnd>, removals: Set<SleepWindow>): Boolean {
@@ -43,7 +43,8 @@ internal class SharedPreferencesObservationPersistence(private val prefs: Shared
         val previous = affectedKeys.associateWith { prefs.getString(it, null) }
         val editor = prefs.edit()
         removals.forEach { editor.remove(key(it)) }
-        updates.forEach { (window, result) -> editor.putString(key(window), "${result.endMillis}:${result.closed}") }
+        updates.forEach { (window, result) -> editor.putString(key(window),
+            "${result.endMillis}:${result.closed}:${if (result.dataInsufficient) "insufficient" else "wake"}") }
         if (editor.commit()) return true
         // SharedPreferences can update its in-memory map even when the disk commit fails.
         // Restore only our affected keys so a later refresh cannot mistake that map for durability.

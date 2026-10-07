@@ -35,7 +35,8 @@ internal class SleepObservationRepository(
         val windows = nominal.windowsBetween(now - lookback, now + 1, zone).filter { window ->
             val date = Instant.ofEpochMilli(window.startMillis).atZone(zone).toLocalDate()
             !nominal.isFullDayForStartDate(date) &&
-                now >= window.startMillis + (window.endMillis - window.startMillis) / 2 && records[window]?.closed != true
+                now >= window.startMillis + (window.endMillis - window.startMillis) / 2 &&
+                    (records[window]?.closed != true || records[window]?.dataInsufficient == true)
         }
         val samples = if (windows.isEmpty()) emptyList() else recentSamples(windows.minOf { it.startMillis })
         val updates = mutableMapOf<SleepWindow, ObservationEnd>()
@@ -43,8 +44,9 @@ internal class SleepObservationRepository(
             val date = Instant.ofEpochMilli(window.startMillis).atZone(zone).toLocalDate()
             val nextStart = nominal.windowForStartDate(date.plusDays(1), zone).startMillis
             val historical = waitForWakeEvidence && now - window.endMillis > 10 * 60_000L
+            val settleEmpty = historical && now >= nextStart
             val result = SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart,
-                waitForWakeEvidence, historical)
+                waitForWakeEvidence, historical, settleEmpty)
             if (result != records[window] && (result.closed || result.endMillis != window.endMillis || waitForWakeEvidence)) {
                 updates[window] = result
                 records[window] = result
@@ -58,7 +60,8 @@ internal class SleepObservationRepository(
         }
         nominal.copy(
             observationEnds = records.mapValues { it.value.endMillis },
-            closedObservationWindows = records.filterValues { it.closed }.keys
+            closedObservationWindows = records.filterValues { it.closed }.keys,
+            dataInsufficientObservationWindows = records.filterValues { it.dataInsufficient }.keys
         )
     }
 
