@@ -6,6 +6,7 @@ import com.rsps1008.sleeptrace.motion.AutomaticPlacement
 import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
 import com.rsps1008.sleeptrace.motion.CouplingPolicy
 import com.rsps1008.sleeptrace.motion.RecordingMode
+import com.rsps1008.sleeptrace.motion.SleepWindowScheduler
 import com.rsps1008.sleeptrace.sleepDependencies
 import java.time.ZoneId
 import kotlinx.coroutines.sync.Mutex
@@ -60,6 +61,15 @@ class SleepReconciler(private val context: Context) {
             HistoricalReconcileAction.DEFER_UNCONFIGURED_HISTORY -> return@withLock
         }
         val schedule = preferences.schedule()
+        // Closing a saver observation after two waking classifications must immediately stop the
+        // classify stream.  The next once-per-night start boundary re-enables it; segments remain
+        // subscribed all day so delayed daily results can still repair a previous night.
+        val saverMode = dependencies.motionSettings.recordingMode == RecordingMode.BATTERY_SAVER
+        SleepTracker.syncSubscription(context, schedule, dependencies.motionSettings.enabled, System.currentTimeMillis(),
+            saverWakeGrace = saverMode)
+        SleepWindowScheduler.schedule(context,
+            schedule.takeIf { dependencies.motionSettings.enabled && SleepTracker.hasActivityRecognition(context) },
+            saverMode = saverMode)
         val now = System.currentTimeMillis()
         val analysisStart = now - RECENT_ANALYSIS_MILLIS
         // Keep unresolved old sessions eligible for matching without loading all historical
@@ -87,7 +97,10 @@ class SleepReconciler(private val context: Context) {
         val allSegments = store.segments(evidenceStart, now)
         val samples = store.recentSamples(evidenceStart)
         val windows = schedule.windowsBetween(evidenceStart, now)
-        val completedWindows = SleepUsageSnapshot.completedWindows(windows, now)
+        val stagesEnabled = dependencies.motionSettings.recordingMode == RecordingMode.STAGES
+        val completedWindows = SleepUsageSnapshot.completedWindows(windows, now).filter { window ->
+            stagesEnabled || schedule.isObservationClosed(window)
+        }
         val segments = allSegments.filter { segment ->
             segment.endMillis >= analysisStart || unresolved.any { it.startMillis < segment.endMillis && it.endMillis > segment.startMillis }
         }
@@ -100,7 +113,15 @@ class SleepReconciler(private val context: Context) {
                 segmentBase.none { it.startMillis < window.endMillis && it.endMillis > window.startMillis }
             }
         )
-        val base = segmentBase + classificationBase
+        val apiBase = segmentBase + classificationBase
+        // The user's selected saver mode is a schedule-based, deliberately coarse fallback.
+        // Stages mode still requires Sleep API evidence and must never manufacture a session.
+        val scheduleBase = if (stagesEnabled) emptyList() else SleepAnalyzer.scheduledEstimateByWindow(
+            completedWindows.filter { window ->
+                apiBase.none { it.startMillis < window.endMillis && it.endMillis > window.startMillis }
+            }, samples
+        )
+        val base = apiBase + scheduleBase
         val classifiedAwake = completedWindows.flatMap { window ->
             SleepApiTimeline.awakeIntervals(
                 window.startMillis, window.endMillis, emptyList(), samples
@@ -109,7 +130,6 @@ class SleepReconciler(private val context: Context) {
         val apiAwake = normalizedAwake(
             evidenceStart, now, base.flatMap { it.awakeIntervals } + classifiedAwake
         )
-        val stagesEnabled = dependencies.motionSettings.recordingMode == RecordingMode.STAGES
         val motion = if (stagesEnabled) dependencies.motionStore.read(evidenceStart, now) else emptyList()
         val resolved = if (stagesEnabled) AutomaticPlacement.resolve(motion, apiAwake, schedule) else emptyList()
         fun inReconciliationScope(session: SleepSession): Boolean =

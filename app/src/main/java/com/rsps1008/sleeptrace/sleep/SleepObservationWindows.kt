@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.annotation.WorkerThread
 import com.rsps1008.sleeptrace.data.AutomaticWorkSignals
 import com.rsps1008.sleeptrace.motion.MotionService
+import com.rsps1008.sleeptrace.motion.RecordingMode
 import com.rsps1008.sleeptrace.sleepDependencies
 import com.rsps1008.sleeptrace.work.WorkScheduler
 import java.time.ZoneId
@@ -21,6 +22,7 @@ internal object SleepObservationWindows {
             MotionService.active?.refreshConfiguration()
             WorkScheduler.reconcileSoon(context)
         },
+        waitForWakeEvidence = context.sleepDependencies().motionSettings.recordingMode == RecordingMode.BATTERY_SAVER,
         zone = ZoneId.systemDefault()
     ).apply(nominal)
 }

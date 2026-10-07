@@ -85,6 +85,44 @@ object SleepAnalyzer {
         )
     }
 
+    /**
+     * Saver mode deliberately has no motion evidence to fall back on.  When Google Play
+     * services supplies no usable sleep candidate at all, preserve the user's requested
+     * nightly schedule as an explicitly low-confidence estimate instead of leaving a
+     * completed night blank.  This is never used by the stages mode and is replaced on a
+     * later reconciliation if Sleep API evidence arrives.
+     */
+    fun scheduledEstimateByWindow(
+        windows: List<SleepWindow>,
+        classifications: List<ClassificationSample>
+    ): List<SleepSession> = windows.mapNotNull { window ->
+        val duration = window.endMillis - window.startMillis
+        // A 24-hour schedule is an observation setting, not an assertion of 24 hours asleep.
+        if (duration < MINIMUM_SLEEP_MILLIS || duration >= 16 * 60 * 60 * 1000L) return@mapNotNull null
+        val wake = classifications.asSequence()
+            .filter { it.confidence <= 20 && it.timeMillis >= window.endMillis &&
+                it.timeMillis <= window.endMillis + SleepSchedule.SAVER_WAKE_CLASSIFICATION_GRACE_MILLIS }
+            .minByOrNull { it.timeMillis }
+        val end = wake?.timeMillis ?: window.endMillis
+        val awake = SleepApiTimeline.awakeIntervals(
+            window.startMillis, end, emptyList(), classifications.filter {
+                it.timeMillis in window.startMillis until end
+            }
+        )
+        SleepSession(
+            id = "saver-schedule-${window.startMillis}-${window.endMillis}",
+            startMillis = window.startMillis,
+            endMillis = end,
+            confidence = 0,
+            awakeMillis = awake.sumOf { it.endMillis - it.startMillis },
+            state = SyncState.PENDING,
+            reason = if (wake == null) "省電模式粗略排程估計；未收到可用的 Google 睡眠訊號"
+                else "省電模式粗略排程估計；Sleep API 在起床後回報清醒",
+            awakeIntervals = awake,
+            usageSnapshotApplied = true
+        )
+    }
+
     private fun buildSession(
         segment: SleepSegment,
         classifications: List<ClassificationSample>,

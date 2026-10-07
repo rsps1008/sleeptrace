@@ -16,7 +16,8 @@ internal class SleepObservationRepository(
     private val markDirty: () -> Unit,
     private val onClosed: () -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
-    private val zone: ZoneId = ZoneId.systemDefault()
+    private val zone: ZoneId = ZoneId.systemDefault(),
+    private val waitForWakeEvidence: Boolean = false
 ) {
     internal fun apply(nominal: SleepSchedule): SleepSchedule = synchronized(lock) {
         // Sample time inside the shared lock, after any earlier refresh finished persisting.
@@ -38,8 +39,8 @@ internal class SleepObservationRepository(
         windows.forEach { window ->
             val date = Instant.ofEpochMilli(window.startMillis).atZone(zone).toLocalDate()
             val nextStart = nominal.windowForStartDate(date.plusDays(1), zone).startMillis
-            val result = SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart)
-            if (result != records[window] && (result.closed || result.endMillis != window.endMillis)) {
+            val result = SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart, waitForWakeEvidence)
+            if (result != records[window] && (result.closed || result.endMillis != window.endMillis || waitForWakeEvidence)) {
                 updates[window] = result
                 records[window] = result
             }
@@ -50,7 +51,10 @@ internal class SleepObservationRepository(
             // Repairing a polluted all-day record also refreshes capture through its existing flush path.
             if (updates.values.any { it.closed } || removals.any { it.startMillis >= now - 14 * DAY }) onClosed()
         }
-        nominal.copy(observationEnds = records.mapValues { it.value.endMillis })
+        nominal.copy(
+            observationEnds = records.mapValues { it.value.endMillis },
+            closedObservationWindows = records.filterValues { it.closed }.keys
+        )
     }
 
     private companion object {

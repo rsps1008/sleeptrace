@@ -36,13 +36,17 @@ class SleepUpdateReceiver : BroadcastReceiver() {
                         ClassificationSample(it.timestampMillis, it.confidence, it.motion, it.light)
                     }
                     val dependencies = context.sleepDependencies()
+                    var effectiveSchedule: SleepSchedule? = null
                     processSleepClassifications(samples, store::appendSamples,
                         effectiveSchedule = {
-                            if (dependencies.preferences.configured()) dependencies.preferences.schedule() else null
+                            (if (dependencies.preferences.configured()) dependencies.preferences.schedule() else null)
+                                .also { effectiveSchedule = it }
                         }, updateControls = { schedule ->
-                            SleepTracker.syncSubscription(context, schedule, dependencies.motionSettings.enabled, System.currentTimeMillis())
+                            SleepTracker.syncSubscription(context, schedule, dependencies.motionSettings.enabled, System.currentTimeMillis(),
+                                saverWakeGrace = dependencies.motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
                             SleepWindowScheduler.schedule(context,
-                                schedule.takeIf { dependencies.motionSettings.enabled && SleepTracker.hasActivityRecognition(context) })
+                                schedule.takeIf { dependencies.motionSettings.enabled && SleepTracker.hasActivityRecognition(context) },
+                                saverMode = dependencies.motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
                             val active = MotionService.active
                             if (active != null) {
                                 active.refreshConfiguration()
@@ -56,6 +60,10 @@ class SleepUpdateReceiver : BroadcastReceiver() {
                                 }
                             }
                     })
+                    if (dependencies.motionSettings.recordingMode == RecordingMode.BATTERY_SAVER &&
+                        samples.any { it.confidence <= 20 && effectiveSchedule?.isAfterWindowBeforeNextStart(it.timeMillis) == true }) {
+                        WorkScheduler.reconcileSoon(context)
+                    }
                 }
                 // Classification arrives frequently. Reconcile on completed segments or the periodic worker.
                 if (SleepSegmentEvent.hasEvents(intent)) WorkScheduler.reconcileSoon(context)

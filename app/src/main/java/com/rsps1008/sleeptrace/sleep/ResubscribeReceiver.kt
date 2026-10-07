@@ -27,14 +27,17 @@ class ResubscribeReceiver : BroadcastReceiver() {
                 val schedule = if (configured) dependencies.preferences.schedule() else null
                 val enabled = dependencies.motionSettings.enabled
                 if (recoveryBroadcast) {
-                    SleepTracker.syncSubscription(context, schedule, enabled, System.currentTimeMillis(), force = true)
+                    SleepTracker.syncSubscription(context, schedule, enabled, System.currentTimeMillis(), force = true,
+                        saverWakeGrace = dependencies.motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
                 } else {
-                    SleepTracker.syncSubscription(context, schedule, enabled, System.currentTimeMillis())
+                    SleepTracker.syncSubscription(context, schedule, enabled, System.currentTimeMillis(),
+                        saverWakeGrace = dependencies.motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
                 }
                 // The same timestamp does not prove an alarm survived reboot/permission changes,
                 // or that an earlier inexact alarm now uses newly granted exact-alarm access.
                 SleepWindowScheduler.clearDelivered(context)
-                if (configured && enabled && schedule != null) SleepWindowScheduler.schedule(context, schedule)
+                if (configured && enabled && schedule != null) SleepWindowScheduler.schedule(context, schedule,
+                    saverMode = dependencies.motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
                 else SleepWindowScheduler.cancel(context)
                 WorkScheduler.schedule(context)
 

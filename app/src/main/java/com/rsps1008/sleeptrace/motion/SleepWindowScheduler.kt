@@ -39,8 +39,18 @@ object SleepWindowScheduler {
     fun nextBoundary(
         schedule: SleepSchedule,
         nowMillis: Long,
-        zone: ZoneId = ZoneId.systemDefault()
+        zone: ZoneId = ZoneId.systemDefault(),
+        saverMode: Boolean = false
     ): ScheduleBoundary? {
+        // Saver mode begins its Play-services subscription at the next sleep-window start.
+        // It deliberately has no prewarm, motion fallback, or end alarm: those would wake a
+        // sleeping device without creating new Sleep API evidence.  A delivered API event,
+        // app launch, boot, or the next window start performs any needed follow-up instead.
+        if (saverMode) {
+            val futureStart = schedule.windowsBetween(nowMillis + 1, nowMillis + 8L * 24 * 60 * 60 * 1000, zone)
+                .firstOrNull { it.startMillis > nowMillis }
+            return futureStart?.let { ScheduleBoundary(it.startMillis, isWindowStart = true) }
+        }
         val futureEnd = nowMillis + 8L * 24 * 60 * 60 * 1000
         val classificationAlreadyRequested = schedule.classificationWindowAt(nowMillis, zone) != null
         val candidates = schedule.windowsBetween(nowMillis, futureEnd, zone).flatMap { window ->
@@ -60,7 +70,12 @@ object SleepWindowScheduler {
         return candidates.minByOrNull { it.atMillis }
     }
 
-    fun schedule(context: Context, schedule: SleepSchedule?, nowMillis: Long = System.currentTimeMillis()): ScheduleBoundary? {
+    fun schedule(
+        context: Context,
+        schedule: SleepSchedule?,
+        nowMillis: Long = System.currentTimeMillis(),
+        saverMode: Boolean = false
+    ): ScheduleBoundary? {
         val alarm = context.getSystemService(AlarmManager::class.java)
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val existingIntent = boundaryIntent(context, PendingIntent.FLAG_NO_CREATE)
@@ -70,7 +85,7 @@ object SleepWindowScheduler {
             return null
         }
 
-        val next = nextBoundary(schedule, nowMillis)
+        val next = nextBoundary(schedule, nowMillis, saverMode = saverMode)
         if (next == null) return null
         val cachedAt = prefs.getLong(SCHEDULED_AT_KEY, 0L)
         if (cachedAt == next.atMillis && existingIntent != null) return next

@@ -11,6 +11,7 @@
     <!-- Overnight local sensor recording is a core function affected by power restrictions. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.INTERNET" />
     <queries>
         <package android:name="com.google.android.apps.healthdata" />
     </queries>

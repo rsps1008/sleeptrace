@@ -12,6 +12,14 @@ class SleepObservationPolicyTest {
         assertEquals(ObservationEnd(at(505), true), resolve(listOf(sample(500, 90)), 515, ObservationEnd(at(505), false)))
     }
 
+    @Test fun `saver waits past scheduled end until consecutive wake reports arrive`() {
+        val afterEnd = listOf(sample(500, 10), sample(510, 15))
+        assertEquals(ObservationEnd(at(480), false), SleepObservationPolicy.resolve(
+            window, null, emptyList(), at(500), at(1440), waitForWakeEvidence = true))
+        assertEquals(ObservationEnd(at(500), true), SleepObservationPolicy.resolve(
+            window, null, afterEnd, at(510), at(1440), waitForWakeEvidence = true))
+    }
+
     @Test fun `late in-window high cannot reopen nominal window`() {
         assertEquals(ObservationEnd(at(480), true), resolve(listOf(sample(475, 90)), 485))
     }

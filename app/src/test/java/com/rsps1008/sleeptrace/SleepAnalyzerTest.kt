@@ -61,13 +61,42 @@ class SleepAnalyzerTest {
         assertEquals(1, session.awakeIntervals.size)
     }
 
-    @Test fun `schedule alone never becomes sleep when both Sleep API signals are missing`() {
+    @Test fun `schedule alone does not become a regular Sleep API candidate`() {
         val window = SleepWindow(start, start + 8 * 60 * 60_000L)
 
         assertTrue(SleepAnalyzer.analyzeClassificationsByWindow(emptyList(), listOf(window)).isEmpty())
         assertTrue(SleepAnalyzer.analyzeByWindow(
             emptyList(), emptyList(), emptyList(), schedule, listOf(window)
         ).isEmpty())
+    }
+
+    @Test fun `saver schedule fallback records a clearly marked rough completed night`() {
+        val window = SleepWindow(start, start + 8 * 60 * 60_000L)
+
+        val session = SleepAnalyzer.scheduledEstimateByWindow(listOf(window), emptyList()).single()
+
+        assertEquals(window.startMillis, session.startMillis)
+        assertEquals(window.endMillis, session.endMillis)
+        assertEquals(0, session.confidence)
+        assertEquals(SyncState.PENDING, session.state)
+        assertTrue(session.reason.contains("粗略排程估計"))
+    }
+
+    @Test fun `saver schedule fallback refuses an all day observation window`() {
+        val allDay = SleepWindow(start, start + 24 * 60 * 60_000L)
+
+        assertTrue(SleepAnalyzer.scheduledEstimateByWindow(listOf(allDay), emptyList()).isEmpty())
+    }
+
+    @Test fun `saver schedule fallback uses a post window awake report as its approximate end`() {
+        val window = SleepWindow(start, start + 8 * 60 * 60_000L)
+        val woke = window.endMillis + 20 * 60_000L
+
+        val session = SleepAnalyzer.scheduledEstimateByWindow(listOf(window),
+            listOf(ClassificationSample(woke, 1, 0, 0))).single()
+
+        assertEquals(woke, session.endMillis)
+        assertTrue(session.reason.contains("起床後回報清醒"))
     }
 
     @Test fun `confident complete session is pending sync`() {

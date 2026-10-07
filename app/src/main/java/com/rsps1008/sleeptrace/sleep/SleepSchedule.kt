@@ -18,7 +18,11 @@ data class SleepSchedule(
     val weekendStartMinute: Int? = null,
     val weekendEndMinute: Int? = null,
     /** Persisted effective ends, keyed by the original scheduled window. Labels remain user settings. */
-    val observationEnds: Map<SleepWindow, Long> = emptyMap()
+    val observationEnds: Map<SleepWindow, Long> = emptyMap(),
+    /** Only persisted closed observation windows may be reconciled in saver mode. */
+    val closedObservationWindows: Set<SleepWindow> = emptySet(),
+    /** Downloaded Taiwan calendar values override weekend defaults, including make-up workdays. */
+    val holidayCalendar: Map<LocalDate, Boolean> = emptyMap()
 ) {
     init {
         require(startMinute in 0 until MINUTES_PER_DAY)
@@ -31,7 +35,7 @@ data class SleepSchedule(
     fun label(): String {
         val weekday = rangeLabel(startMinute, endMinute)
         return if (weekendStartMinute == null || weekendEndMinute == null) "每日 $weekday"
-        else "平日 $weekday；週末 ${rangeLabel(weekendStartMinute, weekendEndMinute)}"
+        else "平日 $weekday；週末／假日 ${rangeLabel(weekendStartMinute, weekendEndMinute)}"
     }
 
     fun windowForStartDate(date: LocalDate, zone: ZoneId = ZoneId.systemDefault()): SleepWindow {
@@ -61,15 +65,47 @@ data class SleepSchedule(
             .firstOrNull { timeMillis >= it.startMillis && timeMillis < it.endMillis }
     }
 
-    /** Window whose classify subscription should already be active at this instant. */
-    fun classificationWindowAt(timeMillis: Long, zone: ZoneId = ZoneId.systemDefault()): SleepWindow? =
+    /**
+     * Window whose classify subscription should already be active at this instant.
+     * Saver mode may keep the passive Play-services subscription briefly after the scheduled
+     * end, so a later waking classification can refine its coarse schedule estimate.  This
+     * does not register an alarm or wake the device.
+     */
+    fun classificationWindowAt(
+        timeMillis: Long,
+        zone: ZoneId = ZoneId.systemDefault(),
+        postWindowMillis: Long = 0L
+    ): SleepWindow? =
         windowsBetween(
-            timeMillis - CLASSIFICATION_LEAD_MILLIS,
+            timeMillis - CLASSIFICATION_LEAD_MILLIS - postWindowMillis,
             timeMillis + CLASSIFICATION_LEAD_MILLIS + 1,
             zone
         ).firstOrNull {
-            timeMillis >= it.startMillis - CLASSIFICATION_LEAD_MILLIS && timeMillis < it.endMillis
+            timeMillis >= it.startMillis - CLASSIFICATION_LEAD_MILLIS &&
+                timeMillis < it.endMillis + postWindowMillis
         }
+
+    /**
+     * Saver classification begins at the configured window start and remains passively subscribed
+     * only until that night's sufficient waking evidence closes the observation.  No end alarm is
+     * needed: Play services delivers the post-window classification itself.
+     */
+    fun saverClassificationWindowAt(timeMillis: Long, zone: ZoneId = ZoneId.systemDefault()): SleepWindow? {
+        val date = Instant.ofEpochMilli(timeMillis).atZone(zone).toLocalDate()
+        return sequenceOf(date.minusDays(1), date).map { startDate ->
+            windowForStartDate(startDate, zone) to windowForStartDate(startDate.plusDays(1), zone).startMillis
+        }.firstOrNull { (window, nextStart) ->
+            timeMillis >= window.startMillis && timeMillis < nextStart && !isObservationClosed(window)
+        }?.first
+    }
+
+    fun isAfterWindowBeforeNextStart(timeMillis: Long, zone: ZoneId = ZoneId.systemDefault()): Boolean {
+        val date = Instant.ofEpochMilli(timeMillis).atZone(zone).toLocalDate()
+        return sequenceOf(date.minusDays(1), date).any { startDate ->
+            val window = windowForStartDate(startDate, zone)
+            timeMillis >= window.endMillis && timeMillis < windowForStartDate(startDate.plusDays(1), zone).startMillis
+        }
+    }
 
     /** Full scheduled windows that overlap the supplied time range. */
     fun windowsBetween(startMillis: Long, endMillis: Long, zone: ZoneId = ZoneId.systemDefault()): List<SleepWindow> {
@@ -97,19 +133,23 @@ data class SleepSchedule(
     fun requiresWindowBoundary(): Boolean =
         startMinute != endMinute || weekendStartMinute?.let { it != weekendEndMinute } == true
 
+    fun isObservationClosed(window: SleepWindow): Boolean =
+        closedObservationWindows.any { it.startMillis == window.startMillis }
+
     private fun rangeLabel(start: Int, end: Int): String =
         "%02d:%02d–%02d:%02d".format(start / 60, start % 60, end / 60, end % 60)
 
     private fun startMinuteFor(date: LocalDate): Int =
-        if (date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY)
+        if (holidayCalendar[date] ?: (date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY))
             weekendStartMinute ?: startMinute else startMinute
 
     private fun endMinuteFor(date: LocalDate): Int =
-        if (date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY)
+        if (holidayCalendar[date] ?: (date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY))
             weekendEndMinute ?: endMinute else endMinute
 
     companion object {
         private const val MINUTES_PER_DAY = 24 * 60
         const val CLASSIFICATION_LEAD_MILLIS = 15 * 60 * 1000L
+        const val SAVER_WAKE_CLASSIFICATION_GRACE_MILLIS = 16 * 60 * 60 * 1000L
     }
 }

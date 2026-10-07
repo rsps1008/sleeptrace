@@ -188,7 +188,8 @@ class MotionService : Service(), SensorEventListener2 {
             stopped = true
             transition { stopSelf() }; return
         }
-        SleepWindowScheduler.schedule(this, newSchedule)
+        SleepWindowScheduler.schedule(this, newSchedule,
+            saverMode = settings.recordingMode == RecordingMode.BATTERY_SAVER)
         val experiment = settings.experiment
         val modeChanged = configuredExperiment != experiment
         if (modeChanged) {
@@ -436,8 +437,9 @@ class MotionBoundaryReceiver : BroadcastReceiver() {
                 val activeSchedule = requireNotNull(schedule)
 
                 SleepWindowScheduler.clearDelivered(context)
-                SleepWindowScheduler.schedule(context, activeSchedule)
-                SleepTracker.syncSubscription(context, activeSchedule, enabled, System.currentTimeMillis())
+                SleepWindowScheduler.schedule(context, activeSchedule, saverMode = !stagesEnabled)
+                SleepTracker.syncSubscription(context, activeSchedule, enabled, System.currentTimeMillis(),
+                    saverWakeGrace = dependencies.motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
                 val inWindow = activeSchedule.windowAt(System.currentTimeMillis()) != null
                 val service = MotionService.active
                 if (service != null) {

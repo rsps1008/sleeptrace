@@ -15,7 +15,8 @@ object SleepObservationPolicy {
         previous: ObservationEnd?,
         samples: List<ClassificationSample>,
         now: Long,
-        nextStart: Long
+        nextStart: Long,
+        waitForWakeEvidence: Boolean = false
     ): ObservationEnd {
         if (previous?.closed == true) return previous
         val end = previous?.endMillis ?: window.endMillis
@@ -36,8 +37,12 @@ object SleepObservationPolicy {
         val wakeConfirmed = low.size >= 2 && firstLow != null &&
             low.last().timeMillis - firstLow >= WAKE_CONFIRMATION_SPAN &&
             now - low.last().timeMillis <= 10 * MINUTE &&
-            ordered.any { it.confidence >= 80 && it.timeMillis <= firstLow - 30 * MINUTE }
-        if (wakeConfirmed) return ObservationEnd(minOf(end, firstLow!!), true)
+            (waitForWakeEvidence || ordered.any { it.confidence >= 80 && it.timeMillis <= firstLow - 30 * MINUTE })
+        if (wakeConfirmed) return ObservationEnd(if (waitForWakeEvidence) firstLow!! else minOf(end, firstLow!!), true)
+
+        // Saver mode does not assume that the configured end is a wake-up. It waits for the
+        // passive, consecutive Sleep API wake reports and never schedules a wake-up itself.
+        if (waitForWakeEvidence && now >= end) return ObservationEnd(end, false)
 
         // Event time inside the window does not excuse a callback arriving after it expired.
         // Equality remains renewable: the boundary alarm may assess current sleep evidence.

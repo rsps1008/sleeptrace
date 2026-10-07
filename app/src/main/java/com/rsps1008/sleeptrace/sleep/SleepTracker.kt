@@ -40,20 +40,23 @@ object SleepTracker {
         }.also { subscriptionController = it }
     }
 
-    /** Keep segment delivery all day; request periodic classify events from 15 minutes before a sleep window through its end. */
+    /** Keep segment delivery all day; saver mode passively awaits a post-window waking classify event. */
     @SuppressLint("MissingPermission")
     fun syncSubscription(
         context: Context,
         schedule: SleepSchedule?,
         enabled: Boolean,
         nowMillis: Long,
-        force: Boolean = false
+        force: Boolean = false,
+        saverWakeGrace: Boolean = false
     ) {
         if (!enabled || schedule == null || !hasActivityRecognition(context)) {
             runCatching { unsubscribe(context) }
             return
         }
-        val requestMode = if (schedule.classificationWindowAt(nowMillis) != null) {
+        val classification = if (saverWakeGrace) schedule.saverClassificationWindowAt(nowMillis)
+        else schedule.classificationWindowAt(nowMillis)
+        val requestMode = if (classification != null) {
             SleepSegmentRequest.SEGMENT_AND_CLASSIFY_EVENTS
         } else SleepSegmentRequest.SEGMENT_EVENTS_ONLY
         controller(context).request(requestMode, force)

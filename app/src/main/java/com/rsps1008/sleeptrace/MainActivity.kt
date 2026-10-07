@@ -1026,8 +1026,10 @@ class MainActivity : AppCompatActivity() {
             MotionService.active?.refreshConfiguration()
             return@launch
         }
-        SleepWindowScheduler.schedule(this@MainActivity, schedule)
-        SleepTracker.syncSubscription(this@MainActivity, schedule, motionSettings.enabled, System.currentTimeMillis())
+        SleepWindowScheduler.schedule(this@MainActivity, schedule,
+            saverMode = motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
+        SleepTracker.syncSubscription(this@MainActivity, schedule, motionSettings.enabled, System.currentTimeMillis(),
+            saverWakeGrace = motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
         val now = System.currentTimeMillis()
         val stagesEnabled = motionSettings.recordingMode == RecordingMode.STAGES
         val shouldKeepService = stagesEnabled && SleepWindowScheduler.shouldRunForegroundService(schedule, now)
@@ -1050,7 +1052,8 @@ class MainActivity : AppCompatActivity() {
     private fun setupSchedule(schedule: SleepSchedule) = lifecycleScope.launch {
         preferences.saveSchedule(schedule)
         MotionService.active?.refreshConfiguration()
-        SleepTracker.syncSubscription(this@MainActivity, schedule, motionSettings.enabled, System.currentTimeMillis(), force = true)
+        SleepTracker.syncSubscription(this@MainActivity, schedule, motionSettings.enabled, System.currentTimeMillis(),
+            force = true, saverWakeGrace = motionSettings.recordingMode == RecordingMode.BATTERY_SAVER)
         WorkScheduler.schedule(this@MainActivity)
         ensureAutomaticRecording()
         guideBackgroundAccessIfNeeded()

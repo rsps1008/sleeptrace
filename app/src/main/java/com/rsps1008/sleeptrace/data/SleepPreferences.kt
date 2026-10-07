@@ -18,18 +18,21 @@ class SleepPreferences internal constructor(
     private val readSettings: suspend () -> Pair<SleepSchedule, Boolean>,
     private val writeSettings: suspend (SleepSchedule) -> Unit,
     private val applyObservation: (SleepSchedule) -> SleepSchedule,
+    private val holidayCalendar: () -> Map<java.time.LocalDate, Boolean> = { emptyMap() },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
     constructor(context: Context) : this(context, { SleepObservationWindows.apply(context, it) })
 
     /** Small injection seam for fixed-clock persistence and thread regression tests. */
     internal constructor(context: Context, observation: (SleepSchedule) -> SleepSchedule) : this(
-        { readAndroidSettings(context) }, { writeAndroidSettings(context, it) }, observation
+        { readAndroidSettings(context) }, { writeAndroidSettings(context, it) }, observation,
+        { TaiwanHolidayCalendar.refreshAndRead(context) }
     )
 
     suspend fun schedule(): SleepSchedule = withContext(ioDispatcher) {
         val (nominal, configured) = readSettings()
-        if (configured) applyObservation(nominal) else nominal
+        val calendarAware = nominal.copy(holidayCalendar = holidayCalendar())
+        if (configured) applyObservation(calendarAware) else calendarAware
     }
 
     suspend fun configured(): Boolean = withContext(ioDispatcher) { readSettings().second }

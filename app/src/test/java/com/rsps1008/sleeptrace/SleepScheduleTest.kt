@@ -73,6 +73,37 @@ class SleepScheduleTest {
         assertNull(schedule.classificationWindowAt(at(3, 12, 0), zone))
     }
 
+    @Test fun `saver classify subscription remains passive after the schedule until next start`() {
+        assertEquals(at(3, 1, 0), schedule.saverClassificationWindowAt(at(3, 12, 0), zone)?.startMillis)
+        assertTrue(schedule.isAfterWindowBeforeNextStart(at(3, 12, 0), zone))
+    }
+
+    @Test fun `saver has one start boundary and stops classify after waking evidence closes the night`() {
+        val boundary = requireNotNull(SleepWindowScheduler.nextBoundary(
+            schedule, at(2, 22, 0), zone, saverMode = true
+        ))
+        assertEquals(at(2, 23, 0), boundary.atMillis)
+        assertTrue(boundary.isWindowStart)
+        assertFalse(boundary.isClassificationStart)
+        assertFalse(boundary.isWindowEnd)
+
+        val night = schedule.windowForStartDate(LocalDate.of(2026, 10, 2), zone)
+        val closed = schedule.copy(closedObservationWindows = setOf(night))
+        assertNull(closed.saverClassificationWindowAt(at(3, 0, 0), zone))
+        // No intermediate/end wakeup is introduced; the next alarm is tomorrow's start.
+        assertEquals(at(3, 1, 0), SleepWindowScheduler.nextBoundary(closed, at(3, 0, 0), zone,
+            saverMode = true)?.atMillis)
+    }
+
+    @Test fun `Taiwan holiday calendar overrides weekends including a make-up workday`() {
+        val holiday = LocalDate.of(2026, 10, 5)
+        val makeUpWorkday = LocalDate.of(2026, 10, 3)
+        val calendarSchedule = schedule.copy(holidayCalendar = mapOf(holiday to true, makeUpWorkday to false))
+
+        assertEquals(at(5, 1, 0), calendarSchedule.windowForStartDate(holiday, zone).startMillis)
+        assertEquals(at(3, 23, 0), calendarSchedule.windowForStartDate(makeUpWorkday, zone).startMillis)
+    }
+
     @Test fun `foreground service is restricted to configured windows`() {
         assertTrue(SleepWindowScheduler.shouldRunForegroundService(schedule, at(2, 23, 30), zone))
         assertFalse(SleepWindowScheduler.shouldRunForegroundService(schedule, at(3, 12, 0), zone))
