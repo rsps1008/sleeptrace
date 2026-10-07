@@ -38,7 +38,12 @@ class SleepObservationRepositoryTest {
             if (!Files.exists(file)) return emptyMap()
             return Files.readAllLines(file).associate {
                 val v = it.split('|')
-                SleepWindow(v[0].toLong(), v[1].toLong()) to ObservationEnd(v[2].toLong(), v[3].toBoolean())
+                SleepWindow(v[0].toLong(), v[1].toLong()) to ObservationEnd(
+                    v[2].toLong(),
+                    v[3].toBoolean(),
+                    v.getOrNull(4)?.toBoolean() ?: false,
+                    v.getOrNull(5)?.toBoolean() ?: false
+                )
             }
         }
         override fun commit(updates: Map<SleepWindow, ObservationEnd>, removals: Set<SleepWindow>): Boolean {
@@ -46,7 +51,9 @@ class SleepObservationRepositoryTest {
             if (fail) return false
             val result = read().toMutableMap()
             removals.forEach(result::remove); result.putAll(updates)
-            Files.write(file, result.map { (w, end) -> "${w.startMillis}|${w.endMillis}|${end.endMillis}|${end.closed}" })
+            Files.write(file, result.map { (w, end) ->
+                "${w.startMillis}|${w.endMillis}|${end.endMillis}|${end.closed}|${end.dataInsufficient}|${end.segmentSettled}"
+            })
             return true
         }
     }
@@ -81,6 +88,28 @@ class SleepObservationRepositoryTest {
                 segments = { _, _ -> listOf(SleepSegment(at(60), at(470), 100)) })).schedule()
             assertTrue(effective.isObservationClosed(window))
             assertFalse(effective.isObservationDataInsufficient(window))
+        }
+    }
+
+    @Test fun `later saver segment extends provisional segment closure and reaches analysis`() = runBlocking {
+        Harness(now = at(500)).use { h ->
+            h.samples = emptyList()
+            val segments = mutableListOf(SleepSegment(at(60), at(360), 100))
+            val repository = h.repository(saver = true, segments = { _, _ -> segments })
+
+            val first = h.preferences(repository).schedule()
+            assertEquals(at(360), first.windowForStartDate(LocalDate.parse("2026-09-29"), zone).endMillis)
+            assertEquals(ObservationEnd(at(360), true, segmentSettled = true), h.disk.read()[window])
+
+            segments += SleepSegment(at(390), at(470), 100)
+            h.events.clear()
+            val extended = h.preferences(repository).schedule()
+            val settledWindow = extended.windowForStartDate(LocalDate.parse("2026-09-29"), zone)
+            assertEquals(at(470), settledWindow.endMillis)
+            assertEquals(ObservationEnd(at(470), true, segmentSettled = true), h.disk.read()[window])
+
+            val sessions = SleepAnalyzer.analyzeByWindow(segments, emptyList(), emptyList(), extended, listOf(settledWindow))
+            assertEquals(at(470), sessions.maxOf { it.endMillis })
         }
     }
 

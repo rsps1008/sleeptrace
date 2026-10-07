@@ -37,22 +37,26 @@ internal class SleepObservationRepository(
             val date = Instant.ofEpochMilli(window.startMillis).atZone(zone).toLocalDate()
             !nominal.isFullDayForStartDate(date) &&
                 now >= window.startMillis + (window.endMillis - window.startMillis) / 2 &&
-                    (records[window]?.closed != true || records[window]?.dataInsufficient == true)
+                    (records[window]?.closed != true || records[window]?.dataInsufficient == true ||
+                        records[window]?.segmentSettled == true)
         }
         val samples = if (windows.isEmpty()) emptyList() else recentSamples(windows.minOf { it.startMillis })
         val updates = mutableMapOf<SleepWindow, ObservationEnd>()
         windows.forEach { window ->
             val date = Instant.ofEpochMilli(window.startMillis).atZone(zone).toLocalDate()
             val nextStart = nominal.windowForStartDate(date.plusDays(1), zone).startMillis
-            val segment = recentSegments(window.startMillis, nextStart).lastOrNull {
-                it.startMillis < nextStart && it.endMillis > window.startMillis
-            }
+            val segmentEnd = recentSegments(window.startMillis, nextStart)
+                .asSequence()
+                .filter { it.startMillis < nextStart && it.endMillis > window.startMillis }
+                .maxOfOrNull { it.endMillis }
             val historical = waitForWakeEvidence && now - window.endMillis > 10 * 60_000L
             val settleEmpty = historical && now >= nextStart
-            val result = if (waitForWakeEvidence && segment != null) {
-                // A segment is itself Google sleep-and-awakening evidence. Do not call the night
-                // empty merely because Play services did not also deliver classifications.
-                ObservationEnd(minOf(nextStart, maxOf(window.startMillis + 1, segment.endMillis)), true)
+            val result = if (waitForWakeEvidence && segmentEnd != null) {
+                // Segment delivery can be delayed and split into several same-night events. Unlike
+                // a confirmed wake classification, this is a provisional closure: re-read it when
+                // a later callback arrives and extend the effective end without reopening a wake.
+                ObservationEnd(minOf(nextStart, maxOf(window.startMillis + 1, segmentEnd)), true,
+                    segmentSettled = true)
             } else SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart,
                 waitForWakeEvidence, historical, settleEmpty)
             if (result != records[window] && (result.closed || result.endMillis != window.endMillis || waitForWakeEvidence)) {

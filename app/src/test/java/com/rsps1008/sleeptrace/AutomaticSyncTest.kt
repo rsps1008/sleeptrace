@@ -141,6 +141,21 @@ class AutomaticSyncTest {
         assertEquals(SyncState.RETIRED, repo.rows.single().state)
     }
 
+    @Test fun `legacy saver schedule estimate for a data-insufficient night is withdrawn safely`() {
+        val window = SleepWindow(1_000, 7_201_000)
+        val pending = session().copy(id = "saver-schedule-${window.startMillis}-${window.endMillis}")
+        val synced = pending.copy(state = SyncState.SYNCED)
+
+        val pendingIds = staleSaverScheduleIds(listOf(pending), listOf(window))
+        assertEquals(setOf(pending.id), pendingIds)
+        assertEquals(SyncState.SKIPPED, mergeSleepSessions(listOf(pending), emptyList(), pendingIds).single().state)
+
+        val syncedIds = staleSaverScheduleIds(listOf(synced), listOf(window))
+        assertEquals(setOf(synced.id), syncedIds)
+        assertEquals(SyncState.RETIRED, mergeSleepSessions(listOf(synced), emptyList(), syncedIds).single().state)
+        assertTrue(staleSaverScheduleIds(listOf(pending.copy(manuallyEdited = true)), listOf(window)).isEmpty())
+    }
+
     @Test fun `cancellation propagates and does not become an ordinary failure`() = runBlocking {
         val repo = Repository(listOf(session()))
         try {

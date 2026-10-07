@@ -1,7 +1,13 @@
 package com.rsps1008.sleeptrace.sleep
 
 /** `dataInsufficient` settles an expired empty night without pretending it has wake evidence. */
-data class ObservationEnd(val endMillis: Long, val closed: Boolean, val dataInsufficient: Boolean = false)
+data class ObservationEnd(
+    val endMillis: Long,
+    val closed: Boolean,
+    val dataInsufficient: Boolean = false,
+    /** A segment can settle provisionally; later same-night segments may extend this end. */
+    val segmentSettled: Boolean = false
+)
 
 /** Uncalibrated engineering thresholds. Silence, motion stillness and missing reports are not sleep. */
 object SleepObservationPolicy {

@@ -79,7 +79,13 @@ class SleepReconciler(private val context: Context) {
         }
         val completedStarts = retainedCompleted.mapTo(mutableSetOf()) { it.startMillis }
         val earliestUncompleted = allRetainedWindows.firstOrNull { it.startMillis !in completedStarts }?.startMillis ?: now
-        val analysisStart = AutomaticWorkSignals.reconciliationStart(context, retentionStart, earliestUncompleted)
+        val ordinaryAnalysisStart = AutomaticWorkSignals.reconciliationStart(context, retentionStart, earliestUncompleted)
+        // Keep the bounded raw-event retention range in scope while old saver schedule estimates
+        // can still be found under a data-insufficient window. Otherwise a completed-progress
+        // cursor could place a version-14 fabricated row before analysisStart forever.
+        val dataInsufficientStart = allRetainedWindows.filter(schedule::isObservationDataInsufficient)
+            .minOfOrNull { it.startMillis }
+        val analysisStart = minOf(ordinaryAnalysisStart, dataInsufficientStart ?: ordinaryAnalysisStart)
         // Keep unresolved old sessions eligible for matching without loading all historical
         // sessions or deserializing awakeIntervals for completed history.
         val unresolved = store.sessions(
@@ -174,12 +180,15 @@ class SleepReconciler(private val context: Context) {
                 stageAlgorithmVersion = SleepStageEstimator.ALGORITHM_VERSION,
                 stageFeatureVersion = if (estimate.currentFeatureValidMinutes > 0) estimate.baselineFeatureVersion else old?.stageFeatureVersion)
         }
-        val invalidatedAutomaticSessionIds = if (ruleMigrationPending) {
+        val invalidatedAutomaticSessionIds = (if (ruleMigrationPending) {
             automaticSessionIdsEligibleForRuleRevocation(existingRecent, completedWindows.filter { window ->
                 segments.any { it.startMillis < window.end && it.endMillis > window.start } ||
                     samples.any { it.timeMillis >= window.start && it.timeMillis < window.end }
             })
-        } else emptySet()
+        } else emptySet()) + staleSaverScheduleIds(
+            existingRecent,
+            allRetainedWindows.filter(schedule::isObservationDataInsufficient)
+        )
         store.mergeCalculated(
             staged, analysisStart, now,
             invalidatedAutomaticSessionIds = invalidatedAutomaticSessionIds,
@@ -233,6 +242,25 @@ internal fun contiguousCompletedWindowEnd(windows: List<SleepWindow>, completedS
 /** A settled no-evidence night advances progress, but must never manufacture a saver session. */
 internal fun saverFallbackWindows(windows: List<SleepWindow>, schedule: SleepSchedule): List<SleepWindow> =
     windows.filterNot(schedule::isObservationDataInsufficient)
+
+/**
+ * Version 14 briefly created saver schedule estimates for expired nights with no Google event.
+ * Once such a night is now known to be data-insufficient, keep manual entries but withdraw only
+ * the exact automatic estimate. Synced rows use the established RETIRED deletion path.
+ */
+internal fun staleSaverScheduleIds(
+    sessions: List<SleepSession>,
+    dataInsufficientWindows: List<SleepWindow>
+): Set<String> = sessions.asSequence()
+    .filter { session ->
+        !session.manuallyEdited &&
+            session.state !in setOf(SyncState.SKIPPED, SyncState.RETIRED, SyncState.RETIRED_FAILED_PERMANENT) &&
+            dataInsufficientWindows.any { window ->
+                session.id == "saver-schedule-${window.startMillis}-${window.endMillis}"
+            }
+    }
+    .map { it.id }
+    .toSet()
 
 internal fun recordingModeChangedForExistingSession(
     session: SleepSession,
