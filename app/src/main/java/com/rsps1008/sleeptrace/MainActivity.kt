@@ -679,9 +679,11 @@ class MainActivity : AppCompatActivity() {
             updateSleepSection(snapshot.sessions, snapshot.latestClassification)
             homeViews.captureView.bind(snapshot.latestCapture)
             updateSchedule(requireNotNull(snapshot.schedule), snapshot.recordingEnabled,
-                snapshot.recordingMode, snapshot.exactAlarmAllowed)
+                snapshot.recordingMode, snapshot.exactAlarmAllowed, snapshot.subscriptionHealth.lastFailure,
+                snapshot.saverPendingStatus)
             updatePermissions(snapshot.healthGranted)
-            updateBackgroundAccess(snapshot.backgroundRestricted, snapshot.batteryExempt, snapshot.recordingMode)
+            updateBackgroundAccess(snapshot.backgroundRestricted, snapshot.batteryExempt,
+                snapshot.unusedAppPermissionsProtected, snapshot.recordingMode)
         }
         // The stable hierarchy preserves ScrollView's position naturally. Posting an old scrollY
         // here can undo a user scroll that happens between data binding and the next frame.
@@ -728,7 +730,9 @@ class MainActivity : AppCompatActivity() {
         schedule: SleepSchedule,
         recordingEnabled: Boolean,
         recordingMode: RecordingMode,
-        exactAlarmAllowed: Boolean
+        exactAlarmAllowed: Boolean,
+        subscriptionFailure: String?,
+        saverPendingStatus: String?
     ) {
         renderedSchedule = schedule
         fun range(start: Int, end: Int): String {
@@ -743,13 +747,18 @@ class MainActivity : AppCompatActivity() {
         homeViews.scheduleMode.setTextColor(color(if (recordingEnabled) R.color.status_success else R.color.status_neutral))
         homeViews.scheduleMode.backgroundTintList = android.content.res.ColorStateList.valueOf(
             color(if (recordingEnabled) R.color.status_success_bg else R.color.status_neutral_bg))
-        homeViews.scheduleDescription.text = when {
+        val baselineDescription = when {
             !recordingEnabled -> "目前不會自動偵測。恢復後會依設定時段記錄。"
             recordingMode == RecordingMode.BATTERY_SAVER -> "省電模式只使用 Google 睡眠訊號，不啟動加速度計，也不推估淺眠或深眠。"
             !schedule.requiresWindowBoundary() -> "目前設定為全天觀測，App 會依可用資料整理睡眠。"
             exactAlarmAllowed -> "觀測完成後自動整理；有持續睡眠訊號時，可能延長觀測。"
             else -> "尚未允許「鬧鐘與提醒」。時段開始時可能無法準時啟動，造成漏記。"
         }
+        homeViews.scheduleDescription.text = listOfNotNull(
+            baselineDescription,
+            subscriptionFailure?.let { "Sleep API 訂閱待重試：$it" },
+            saverPendingStatus
+        ).joinToString("\n")
         homeViews.windowAlarmAccess.visibility = if (recordingEnabled && schedule.requiresWindowBoundary() && !exactAlarmAllowed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) View.VISIBLE else View.GONE
         homeViews.recordingModeButton.text = if (recordingMode == RecordingMode.STAGES) {
             "記錄模式：睡眠階段"
@@ -814,13 +823,18 @@ class MainActivity : AppCompatActivity() {
     private fun updateBackgroundAccess(
         backgroundRestricted: Boolean,
         batteryExempt: Boolean,
+        unusedAppPermissionsProtected: Boolean?,
         recordingMode: RecordingMode
     ) {
-        val visible = recordingMode == RecordingMode.STAGES && (backgroundRestricted || !batteryExempt)
+        val batteryProblem = recordingMode == RecordingMode.STAGES && (backgroundRestricted || !batteryExempt)
+        val unusedAppProblem = unusedAppPermissionsProtected == false
+        val visible = batteryProblem || unusedAppProblem
         homeViews.backgroundSection.visibility = if (visible) View.VISIBLE else View.GONE
-        if (visible) homeViews.backgroundDescription.setText(
-            if (backgroundRestricted) R.string.battery_restricted_description else R.string.battery_optimized_description
-        )
+        if (visible) homeViews.backgroundDescription.text = when {
+            unusedAppProblem -> "系統可能在長期未開啟時暫停 App 並移除活動辨識權限。請在 App 資訊的「未使用 App 設定」關閉自動移除權限／暫停。"
+            backgroundRestricted -> getString(R.string.battery_restricted_description)
+            else -> getString(R.string.battery_optimized_description)
+        }
     }
 
     private fun updateBadge(view: TextView, state: SyncState) {
@@ -852,6 +866,7 @@ class MainActivity : AppCompatActivity() {
         lifecycle.withResumed {
             if (!backgroundSettingsOpen && motionSettings.enabled) {
                 when {
+                    backgroundAccess.unusedAppPermissionsProtected == false && !backgroundAccess.unusedAppGuideShown -> openUnusedAppSettings()
                     motionSettings.recordingMode == RecordingMode.STAGES &&
                         !backgroundAccess.batteryReady && !backgroundAccess.batteryGuideShown -> openBatterySettings()
                     motionSettings.recordingMode == RecordingMode.STAGES &&
@@ -900,6 +915,13 @@ class MainActivity : AppCompatActivity() {
         if (backgroundSettingsOpen) return
         backgroundAccess.batteryGuideShown = true
         launchBackgroundSettings(backgroundAccess.batteryIntents(), batterySettingsLauncher)
+    }
+
+    private fun openUnusedAppSettings() {
+        if (backgroundSettingsOpen) return
+        backgroundAccess.unusedAppGuideShown = true
+        showMessage("請在 App 資訊的「未使用 App 設定」關閉自動移除權限／暫停，避免長期未開啟後停止接收睡眠回報。")
+        launchBackgroundSettings(backgroundAccess.unusedAppPermissionIntents(), batterySettingsLauncher)
     }
 
     private fun openXiaomiSettings() {

@@ -32,9 +32,13 @@ object SleepTracker {
                 val client = ActivityRecognition.getClient(appContext)
                 val operation = if (mode == null) client.removeSleepSegmentUpdates(pendingIntent(appContext))
                     else client.requestSleepSegmentUpdates(pendingIntent(appContext), SleepSegmentRequest(mode))
-                operation.addOnCompleteListener(completionExecutor) { complete(it.isSuccessful) }
+                operation.addOnCompleteListener(completionExecutor) {
+                    SleepSubscriptionHealth.record(appContext, it.isSuccessful, it.exception?.message)
+                    complete(it.isSuccessful)
+                }
             } catch (error: RuntimeException) {
                 Log.w("SleepTracker", "睡眠訂閱更新失敗，等待下次更新", error)
+                SleepSubscriptionHealth.record(appContext, false, error.message)
                 complete(false)
             }
         }.also { subscriptionController = it }

@@ -19,6 +19,9 @@ class BackgroundAccess(private val context: Context) {
     val exempt: Boolean
         get() = context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
     val batteryReady: Boolean get() = !restricted && exempt
+    /** Android 11+ query; false means Android may pause the unused app and revoke runtime permissions. */
+    val unusedAppPermissionsProtected: Boolean?
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) context.packageManager.isAutoRevokeWhitelisted else null
     val isXiaomi: Boolean get() = listOf(Build.MANUFACTURER, Build.BRAND).any {
         it.equals("xiaomi", true) || it.equals("redmi", true) || it.equals("poco", true)
     }
@@ -30,6 +33,9 @@ class BackgroundAccess(private val context: Context) {
     var xiaomiGuideShown: Boolean
         get() = prefs.getBoolean("xiaomi_guide_shown", false)
         set(value) = prefs.edit { putBoolean("xiaomi_guide_shown", value) }
+    var unusedAppGuideShown: Boolean
+        get() = prefs.getBoolean("unused_app_guide_shown", false)
+        set(value) = prefs.edit { putBoolean("unused_app_guide_shown", value) }
 
     private fun appDetails() = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:${context.packageName}".toUri())
 
@@ -51,4 +57,6 @@ class BackgroundAccess(private val context: Context) {
         appDetails(),
         Intent(Settings.ACTION_SETTINGS)
     )
+
+    fun unusedAppPermissionIntents(): List<Intent> = listOf(appDetails(), Intent(Settings.ACTION_SETTINGS))
 }

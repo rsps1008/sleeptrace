@@ -13,11 +13,13 @@ class SleepReconcileWorker(context: Context, parameters: WorkerParameters) : Cor
     override suspend fun doWork(): Result {
         return try {
             SleepReconciler(applicationContext).reconcile()
+            runRecordingMaintenance(applicationContext)
             val dependencies = applicationContext.sleepDependencies()
             val outcome = dependencies.healthSync.syncPendingOutcome()
-            if (dependencies.preferences.configured() && dependencies.store.hasReconciliationDirty()) {
-                Result.retry()
-            } else when (outcome) {
+            // An open saver night is intentionally dirty until waking evidence arrives. Retrying
+            // every backoff interval would turn "wait passively" into polling; the next Sleep API
+            // callback, foreground launch, or this existing daily worker will revisit it.
+            when (outcome) {
                 SyncOutcome.SUCCESS -> Result.success()
                 SyncOutcome.RETRY -> Result.retry()
                 SyncOutcome.FAILURE -> Result.failure()

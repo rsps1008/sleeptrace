@@ -11,6 +11,7 @@ import com.rsps1008.sleeptrace.motion.SleepWindowScheduler
 import com.rsps1008.sleeptrace.motion.CaptureDiagnostics
 import com.rsps1008.sleeptrace.motion.CaptureUpdates
 import com.rsps1008.sleeptrace.motion.RecordingMode
+import com.rsps1008.sleeptrace.sleep.SleepSubscriptionHealth
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -31,7 +32,10 @@ data class HomeSnapshot(
     val recordingMode: RecordingMode,
     val backgroundRestricted: Boolean,
     val batteryExempt: Boolean,
-    val exactAlarmAllowed: Boolean
+    val unusedAppPermissionsProtected: Boolean?,
+    val exactAlarmAllowed: Boolean,
+    val subscriptionHealth: SleepSubscriptionHealth,
+    val saverPendingStatus: String?
 )
 
 /** Owns homepage data loading so activity rendering stays separate from repository access. */
@@ -53,18 +57,35 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     val snapshot = withContext(Dispatchers.IO) {
                         val configured = preferences.configured()
                         val schedule = if (configured) preferences.schedule() else null
+                        val latest = store.latestSample()
+                        val sessions = store.sessions(limit = HOME_SESSION_LIMIT, includeAwakeIntervals = false)
+                        val now = System.currentTimeMillis()
+                        val saverPending = schedule?.takeIf { motionSettings.recordingMode == RecordingMode.BATTERY_SAVER }
+                            ?.saverClassificationWindowAt(now)
+                            ?.takeIf { schedule.isAfterWindowBeforeNextStart(now) }
+                            ?.let { window ->
+                                if ((latest?.timeMillis ?: Long.MIN_VALUE) >= window.startMillis) "等待 Google 起床回報"
+                                else "尚未收到 Google 睡眠證據"
+                            } ?: sessions.firstOrNull { it.state in setOf(
+                                com.rsps1008.sleeptrace.sleep.SyncState.PENDING,
+                                com.rsps1008.sleeptrace.sleep.SyncState.SYNCING,
+                                com.rsps1008.sleeptrace.sleep.SyncState.FAILED_RETRYABLE
+                            ) }?.let { "睡眠已整理，等待同步" }
                         HomeSnapshot(
                             configured = configured,
                             schedule = schedule,
-                            sessions = store.sessions(limit = HOME_SESSION_LIMIT, includeAwakeIntervals = false),
-                            latestClassification = store.latestSample(),
+                            sessions = sessions,
+                            latestClassification = latest,
                             latestCapture = dependencies.motionStore.latestCapture(),
                             healthGranted = healthSync.hasWritePermission(),
                             recordingEnabled = motionSettings.enabled,
                             recordingMode = motionSettings.recordingMode,
                             backgroundRestricted = backgroundAccess.restricted,
                             batteryExempt = backgroundAccess.exempt,
-                            exactAlarmAllowed = SleepWindowScheduler.hasExactAlarmAccess(getApplication())
+                            unusedAppPermissionsProtected = backgroundAccess.unusedAppPermissionsProtected,
+                            exactAlarmAllowed = SleepWindowScheduler.hasExactAlarmAccess(getApplication()),
+                            subscriptionHealth = SleepSubscriptionHealth.read(getApplication()),
+                            saverPendingStatus = saverPending
                         )
                     }
                     mutableState.value = snapshot

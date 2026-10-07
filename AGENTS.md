@@ -2,6 +2,12 @@
 
 ## 記錄模式與雙向 Sleep API 備援（2026-10-04）
 
+### 補算進度與背景健康（2026-10-07）
+
+- `AutomaticWorkSignals` 同時保存最早未整理原始事件 watermark 與最後成功完成的睡眠窗。Sleep API 延遲回報會以事件時間將 watermark 往回推；reconcile 最多讀取原始事件保留的 14 天，只有 session 合併／SQLite 寫入完成且 generation 未變才推進窗口進度並清除 watermark，不能以固定 48 小時範圍跳過漏夜。
+- 既有每日 `SleepReconcileWorker` 完成整理後執行一次低頻背景健康檢查：活動辨識權限、Sleep API 訂閱、下一個睡眠窗開始鬧鐘。訂閱結果會保存最後成功時間或錯誤文字；失敗由下一個自然觸發或每日 Worker 重試，不建立高頻輪詢。公開 API 沒有可靠的已註冊查詢，因此成功狀態僅代表最近一次 request 成功，不能假稱永久訂閱仍存在。
+- 首頁的省電模式會區分等待 Google 起床回報、尚未收到 Google 睡眠證據與睡眠已整理等待同步。Android 11 以上實讀 `PackageManager.isAutoRevokeWhitelisted`；未豁免時首次引導至 App 資訊頁關閉未使用 App 的自動移除權限／暫停。小米自啟動仍無公開可讀取狀態，不能顯示已啟用。
+
 - 正式 reconciliation／分期版本為 `ALGORITHM_VERSION=14`。首頁可切換「睡眠階段」與「省電」模式；預設及既有安裝沿用睡眠階段模式。省電模式仍維持排程、Sleep API 訂閱、整理及 Health Connect 同步，但不啟動 `MotionService`／加速度計、不讀動作摘要參與本次整理，也不推估 LIGHT／DEEP。
 - 兩種模式共用同一候選流程：有 SleepSegmentEvent 時以區段為主，即使完全沒有 SleepClassifyEvent 仍可在觀測窗口完成後結算；整晚沒有區段時，才以 confidence ≥ 80 的 SleepClassifyEvent 建立至少 30 分鐘的備援 session，尾端最多延伸至最後高分後 20 分鐘，低分區間仍輸出 AWAKE。睡眠階段模式兩者都沒有時，排程、螢幕關閉或手機靜止不得自行建立睡眠。省電模式的結束時間不是硬上限：只在每晚睡眠窗開始安排一次鬧鐘以訂閱分類，之後沒有預熱、中途或結束喚醒；被動等待 Google Play services 的分類，只有兩筆相隔至少 5 分鐘的新鮮低信心／清醒回報才關閉，隨即改回僅收區段直到下一晚。沒有更佳 Google 候選時，才用設定起點至該起床回報建立參考分數 0 的粗略排程估計。
 - 省電模式的 Health Connect 階段只輸出一般 `SLEEPING` 與有證據的 `AWAKE`，詳情只顯示睡眠／清醒時間並明示不推估淺眠、深眠；不能把一般睡眠改標為 LIGHT。睡眠階段模式才以既有加速度摘要輸出 LIGHT／DEEP。

@@ -71,7 +71,9 @@ class SleepReconciler(private val context: Context) {
             schedule.takeIf { dependencies.motionSettings.enabled && SleepTracker.hasActivityRecognition(context) },
             saverMode = saverMode)
         val now = System.currentTimeMillis()
-        val analysisStart = now - RECENT_ANALYSIS_MILLIS
+        val analysisStart = AutomaticWorkSignals.reconciliationStart(
+            context, now - RAW_EVENT_RETENTION_MILLIS
+        )
         // Keep unresolved old sessions eligible for matching without loading all historical
         // sessions or deserializing awakeIntervals for completed history.
         val unresolved = store.sessions(
@@ -202,11 +204,14 @@ class SleepReconciler(private val context: Context) {
                     SleepStageEstimator.ALGORITHM_VERSION,
                     if (estimate.currentFeatureValidMinutes > 0) estimate.baselineFeatureVersion else session.stageFeatureVersion)
             }
-        store.markReconciled(capturedGeneration)
+        // Advance only after all local calculation and database writes above completed.  A raw
+        // callback arriving during this run increments generation and deliberately leaves its
+        // old timestamp pending for the next worker run.
+        store.markReconciled(capturedGeneration, completedWindows.maxOfOrNull { it.endMillis })
     }
     companion object {
         private val mutex = Mutex()
-        private const val RECENT_ANALYSIS_MILLIS = 48L * 60 * 60 * 1000
+        private const val RAW_EVENT_RETENTION_MILLIS = 14L * 24 * 60 * 60 * 1000
         private val RECONCILIATION_STATES = setOf(
             SyncState.PENDING, SyncState.SYNCING, SyncState.FAILED_RETRYABLE
         )

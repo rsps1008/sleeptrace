@@ -60,7 +60,8 @@ class SleepStore(context: Context) {
 
     fun hasReconciliationDirty(): Boolean = AutomaticWorkSignals.isDirty(appContext)
 
-    fun markReconciled(generation: Long) = AutomaticWorkSignals.markReconciled(appContext, generation)
+    fun markReconciled(generation: Long, completedWindowEndMillis: Long? = null) =
+        AutomaticWorkSignals.markReconciled(appContext, generation, completedWindowEndMillis)
 
     fun session(id: String, includeAwakeIntervals: Boolean = true): SleepSession? {
         migrateSessions()
@@ -171,7 +172,7 @@ class SleepStore(context: Context) {
     fun appendSegments(events: List<SleepSegment>) {
         migrateRawEvents()
         eventStore.append(segments = events)
-        if (events.isNotEmpty()) AutomaticWorkSignals.markDirty(appContext)
+        if (events.isNotEmpty()) AutomaticWorkSignals.markDirty(appContext, events.minOf { it.startMillis })
     }
 
     private fun legacySamples(): List<ClassificationSample> = readArray(samplesKey).map {
@@ -183,7 +184,7 @@ class SleepStore(context: Context) {
     fun appendSamples(events: List<ClassificationSample>) {
         migrateRawEvents()
         eventStore.append(samples = events)
-        if (events.isNotEmpty()) AutomaticWorkSignals.markDirty(appContext)
+        if (events.isNotEmpty()) AutomaticWorkSignals.markDirty(appContext, events.minOf { it.timeMillis })
     }
 
     fun usageSnapshot(windowStartMillis: Long, windowEndMillis: Long): UsageSnapshot? {
