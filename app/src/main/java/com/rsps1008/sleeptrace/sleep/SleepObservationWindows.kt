@@ -16,6 +16,7 @@ internal object SleepObservationWindows {
     internal fun apply(context: Context, nominal: SleepSchedule): SleepSchedule = SleepObservationRepository(
         SharedPreferencesObservationPersistence(context.getSharedPreferences("sleeptrace_motion", Context.MODE_PRIVATE)),
         recentSamples = context.sleepDependencies().store::recentSamples,
+        recentSegments = { start, end -> context.sleepDependencies().store.segments(start, end) },
         markDirty = { AutomaticWorkSignals.markDirty(context) },
         onClosed = {
             // Async refresh never waits for a service callback while the repository lock is held.

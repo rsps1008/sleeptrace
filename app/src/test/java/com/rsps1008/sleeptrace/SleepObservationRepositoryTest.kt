@@ -58,15 +58,30 @@ class SleepObservationRepositoryTest {
         var samples = woke
         var queryAccess: () -> Unit = {}
         var dirtyAction: () -> Unit = {}
-        fun repository(clock: () -> Long = { now }) = SleepObservationRepository(disk,
+        fun repository(
+            clock: () -> Long = { now },
+            saver: Boolean = false,
+            segments: (Long, Long) -> List<SleepSegment> = { _, _ -> emptyList() }
+        ) = SleepObservationRepository(disk,
             recentSamples = { since -> queryAccess(); events += "query"; samples.filter { it.timeMillis >= since } },
             markDirty = { events += "dirty"; dirtyAction() },
-            onClosed = { events += "closed"; events += "refresh"; events += "reconcile" }, clock = clock, zone = zone)
+            onClosed = { events += "closed"; events += "refresh"; events += "reconcile" }, clock = clock, zone = zone,
+            waitForWakeEvidence = saver, recentSegments = segments)
         fun preferences(repository: SleepObservationRepository = repository()) = SleepPreferences(
             readSettings = { schedule to true }, writeSettings = { schedule = it }, applyObservation = repository::apply)
         fun seed(w: SleepWindow, end: ObservationEnd) { assertTrue(disk.commit(mapOf(w to end), emptySet())); events.clear() }
         fun reload() { disk = Disk(file, events) }
         override fun close() { Files.deleteIfExists(file); Files.deleteIfExists(file.parent) }
+    }
+
+    @Test fun `saver segment prevents data-insufficient state when classifications are absent`() = runBlocking {
+        Harness(now = at(3_000)).use { h ->
+            h.samples = emptyList()
+            val effective = h.preferences(h.repository(saver = true,
+                segments = { _, _ -> listOf(SleepSegment(at(60), at(470), 100)) })).schedule()
+            assertTrue(effective.isObservationClosed(window))
+            assertFalse(effective.isObservationDataInsufficient(window))
+        }
     }
 
     @Test fun `midnight and nonmidnight all-day settings ignore wake evidence via preferences`() = runBlocking {
@@ -224,8 +239,8 @@ class SleepObservationRepositoryTest {
             val closedCommitted = CountDownLatch(1)
             val olderStarted = CountDownLatch(1)
             h.dirtyAction = { closedCommitted.countDown(); check(olderStarted.await(10, TimeUnit.SECONDS)) }
-            val newer = h.repository { at(515) }
-            val older = h.repository { at(500) }
+            val newer = h.repository(clock = { at(515) })
+            val older = h.repository(clock = { at(500) })
             val executor = Executors.newFixedThreadPool(2)
             try {
                 val first = executor.submit<SleepSchedule> { newer.apply(nominal) }

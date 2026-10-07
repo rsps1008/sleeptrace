@@ -124,7 +124,7 @@ class SleepReconciler(private val context: Context) {
         // The user's selected saver mode is a schedule-based, deliberately coarse fallback.
         // Stages mode still requires Sleep API evidence and must never manufacture a session.
         val scheduleBase = if (stagesEnabled) emptyList() else SleepAnalyzer.scheduledEstimateByWindow(
-            completedWindows.filter { window ->
+            saverFallbackWindows(completedWindows, schedule).filter { window ->
                 apiBase.none { it.startMillis < window.endMillis && it.endMillis > window.startMillis }
             }, samples
         )
@@ -229,6 +229,10 @@ class SleepReconciler(private val context: Context) {
 internal fun contiguousCompletedWindowEnd(windows: List<SleepWindow>, completedStarts: Set<Long>): Long? = windows.asSequence()
     .takeWhile { it.startMillis in completedStarts }
     .lastOrNull()?.endMillis
+
+/** A settled no-evidence night advances progress, but must never manufacture a saver session. */
+internal fun saverFallbackWindows(windows: List<SleepWindow>, schedule: SleepSchedule): List<SleepWindow> =
+    windows.filterNot(schedule::isObservationDataInsufficient)
 
 internal fun recordingModeChangedForExistingSession(
     session: SleepSession,

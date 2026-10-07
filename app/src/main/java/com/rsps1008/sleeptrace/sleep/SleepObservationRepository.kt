@@ -17,7 +17,8 @@ internal class SleepObservationRepository(
     private val onClosed: () -> Unit,
     private val clock: () -> Long = System::currentTimeMillis,
     private val zone: ZoneId = ZoneId.systemDefault(),
-    private val waitForWakeEvidence: Boolean = false
+    private val waitForWakeEvidence: Boolean = false,
+    private val recentSegments: (Long, Long) -> List<SleepSegment> = { _, _ -> emptyList() }
 ) {
     internal fun apply(nominal: SleepSchedule): SleepSchedule = synchronized(lock) {
         // Sample time inside the shared lock, after any earlier refresh finished persisting.
@@ -43,9 +44,16 @@ internal class SleepObservationRepository(
         windows.forEach { window ->
             val date = Instant.ofEpochMilli(window.startMillis).atZone(zone).toLocalDate()
             val nextStart = nominal.windowForStartDate(date.plusDays(1), zone).startMillis
+            val segment = recentSegments(window.startMillis, nextStart).lastOrNull {
+                it.startMillis < nextStart && it.endMillis > window.startMillis
+            }
             val historical = waitForWakeEvidence && now - window.endMillis > 10 * 60_000L
             val settleEmpty = historical && now >= nextStart
-            val result = SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart,
+            val result = if (waitForWakeEvidence && segment != null) {
+                // A segment is itself Google sleep-and-awakening evidence. Do not call the night
+                // empty merely because Play services did not also deliver classifications.
+                ObservationEnd(minOf(nextStart, maxOf(window.startMillis + 1, segment.endMillis)), true)
+            } else SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart,
                 waitForWakeEvidence, historical, settleEmpty)
             if (result != records[window] && (result.closed || result.endMillis != window.endMillis || waitForWakeEvidence)) {
                 updates[window] = result
