@@ -113,6 +113,27 @@ class SleepObservationRepositoryTest {
         }
     }
 
+    @Test fun `wake classifications finalize a provisional segment before later segment arrives`() = runBlocking {
+        Harness(now = at(420)).use { h ->
+            val segments = mutableListOf(SleepSegment(at(60), at(360), 100))
+            h.samples = emptyList()
+            val repository = h.repository(saver = true, segments = { _, _ -> segments })
+            h.preferences(repository).schedule()
+            assertEquals(ObservationEnd(at(360), true, segmentSettled = true), h.disk.read()[window])
+
+            h.samples = listOf(sample(400, 10), sample(410, 10))
+            assertEquals(at(400), h.preferences(repository).schedule()
+                .windowForStartDate(LocalDate.parse("2026-09-29"), zone).endMillis)
+            assertEquals(ObservationEnd(at(400), true), h.disk.read()[window])
+
+            segments += SleepSegment(at(430), at(470), 100)
+            h.now = at(500)
+            assertEquals(at(400), h.preferences(repository).schedule()
+                .windowForStartDate(LocalDate.parse("2026-09-29"), zone).endMillis)
+            assertEquals(ObservationEnd(at(400), true), h.disk.read()[window])
+        }
+    }
+
     @Test fun `midnight and nonmidnight all-day settings ignore wake evidence via preferences`() = runBlocking {
         for (hour in listOf(0, 23)) Harness(SleepSchedule(hour * 60, hour * 60)).use { h ->
             val w = h.schedule.windowForStartDate(LocalDate.parse("2026-09-29"), zone)

@@ -38,7 +38,8 @@ internal class SleepObservationRepository(
             !nominal.isFullDayForStartDate(date) &&
                 now >= window.startMillis + (window.endMillis - window.startMillis) / 2 &&
                     (records[window]?.closed != true || records[window]?.dataInsufficient == true ||
-                        records[window]?.segmentSettled == true)
+                        (waitForWakeEvidence && (records[window]?.segmentSettled == true ||
+                            records[window]?.sourceUnknown == true)))
         }
         val samples = if (windows.isEmpty()) emptyList() else recentSamples(windows.minOf { it.startMillis })
         val updates = mutableMapOf<SleepWindow, ObservationEnd>()
@@ -51,13 +52,21 @@ internal class SleepObservationRepository(
                 .maxOfOrNull { it.endMillis }
             val historical = waitForWakeEvidence && now - window.endMillis > 10 * 60_000L
             val settleEmpty = historical && now >= nextStart
-            val result = if (waitForWakeEvidence && segmentEnd != null) {
+            val previous = records[window]
+            val wake = if (waitForWakeEvidence) SleepObservationPolicy.confirmedSaverWake(
+                window, samples, now, nextStart, historical
+            ) else null
+            val result = if (wake != null) {
+                ObservationEnd(wake, true)
+            } else if (waitForWakeEvidence && segmentEnd != null) {
                 // Segment delivery can be delayed and split into several same-night events. Unlike
                 // a confirmed wake classification, this is a provisional closure: re-read it when
                 // a later callback arrives and extend the effective end without reopening a wake.
                 ObservationEnd(minOf(nextStart, maxOf(window.startMillis + 1, segmentEnd)), true,
                     segmentSettled = true)
-            } else SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart,
+            } else SleepObservationPolicy.resolve(window,
+                previous.takeUnless { it?.segmentSettled == true || it?.sourceUnknown == true },
+                samples, now, nextStart,
                 waitForWakeEvidence, historical, settleEmpty)
             if (result != records[window] && (result.closed || result.endMillis != window.endMillis || waitForWakeEvidence)) {
                 updates[window] = result

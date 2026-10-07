@@ -66,6 +66,43 @@ class ObservationPreferencesPersistenceTest {
         assertEquals(listOf("commit_failure", "commit_success", "commit_success", "dirty", "closed"), backend.events)
     }
 
+    @Test fun `old wake string is reclassified as a provisional segment and later segment extends it`() {
+        val backend = Backend()
+        backend.values[key] = "${at(360)}:true:wake" // Previous release also used wake for segment closures.
+        val storage = SharedPreferencesObservationPersistence(backend.instance())
+        val segments = mutableListOf(SleepSegment(at(60), at(360), 100))
+        val repository = SleepObservationRepository(storage, { emptyList() }, {}, {}, { at(500) }, zone,
+            waitForWakeEvidence = true, recentSegments = { _, _ -> segments.toList() })
+
+        assertTrue(storage.read()[window]!!.sourceUnknown)
+        val first = repository.apply(SleepSchedule(23 * 60, 7 * 60))
+        assertEquals(at(360), first.windowForStartDate(LocalDate.of(2026, 9, 29), zone).endMillis)
+        assertEquals("${at(360)}:true:segment", backend.values[key])
+
+        segments += SleepSegment(at(390), at(470), 100)
+        val extended = repository.apply(SleepSchedule(23 * 60, 7 * 60))
+        assertEquals(at(470), extended.windowForStartDate(LocalDate.of(2026, 9, 29), zone).endMillis)
+        assertEquals("${at(470)}:true:segment", backend.values[key])
+        assertFalse(storage.read()[window]!!.sourceUnknown)
+    }
+
+    @Test fun `old source-less closure with confirmed waking is upgraded to final wake`() {
+        val backend = Backend()
+        backend.values[key] = "${at(400)}:true"
+        val storage = SharedPreferencesObservationPersistence(backend.instance())
+        val samples = listOf(
+            ClassificationSample(at(400), 10, 0, 0),
+            ClassificationSample(at(410), 10, 0, 0)
+        )
+        val repository = SleepObservationRepository(storage, { samples }, {}, {}, { at(500) }, zone,
+            waitForWakeEvidence = true,
+            recentSegments = { _, _ -> listOf(SleepSegment(at(60), at(470), 100)) })
+
+        val effective = repository.apply(SleepSchedule(23 * 60, 7 * 60))
+        assertEquals(at(400), effective.windowForStartDate(LocalDate.of(2026, 9, 29), zone).endMillis)
+        assertEquals("${at(400)}:true:confirmed-wake", backend.values[key])
+    }
+
     @Test fun `failed rollback remains an explicit failure and never publishes completion`() {
         val backend = Backend()
         backend.values[key] = "${at(505)}:false"

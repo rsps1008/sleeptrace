@@ -6,7 +6,9 @@ data class ObservationEnd(
     val closed: Boolean,
     val dataInsufficient: Boolean = false,
     /** A segment can settle provisionally; later same-night segments may extend this end. */
-    val segmentSettled: Boolean = false
+    val segmentSettled: Boolean = false,
+    /** Old persisted closures did not distinguish a wake from a segment. */
+    val sourceUnknown: Boolean = false
 )
 
 /** Uncalibrated engineering thresholds. Silence, motion stillness and missing reports are not sleep. */
@@ -29,11 +31,8 @@ object SleepObservationPolicy {
     ): ObservationEnd {
         if (previous?.closed == true && !previous.dataInsufficient) return previous
         val end = previous?.endMillis ?: window.endMillis
-        val ordered = samples.filter { it.timeMillis >= window.startMillis && it.timeMillis < minOf(now + 1, nextStart) }
-            .distinctBy { it.timeMillis }.sortedBy { it.timeMillis }
-        // Morning only: a brief nocturnal awakening must not close the night's observation.
-        val morning = window.startMillis + (window.endMillis - window.startMillis) / 2
-        val firstLow = if (historicalWakeEvidence) firstHistoricalWake(ordered, morning) else latestWake(ordered, morning)
+        val ordered = orderedSamples(window, samples, now, nextStart)
+        val firstLow = wakeStart(window, ordered, historicalWakeEvidence)
         val wakeConfirmed = firstLow != null && (historicalWakeEvidence ||
             now - ordered.last { it.timeMillis >= firstLow && it.confidence <= 20 }.timeMillis <= 10 * MINUTE) &&
             (waitForWakeEvidence || ordered.any { it.confidence >= 80 && it.timeMillis <= firstLow - 30 * MINUTE })
@@ -56,6 +55,31 @@ object SleepObservationPolicy {
             return ObservationEnd(minOf(nextStart, maxOf(end, latest!!.timeMillis + EXTENSION)), false)
         }
         return ObservationEnd(end, now >= end)
+    }
+
+    /** Saver closures may be rechecked without treating a provisional segment as a final wake. */
+    internal fun confirmedSaverWake(
+        window: SleepWindow,
+        samples: List<ClassificationSample>,
+        now: Long,
+        nextStart: Long,
+        historical: Boolean
+    ): Long? {
+        val ordered = orderedSamples(window, samples, now, nextStart)
+        val firstLow = wakeStart(window, ordered, historical) ?: return null
+        val lastLow = ordered.last { it.timeMillis >= firstLow && it.confidence <= 20 }
+        return firstLow.takeIf { historical || now - lastLow.timeMillis <= 10 * MINUTE }
+    }
+
+    private fun orderedSamples(
+        window: SleepWindow, samples: List<ClassificationSample>, now: Long, nextStart: Long
+    ) = samples.filter { it.timeMillis >= window.startMillis && it.timeMillis < minOf(now + 1, nextStart) }
+        .distinctBy { it.timeMillis }.sortedBy { it.timeMillis }
+
+    private fun wakeStart(window: SleepWindow, ordered: List<ClassificationSample>, historical: Boolean): Long? {
+        // Morning only: a brief nocturnal awakening must not close the night's observation.
+        val morning = window.startMillis + (window.endMillis - window.startMillis) / 2
+        return if (historical) firstHistoricalWake(ordered, morning) else latestWake(ordered, morning)
     }
 
     /** Historical import is chronological: later daytime reports cannot erase an earlier wake. */

@@ -36,11 +36,14 @@ internal class SharedPreferencesObservationPersistence(private val prefs: Shared
             val start = parts.getOrNull(0)?.toLongOrNull() ?: return@mapNotNull null
             val end = parts.getOrNull(1)?.toLongOrNull() ?: return@mapNotNull null
             val actual = values.getOrNull(0)?.toLongOrNull() ?: return@mapNotNull null
+            val source = values.getOrNull(2)
+            val closed = values.getOrNull(1) == "true"
             SleepWindow(start, end) to ObservationEnd(
                 actual,
-                values.getOrNull(1) == "true",
-                values.getOrNull(2) == "insufficient",
-                values.getOrNull(2) == "segment"
+                closed,
+                source == "insufficient",
+                source == "segment",
+                closed && (source == null || source == "wake")
             )
         }.toMap()
 
@@ -53,7 +56,7 @@ internal class SharedPreferencesObservationPersistence(private val prefs: Shared
             "${result.endMillis}:${result.closed}:${when {
                 result.dataInsufficient -> "insufficient"
                 result.segmentSettled -> "segment"
-                else -> "wake"
+                else -> "confirmed-wake"
             }}") }
         if (editor.commit()) return true
         // SharedPreferences can update its in-memory map even when the disk commit fails.
