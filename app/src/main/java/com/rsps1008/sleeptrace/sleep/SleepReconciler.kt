@@ -71,9 +71,15 @@ class SleepReconciler(private val context: Context) {
             schedule.takeIf { dependencies.motionSettings.enabled && SleepTracker.hasActivityRecognition(context) },
             saverMode = saverMode)
         val now = System.currentTimeMillis()
-        val analysisStart = AutomaticWorkSignals.reconciliationStart(
-            context, now - RAW_EVENT_RETENTION_MILLIS
-        )
+        val retentionStart = now - RAW_EVENT_RETENTION_MILLIS
+        val allRetainedWindows = schedule.windowsBetween(retentionStart, now)
+        val stagesEnabled = dependencies.motionSettings.recordingMode == RecordingMode.STAGES
+        val retainedCompleted = SleepUsageSnapshot.completedWindows(allRetainedWindows, now).filter { window ->
+            stagesEnabled || schedule.isObservationClosed(window)
+        }
+        val completedStarts = retainedCompleted.mapTo(mutableSetOf()) { it.startMillis }
+        val earliestUncompleted = allRetainedWindows.firstOrNull { it.startMillis !in completedStarts }?.startMillis ?: now
+        val analysisStart = AutomaticWorkSignals.reconciliationStart(context, retentionStart, earliestUncompleted)
         // Keep unresolved old sessions eligible for matching without loading all historical
         // sessions or deserializing awakeIntervals for completed history.
         val unresolved = store.sessions(
@@ -99,7 +105,6 @@ class SleepReconciler(private val context: Context) {
         val allSegments = store.segments(evidenceStart, now)
         val samples = store.recentSamples(evidenceStart)
         val windows = schedule.windowsBetween(evidenceStart, now)
-        val stagesEnabled = dependencies.motionSettings.recordingMode == RecordingMode.STAGES
         val completedWindows = SleepUsageSnapshot.completedWindows(windows, now).filter { window ->
             stagesEnabled || schedule.isObservationClosed(window)
         }
@@ -207,7 +212,10 @@ class SleepReconciler(private val context: Context) {
         // Advance only after all local calculation and database writes above completed.  A raw
         // callback arriving during this run increments generation and deliberately leaves its
         // old timestamp pending for the next worker run.
-        store.markReconciled(capturedGeneration, completedWindows.maxOfOrNull { it.endMillis })
+        // Never jump over a saver night that is still waiting for wake evidence. The persisted
+        // cursor advances only to a continuous prefix of retained nightly windows.
+        val contiguousCompletedEnd = contiguousCompletedWindowEnd(allRetainedWindows, completedStarts)
+        store.markReconciled(capturedGeneration, contiguousCompletedEnd)
     }
     companion object {
         private val mutex = Mutex()
@@ -217,6 +225,10 @@ class SleepReconciler(private val context: Context) {
         )
     }
 }
+
+internal fun contiguousCompletedWindowEnd(windows: List<SleepWindow>, completedStarts: Set<Long>): Long? = windows.asSequence()
+    .takeWhile { it.startMillis in completedStarts }
+    .lastOrNull()?.endMillis
 
 internal fun recordingModeChangedForExistingSession(
     session: SleepSession,

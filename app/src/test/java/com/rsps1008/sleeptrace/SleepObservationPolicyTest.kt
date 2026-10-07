@@ -20,6 +20,17 @@ class SleepObservationPolicyTest {
             window, null, afterEnd, at(510), at(1440), waitForWakeEvidence = true))
     }
 
+    @Test fun `historical saver closure uses the report time rather than current time`() {
+        val historicalWake = listOf(sample(500, 10), sample(510, 15))
+        // The callback was processed days later, but both reports belong to this same night.
+        assertEquals(ObservationEnd(at(500), true), SleepObservationPolicy.resolve(
+            window, null, historicalWake, at(3_000), at(1_440),
+            waitForWakeEvidence = true, historicalWakeEvidence = true))
+        assertFalse(SleepObservationPolicy.resolve(
+            window, null, historicalWake, at(3_000), at(1_440),
+            waitForWakeEvidence = true).closed)
+    }
+
     @Test fun `late in-window high cannot reopen nominal window`() {
         assertEquals(ObservationEnd(at(480), true), resolve(listOf(sample(475, 90)), 485))
     }

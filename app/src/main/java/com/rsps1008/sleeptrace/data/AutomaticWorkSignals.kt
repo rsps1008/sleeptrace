@@ -37,31 +37,54 @@ object AutomaticWorkSignals {
     }
 
     @Synchronized
-    fun reconciliationStart(context: Context, retentionStartMillis: Long): Long {
+    fun reconciliationStart(
+        context: Context,
+        retentionStartMillis: Long,
+        earliestUncompletedWindowStart: Long
+    ): Long {
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val pending = prefs.getLong(PENDING_FROM, Long.MAX_VALUE)
-        val previousEnd = prefs.getLong(LAST_COMPLETED_WINDOW_END, 0L)
-        return when {
-            pending != Long.MAX_VALUE -> maxOf(retentionStartMillis, pending)
-            previousEnd > 0L -> maxOf(retentionStartMillis, previousEnd)
-            else -> retentionStartMillis
-        }
+        return reconciliationStartFor(
+            retentionStartMillis,
+            prefs.getLong(PENDING_FROM, Long.MAX_VALUE),
+            prefs.getLong(LAST_COMPLETED_WINDOW_END, 0L),
+            earliestUncompletedWindowStart
+        )
+    }
+
+    internal fun reconciliationStartFor(
+        retentionStartMillis: Long,
+        pendingFromMillis: Long,
+        previousEndMillis: Long,
+        earliestUncompletedWindowStart: Long
+    ): Long {
+        // An upgrade has no trustworthy per-window progress. Scan the retained raw evidence once
+        // instead of assuming that the first new callback represents the oldest unfinished night.
+        if (previousEndMillis == 0L) return retentionStartMillis
+        return maxOf(retentionStartMillis, minOf(
+            previousEndMillis,
+            earliestUncompletedWindowStart,
+            pendingFromMillis.takeUnless { it == Long.MAX_VALUE } ?: Long.MAX_VALUE
+        ))
     }
 
     fun lastCompletedWindowEnd(context: Context): Long = context.applicationContext
         .getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(LAST_COMPLETED_WINDOW_END, 0L)
 
     @Synchronized
-    fun markReconciled(context: Context, generation: Long, completedWindowEndMillis: Long? = null) {
+    fun markReconciled(context: Context, generation: Long, contiguousCompletedWindowEndMillis: Long? = null) {
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (prefs.getLong(GENERATION, 0L) == generation) {
             // Mark the reconcile rule upgrade complete only after all data transactions succeeded.
             prefs.edit().putLong(RECONCILED, generation)
                 .putInt(STAGING_VERSION, SleepStageEstimator.ALGORITHM_VERSION).apply()
-            val completed = completedWindowEndMillis ?: return
-            prefs.edit().putLong(LAST_COMPLETED_WINDOW_END,
+            val completed = contiguousCompletedWindowEndMillis ?: return
+            val pending = prefs.getLong(PENDING_FROM, Long.MAX_VALUE)
+            val editor = prefs.edit().putLong(LAST_COMPLETED_WINDOW_END,
                 maxOf(prefs.getLong(LAST_COMPLETED_WINDOW_END, 0L), completed))
-                .remove(PENDING_FROM).apply()
+            // Only clear raw-event work proven to be before the contiguous boundary. A newer
+            // callback belongs to an open/unknown night and must remain pending.
+            if (pending < completed) editor.remove(PENDING_FROM)
+            editor.apply()
         }
     }
 }

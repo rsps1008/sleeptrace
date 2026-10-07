@@ -16,11 +16,12 @@ object SleepObservationPolicy {
         samples: List<ClassificationSample>,
         now: Long,
         nextStart: Long,
-        waitForWakeEvidence: Boolean = false
+        waitForWakeEvidence: Boolean = false,
+        historicalWakeEvidence: Boolean = false
     ): ObservationEnd {
         if (previous?.closed == true) return previous
         val end = previous?.endMillis ?: window.endMillis
-        val ordered = samples.filter { it.timeMillis >= window.startMillis && it.timeMillis <= now }
+        val ordered = samples.filter { it.timeMillis >= window.startMillis && it.timeMillis < minOf(now + 1, nextStart) }
             .distinctBy { it.timeMillis }.sortedBy { it.timeMillis }
         // Morning only: a brief nocturnal awakening must not close the night's observation.
         val morning = window.startMillis + (window.endMillis - window.startMillis) / 2
@@ -36,7 +37,7 @@ object SleepObservationPolicy {
         val firstLow = low.firstOrNull()?.timeMillis
         val wakeConfirmed = low.size >= 2 && firstLow != null &&
             low.last().timeMillis - firstLow >= WAKE_CONFIRMATION_SPAN &&
-            now - low.last().timeMillis <= 10 * MINUTE &&
+            (historicalWakeEvidence || now - low.last().timeMillis <= 10 * MINUTE) &&
             (waitForWakeEvidence || ordered.any { it.confidence >= 80 && it.timeMillis <= firstLow - 30 * MINUTE })
         if (wakeConfirmed) return ObservationEnd(if (waitForWakeEvidence) firstLow!! else minOf(end, firstLow!!), true)
 

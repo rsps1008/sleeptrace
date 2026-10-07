@@ -29,7 +29,10 @@ internal class SleepObservationRepository(
                 (nominal.isFullDayForStartDate(date) && nominal.windowForStartDate(date, zone) == window)
         }.toSet()
         removals.forEach(records::remove)
-        val windows = nominal.windowsBetween(now - DAY, now + 1, zone).filter { window ->
+        // Saver mode may receive a valid wake classification days late. Re-evaluate every retained
+        // historical night individually; normal stages retain the narrow live-window behavior.
+        val lookback = if (waitForWakeEvidence) 14 * DAY else DAY
+        val windows = nominal.windowsBetween(now - lookback, now + 1, zone).filter { window ->
             val date = Instant.ofEpochMilli(window.startMillis).atZone(zone).toLocalDate()
             !nominal.isFullDayForStartDate(date) &&
                 now >= window.startMillis + (window.endMillis - window.startMillis) / 2 && records[window]?.closed != true
@@ -39,7 +42,9 @@ internal class SleepObservationRepository(
         windows.forEach { window ->
             val date = Instant.ofEpochMilli(window.startMillis).atZone(zone).toLocalDate()
             val nextStart = nominal.windowForStartDate(date.plusDays(1), zone).startMillis
-            val result = SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart, waitForWakeEvidence)
+            val historical = waitForWakeEvidence && now - window.endMillis > 10 * 60_000L
+            val result = SleepObservationPolicy.resolve(window, records[window], samples, now, nextStart,
+                waitForWakeEvidence, historical)
             if (result != records[window] && (result.closed || result.endMillis != window.endMillis || waitForWakeEvidence)) {
                 updates[window] = result
                 records[window] = result

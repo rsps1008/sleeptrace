@@ -60,8 +60,8 @@ class SleepStore(context: Context) {
 
     fun hasReconciliationDirty(): Boolean = AutomaticWorkSignals.isDirty(appContext)
 
-    fun markReconciled(generation: Long, completedWindowEndMillis: Long? = null) =
-        AutomaticWorkSignals.markReconciled(appContext, generation, completedWindowEndMillis)
+    fun markReconciled(generation: Long, contiguousCompletedWindowEndMillis: Long? = null) =
+        AutomaticWorkSignals.markReconciled(appContext, generation, contiguousCompletedWindowEndMillis)
 
     fun session(id: String, includeAwakeIntervals: Boolean = true): SleepSession? {
         migrateSessions()
